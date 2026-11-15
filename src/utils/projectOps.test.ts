@@ -130,4 +130,23 @@ test('buildExportManifest generates complete Vite + React + TS project files', (
   assert.ok(manifest['vite.config.ts'].includes('@tailwindcss/vite'));
   assert.ok(manifest['src/main.tsx'].includes("import App from './App'"));
   assert.ok(manifest['src/App.tsx']);
+  assert.ok(!manifest['package.json'].includes('"three"'));
 });
+
+test('buildExportManifest includes three and @types/three when Three.js is imported', () => {
+  const threeProject: MistProject = {
+    ...sampleProject,
+    files: [
+      {
+        id: 'f_three',
+        path: 'src/App.tsx',
+        language: 'tsx',
+        content: `import * as THREE from 'three';\nexport default function App() { void THREE.Scene; return <div />; }`,
+      },
+    ],
+  };
+  const manifest = buildExportManifest(threeProject);
+  assert.ok(manifest['package.json'].includes('"three"'));
+  assert.ok(manifest['package.json'].includes('"@types/three"'));
+});
+

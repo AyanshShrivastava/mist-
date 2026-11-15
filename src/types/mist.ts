@@ -29,15 +29,24 @@ export interface MistProject {
   updatedAt: string;
 }
 
-export type AiProviderId = 'gemini' | 'openrouter' | 'groq' | 'custom';
-export type PrimaryProviderId = 'gemini' | 'custom';
+export type AiProviderId = 'custom' | 'openrouter' | 'groq' | 'gemini';
+export type PrimaryProviderId = 'custom';
 export type ModelBilling = 'free' | 'paid';
 
 export interface AiProviderConfig {
   provider: AiProviderId;
+  name?: string;
   model: string;
   apiKey?: string;
   baseUrl?: string;
+}
+
+export interface AiStreamProgress {
+  phase: string;
+  activeFile?: string;
+  completedFiles: string[];
+  charsReceived: number;
+  startedAt: number;
 }
 
 export interface ProjectSyncRecord {

@@ -344,6 +344,10 @@ export function applyDeterministicRefinement(
 export function buildExportManifest(project: MistProject): Record<string, string> {
   const manifest: Record<string, string> = {};
 
+  const usesThreeJs = project.files.some((file) =>
+    /from\s+['"]three(?:\/|['"])|import\s+['"]three['"]/.test(file.content),
+  );
+
   manifest['package.json'] = JSON.stringify(
     {
       name: sanitizeSlug(project.name),
@@ -359,12 +363,14 @@ export function buildExportManifest(project: MistProject): Record<string, string
         react: '^19.0.1',
         'react-dom': '^19.0.1',
         'lucide-react': '^0.546.0',
+        ...(usesThreeJs ? { three: '^0.183.0' } : {}),
       },
       devDependencies: {
         '@tailwindcss/vite': '^4.1.0',
         '@vitejs/plugin-react': '^4.4.0',
         '@types/react': '^19.0.0',
         '@types/react-dom': '^19.0.0',
+        ...(usesThreeJs ? { '@types/three': '^0.183.0' } : {}),
         tailwindcss: '^4.1.0',
         typescript: '^5.8.0',
         vite: '^6.2.0',

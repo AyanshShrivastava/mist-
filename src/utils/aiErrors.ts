@@ -49,7 +49,7 @@ export function classifyModelError(params: {
       model,
       code: 'CREDITS_REQUIRED',
       title: `${model} requires paid credits`,
-      message: `${model} is a paid model and lacks sufficient credits.${affordNote} Switch to a Free model (e.g. Gemini 4 Hydrogen or a :free preset) or add provider credits.`,
+      message: `${model} is a paid model and lacks sufficient credits.${affordNote} Switch to a :free or Free Tier BYOK model, or add provider credits.`,
       updatedAt: now,
     };
   }

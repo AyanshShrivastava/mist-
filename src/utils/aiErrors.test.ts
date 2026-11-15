@@ -14,14 +14,14 @@ test('classifyModelError classifies OpenRouter 402 credits/max_tokens failure as
   assert.equal(incident.code, 'CREDITS_REQUIRED');
   assert.equal(incident.title, 'openai/gpt-4.1 requires paid credits');
   assert.ok(incident.message.includes('5000 tokens'));
-  assert.ok(incident.message.includes('Free model'));
+  assert.ok(incident.message.includes(':free'));
 });
 
 test('classifyModelError detects rate limit, outage, and auth errors accurately', () => {
   const rateLimit = classifyModelError({
     status: 429,
-    provider: 'gemini',
-    model: 'gemini-4-hydrogen',
+    provider: 'custom',
+    model: 'gemini-2.5-flash',
     message: 'Resource exhausted, retry in 12s',
   });
   assert.equal(rateLimit.code, 'RATE_LIMIT');

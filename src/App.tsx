@@ -3,15 +3,18 @@ import JSZip from 'jszip';
 import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
+  AiStreamProgress,
   DeploymentRecord,
   MistProject,
   ProjectFile,
-  ProjectSyncRecord,
   SelectedVisualElement,
   StudioSettings,
 } from './types/mist';
 import type { ModelHealthIncident } from './utils/aiErrors';
-import { normalizeProviderConfigToStudio } from './data/models';
+import {
+  DEFAULT_BYOK_CONFIG,
+  normalizeProviderConfigToStudio,
+} from './data/models';
 import {
   applyVisualPatchToFiles,
   buildExportManifest,
@@ -23,7 +26,6 @@ import {
   sanitizeSlug,
 } from './utils/projectOps';
 import {
-  checkFirestoreServerConnection,
   fetchUserProfilePreferences,
   signInWithGoogle,
   signOutUser,
@@ -33,13 +35,10 @@ import {
 import {
   clearKnownCloudProjects,
   deleteProjectFromFirestore,
-  getSyncRecordsSnapshot,
   listUserProjectsFromFirestore,
   saveDeploymentToFirestore,
   saveProjectToFirestore,
-  subscribeToSyncStatus,
   syncLocalProjectsToFirestore,
-  verifyUserProjectsInFirestore,
 } from './firebase/store';
 import HomeView from './components/HomeView';
 import WorkspaceView from './components/WorkspaceView';
@@ -84,7 +83,7 @@ function loadProviderConfig(): AiProviderConfig {
   } catch {
     // ignore
   }
-  return { provider: 'gemini', model: 'gemini-4-hydrogen' };
+  return { ...DEFAULT_BYOK_CONFIG };
 }
 
 function loadStudioSettings(): StudioSettings {
@@ -101,6 +100,63 @@ function loadStudioSettings(): StudioSettings {
     // ignore
   }
   return DEFAULT_STUDIO_SETTINGS;
+}
+
+interface SseStreamPayload {
+  type: 'phase' | 'file_start' | 'file_done' | 'progress' | 'complete' | 'error';
+  phase?: string;
+  path?: string;
+  activeFile?: string;
+  completedFiles?: string[];
+  chars?: number;
+  result?: Record<string, unknown>;
+  error?: string;
+  incident?: ModelHealthIncident;
+}
+
+async function consumeAiSseStream(
+  resp: Response,
+  onEvent: (ev: SseStreamPayload) => void,
+): Promise<Record<string, unknown>> {
+  if (!resp.body) {
+    throw new Error('Streaming response body unavailable.');
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let completedResult: Record<string, unknown> | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let nlIndex: number;
+    while ((nlIndex = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, nlIndex).trim();
+      buffer = buffer.slice(nlIndex + 1);
+      if (!line.startsWith('data:')) continue;
+      const rawJson = line.slice(5).trim();
+      if (!rawJson) continue;
+      const ev = JSON.parse(rawJson) as SseStreamPayload;
+      onEvent(ev);
+      if (ev.type === 'error') {
+        const err = new Error(ev.incident?.message || ev.error || 'AI request failed.') as Error & {
+          incident?: ModelHealthIncident;
+        };
+        err.incident = ev.incident;
+        throw err;
+      }
+      if (ev.type === 'complete' && ev.result) {
+        completedResult = ev.result;
+      }
+    }
+  }
+
+  if (!completedResult) {
+    throw new Error('AI stream ended before returning generated files.');
+  }
+  return completedResult;
 }
 
 export default function App() {
@@ -131,24 +187,14 @@ export default function App() {
   const [bundleError, setBundleError] = useState<string | null>(null);
   const [isBundling, setIsBundling] = useState(false);
 
-  // AI generation & refinement state
+  // AI generation & refinement streaming state
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [isRefining, setIsRefining] = useState(false);
   const [refineError, setRefineError] = useState<string | null>(null);
+  const [aiStreamProgress, setAiStreamProgress] = useState<AiStreamProgress | null>(null);
 
-  // Deploy, Cloud Sync & Modals state
-  const [isSavingCloud, setIsSavingCloud] = useState(false);
-  const [isSyncingAll, setIsSyncingAll] = useState(false);
-  const [isVerifyingCloud, setIsVerifyingCloud] = useState(false);
-  const [lastVerifiedAt, setLastVerifiedAt] = useState<string | null>(null);
-  const [lastSyncSummary, setLastSyncSummary] = useState<string | null>(null);
-  const [syncRecords, setSyncRecords] = useState<Record<string, ProjectSyncRecord>>(() =>
-    getSyncRecordsSnapshot(),
-  );
-  const [firestoreConnection, setFirestoreConnection] = useState<'checking' | 'online' | 'offline'>(
-    'checking',
-  );
+  // Deploy & Modals state
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
   const [publishedUrl, setPublishedUrl] = useState<string | null>(null);
@@ -163,17 +209,6 @@ export default function App() {
   const darkMode = studioSettings.theme === 'dark';
   const bundleTimerRef = useRef<number | null>(null);
   const cloudSaveTimerRef = useRef<number | null>(null);
-
-  // Subscribe to per-project Firestore sync records & check Firestore connection
-  useEffect(() => {
-    const unsubSync = subscribeToSyncStatus(() => {
-      setSyncRecords(getSyncRecordsSnapshot());
-    });
-    void checkFirestoreServerConnection().then((status) => {
-      setFirestoreConnection(status);
-    });
-    return unsubSync;
-  }, []);
 
   // Sync dark mode class on <html> + persist studioSettings
   useEffect(() => {
@@ -270,7 +305,7 @@ export default function App() {
     };
   }, [activeProject, activePage, runBundle]);
 
-  // Persist project updates to state + debounced cloud sync
+  // Persist project updates to state + background Firestore sync
   const updateActiveProject = useCallback(
     (updater: (prev: MistProject) => MistProject) => {
       if (!activeProjectId) return;
@@ -287,14 +322,10 @@ export default function App() {
         const snapshot = updatedProject;
         if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
         cloudSaveTimerRef.current = window.setTimeout(async () => {
-          setIsSavingCloud(true);
           try {
             await saveProjectToFirestore(snapshot);
-            setFirestoreConnection('online');
           } catch {
-            // Logged in firebase/client.ts
-          } finally {
-            setIsSavingCloud(false);
+            // Logged silently in firebase/client.ts
           }
         }, 700);
       }
@@ -302,32 +333,96 @@ export default function App() {
     [activeProjectId, user],
   );
 
-  // Core generation executor
+  // Core SSE streaming generation executor
   const executeGenerateWebsite = useCallback(
     async (prompt: string, currentUser: User) => {
+      const cfg = providerConfigRef.current;
+      if (!cfg.apiKey?.trim()) {
+        setGenerationError(
+          `Add your BYOK API key for ${cfg.name || 'your provider'} before generating.`,
+        );
+        setProvidersOpen(true);
+        return;
+      }
+
       setIsGenerating(true);
       setGenerationError(null);
+      const startedAt = Date.now();
+      setAiStreamProgress({
+        phase: `Connecting to ${cfg.name || 'BYOK Provider'} (${cfg.model})...`,
+        completedFiles: [],
+        charsReceived: 0,
+        startedAt,
+      });
+
       try {
-        const resp = await fetch('/api/ai/generate', {
+        const resp = await fetch('/api/ai/generate/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompt,
-            providerConfig: providerConfigRef.current,
+            providerConfig: cfg,
             enableAppAi: studioSettingsRef.current.enableAppAi,
           }),
         });
-        const data = (await resp.json()) as {
+
+        if (!resp.ok) {
+          throw new Error(`Generation failed (${resp.status}).`);
+        }
+
+        const data = (await consumeAiSseStream(resp, (ev) => {
+          setAiStreamProgress((prev) => {
+            const base = prev || {
+              phase: 'Generating...',
+              completedFiles: [],
+              charsReceived: 0,
+              startedAt,
+            };
+            if (ev.type === 'phase') {
+              return {
+                ...base,
+                phase: ev.phase || base.phase,
+                completedFiles: ev.completedFiles ?? base.completedFiles,
+                charsReceived: ev.chars ?? base.charsReceived,
+              };
+            }
+            if (ev.type === 'file_start') {
+              return {
+                ...base,
+                phase: `Writing ${ev.path || 'file'}...`,
+                activeFile: ev.path,
+                completedFiles: ev.completedFiles ?? base.completedFiles,
+                charsReceived: ev.chars ?? base.charsReceived,
+              };
+            }
+            if (ev.type === 'file_done' && ev.path) {
+              const nextCompleted = base.completedFiles.includes(ev.path)
+                ? base.completedFiles
+                : [...base.completedFiles, ev.path];
+              return {
+                ...base,
+                completedFiles: nextCompleted,
+              };
+            }
+            if (ev.type === 'progress') {
+              return {
+                ...base,
+                activeFile: ev.activeFile ?? base.activeFile,
+                completedFiles: ev.completedFiles ?? base.completedFiles,
+                charsReceived: ev.chars ?? base.charsReceived,
+              };
+            }
+            return base;
+          });
+        })) as {
           projectName?: string;
           description?: string;
           summary?: string;
           files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
-          error?: string;
-          incident?: ModelHealthIncident;
         };
-        if (!resp.ok || !Array.isArray(data.files) || data.files.length === 0) {
-          if (data.incident) setModelIncident(data.incident);
-          throw new Error(data.incident?.message || data.error || 'AI did not return project files.');
+
+        if (!Array.isArray(data.files) || data.files.length === 0) {
+          throw new Error('AI did not return project files.');
         }
 
         setModelIncident(null);
@@ -375,15 +470,18 @@ export default function App() {
           void saveProjectToFirestore(newProject, { isNew: true }).catch(() => {});
         }
       } catch (err) {
+        const withIncident = err as Error & { incident?: ModelHealthIncident };
+        if (withIncident.incident) setModelIncident(withIncident.incident);
         setGenerationError(err instanceof Error ? err.message : 'Failed to generate website.');
       } finally {
         setIsGenerating(false);
+        setAiStreamProgress(null);
       }
     },
     [],
   );
 
-  // Subscribe once to Auth state changes; hydrate settings & sync ALL user projects in Firestore
+  // Subscribe once to Auth state changes; hydrate settings & background cloud sync
   useEffect(() => {
     const unsub = subscribeToAuth(async (firebaseUser) => {
       setUser(firebaseUser);
@@ -391,7 +489,6 @@ export default function App() {
         setAuthPromptReason(null);
         try {
           const cloudPrefs = await fetchUserProfilePreferences(firebaseUser);
-          setFirestoreConnection('online');
           if (cloudPrefs) {
             if (cloudPrefs.preferredProvider || cloudPrefs.preferredModel) {
               setProviderConfig((prev) => {
@@ -435,7 +532,6 @@ export default function App() {
           const cloudIds = new Set(cloudProjects.map((p) => p.id));
           const localOnly = projectsRef.current.filter((p) => !cloudIds.has(p.id));
 
-          // Merge cloud + local projects and upload any unsynced projects to this user's Firestore account
           setProjects((local) => {
             const merged = new Map<string, MistProject>();
             for (const p of local) merged.set(p.id, p);
@@ -448,9 +544,8 @@ export default function App() {
           if (localOnly.length > 0) {
             await syncLocalProjectsToFirestore(localOnly, cloudIds);
           }
-          setLastVerifiedAt(new Date().toISOString());
         } catch {
-          // Errors logged in firebase/client.ts
+          // Errors logged silently in firebase/client.ts
         }
 
         if (pendingGeneratePromptRef.current) {
@@ -500,10 +595,26 @@ export default function App() {
     selectedElement?: SelectedVisualElement | null,
   ) => {
     if (!activeProject) return;
+    if (!providerConfig.apiKey?.trim()) {
+      setRefineError(
+        `Add your BYOK API key for ${providerConfig.name || 'your provider'} first.`,
+      );
+      setProvidersOpen(true);
+      return;
+    }
+
     setIsRefining(true);
     setRefineError(null);
+    const startedAt = Date.now();
+    setAiStreamProgress({
+      phase: `Analyzing codebase with ${providerConfig.name || 'BYOK'} (${providerConfig.model})...`,
+      completedFiles: [],
+      charsReceived: 0,
+      startedAt,
+    });
+
     try {
-      const resp = await fetch('/api/ai/refine', {
+      const resp = await fetch('/api/ai/refine/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -519,15 +630,61 @@ export default function App() {
           providerConfig,
         }),
       });
-      const data = (await resp.json()) as {
+      if (!resp.ok) {
+        throw new Error(`Refinement failed (${resp.status}).`);
+      }
+
+      const data = (await consumeAiSseStream(resp, (ev) => {
+        setAiStreamProgress((prev) => {
+          const base = prev || {
+            phase: 'Refining...',
+            completedFiles: [],
+            charsReceived: 0,
+            startedAt,
+          };
+          if (ev.type === 'phase') {
+            return {
+              ...base,
+              phase: ev.phase || base.phase,
+              completedFiles: ev.completedFiles ?? base.completedFiles,
+              charsReceived: ev.chars ?? base.charsReceived,
+            };
+          }
+          if (ev.type === 'file_start') {
+            return {
+              ...base,
+              phase: `Editing ${ev.path || 'file'}...`,
+              activeFile: ev.path,
+              completedFiles: ev.completedFiles ?? base.completedFiles,
+              charsReceived: ev.chars ?? base.charsReceived,
+            };
+          }
+          if (ev.type === 'file_done' && ev.path) {
+            const nextCompleted = base.completedFiles.includes(ev.path)
+              ? base.completedFiles
+              : [...base.completedFiles, ev.path];
+            return {
+              ...base,
+              completedFiles: nextCompleted,
+            };
+          }
+          if (ev.type === 'progress') {
+            return {
+              ...base,
+              activeFile: ev.activeFile ?? base.activeFile,
+              completedFiles: ev.completedFiles ?? base.completedFiles,
+              charsReceived: ev.chars ?? base.charsReceived,
+            };
+          }
+          return base;
+        });
+      })) as {
         summary?: string;
         files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
-        error?: string;
-        incident?: ModelHealthIncident;
       };
-      if (!resp.ok || !Array.isArray(data.files)) {
-        if (data.incident) setModelIncident(data.incident);
-        throw new Error(data.incident?.message || data.error || 'Refinement failed.');
+
+      if (!Array.isArray(data.files)) {
+        throw new Error('Refinement did not return updated files.');
       }
 
       setModelIncident(null);
@@ -550,9 +707,12 @@ export default function App() {
         ],
       }));
     } catch (err) {
+      const withIncident = err as Error & { incident?: ModelHealthIncident };
+      if (withIncident.incident) setModelIncident(withIncident.incident);
       setRefineError(err instanceof Error ? err.message : 'Failed to apply refinement.');
     } finally {
       setIsRefining(false);
+      setAiStreamProgress(null);
     }
   };
 
@@ -625,9 +785,20 @@ export default function App() {
     }
   };
 
+  const handleDeleteDeployment = async (slug: string) => {
+    try {
+      await fetch(`/api/deployments/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+      await refreshDeployments();
+    } catch {
+      // ignore
+    }
+  };
+
   const handleSaveProvider = (rawNext: AiProviderConfig) => {
     const next = normalizeProviderConfigToStudio(rawNext);
     setProviderConfig(next);
+    setGenerationError(null);
+    setRefineError(null);
     setModelIncident((prev) =>
       prev && (prev.provider !== next.provider || prev.model !== next.model) ? null : prev,
     );
@@ -659,57 +830,6 @@ export default function App() {
     });
   };
 
-  const handleSyncAllToCloud = async () => {
-    if (!user) return;
-    setIsSyncingAll(true);
-    setLastSyncSummary(null);
-    try {
-      for (const project of projects) {
-        await saveProjectToFirestore(project);
-      }
-      const verified = await verifyUserProjectsInFirestore(user.uid, projects);
-      setFirestoreConnection('online');
-      setLastVerifiedAt(verified.verifiedAt);
-      setLastSyncSummary(
-        `Synced & verified all ${projects.length} project${projects.length === 1 ? '' : 's'} in Firestore.`,
-      );
-    } catch (err) {
-      setLastSyncSummary(
-        err instanceof Error ? err.message : 'Failed to sync one or more projects.',
-      );
-    } finally {
-      setIsSyncingAll(false);
-    }
-  };
-
-  const handleVerifyFirestoreSync = async () => {
-    if (!user) {
-      const status = await checkFirestoreServerConnection();
-      setFirestoreConnection(status);
-      setLastVerifiedAt(new Date().toISOString());
-      return;
-    }
-    setIsVerifyingCloud(true);
-    setLastSyncSummary(null);
-    try {
-      const status = await checkFirestoreServerConnection();
-      setFirestoreConnection(status);
-      const res = await verifyUserProjectsInFirestore(user.uid, projectsRef.current);
-      setLastVerifiedAt(res.verifiedAt);
-      setLastSyncSummary(
-        res.allSynced
-          ? `Verified directly from Firestore server: ${projectsRef.current.length} of ${projectsRef.current.length} projects & file trees match.`
-          : `Verified against Firestore server: found ${res.cloudProjectCount} cloud projects; some local edits are pending sync.`,
-      );
-    } catch (err) {
-      setLastSyncSummary(
-        err instanceof Error ? err.message : 'Unable to verify Firestore server state.',
-      );
-    } finally {
-      setIsVerifyingCloud(false);
-    }
-  };
-
   const handleGoogleSignIn = async () => {
     setAuthError(null);
     try {
@@ -729,8 +849,6 @@ export default function App() {
       clearKnownCloudProjects();
       setProjects([]);
       setActiveProjectId(null);
-      setLastVerifiedAt(null);
-      setLastSyncSummary(null);
       try {
         localStorage.removeItem(STORAGE_PROJECTS_KEY);
       } catch {
@@ -752,18 +870,10 @@ export default function App() {
           providerConfig={providerConfig}
           studioSettings={studioSettings}
           modelIncident={modelIncident}
-          syncRecords={syncRecords}
-          firestoreConnection={firestoreConnection}
-          isSyncingAll={isSyncingAll}
-          isVerifyingCloud={isVerifyingCloud}
-          lastVerifiedAt={lastVerifiedAt}
-          lastSyncSummary={lastSyncSummary}
           onBack={() => setActivePage('home')}
           onSaveProvider={handleSaveProvider}
           onUpdateSettings={handleUpdateSettings}
           onIncident={setModelIncident}
-          onSyncAllToCloud={handleSyncAllToCloud}
-          onVerifyCloudSync={handleVerifyFirestoreSync}
           onSignIn={() => void handleGoogleSignIn()}
           onSignOut={() => void handleSignOut()}
         />
@@ -771,9 +881,7 @@ export default function App() {
         <WorkspaceView
           key={activeProject.id}
           project={activeProject}
-          user={user}
           providerConfig={providerConfig}
-          syncRecord={syncRecords[activeProject.id]}
           defaultViewMode={studioSettings.defaultViewMode}
           defaultViewport={studioSettings.defaultViewport}
           modelIncident={modelIncident}
@@ -781,8 +889,8 @@ export default function App() {
           bundleError={bundleError}
           isBundling={isBundling}
           isRefining={isRefining}
+          streamProgress={aiStreamProgress}
           refineError={refineError}
-          isSavingCloud={isSavingCloud}
           onBackHome={() => {
             setActiveProjectId(null);
             setPublishedUrl(null);
@@ -850,10 +958,8 @@ export default function App() {
           deployments={deployments}
           providerConfig={providerConfig}
           modelIncident={modelIncident}
-          syncRecords={syncRecords}
-          firestoreConnection={firestoreConnection}
-          isSyncingAll={isSyncingAll}
           isGenerating={isGenerating}
+          streamProgress={aiStreamProgress}
           generationError={generationError}
           darkMode={darkMode}
           enableAppAi={studioSettings.enableAppAi}
@@ -866,7 +972,6 @@ export default function App() {
           onOpenProject={(project) => setActiveProjectId(project.id)}
           onDuplicateProject={handleDuplicateProject}
           onDeleteProject={handleDeleteProject}
-          onSyncAllToCloud={() => void handleSyncAllToCloud()}
           onOpenProviders={() => setProvidersOpen(true)}
           onOpenSettings={() => setActivePage('settings')}
           onOpenDeployments={() => {
@@ -903,6 +1008,7 @@ export default function App() {
         isOpen={deploymentsListOpen}
         deployments={deployments}
         onClose={() => setDeploymentsListOpen(false)}
+        onDeleteDeployment={(slug) => void handleDeleteDeployment(slug)}
       />
 
       <AccountModal
@@ -922,7 +1028,9 @@ export default function App() {
         isOpen={voiceChatOpen}
         mode={activeProject ? 'refine' : 'create'}
         projectName={activeProject?.name}
+        providerConfig={providerConfig}
         onClose={() => setVoiceChatOpen(false)}
+        onOpenProviders={() => setProvidersOpen(true)}
         onIncident={(incident) => setModelIncident(incident)}
         onApplyPrompt={(synthesized) => {
           if (activeProject) {

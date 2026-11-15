@@ -5,18 +5,22 @@ import {
   CheckCircle2,
   Copy,
   ExternalLink,
+  Eye,
+  EyeOff,
   Globe,
   KeyRound,
+  Link2,
   Loader2,
   LogOut,
   ShieldAlert,
+  Tag,
+  Trash2,
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
-  AiProviderId,
   DeploymentRecord,
   MistProject,
 } from '../types/mist';
@@ -25,10 +29,7 @@ import { sanitizeSlug } from '../utils/projectOps';
 import {
   CUSTOM_GATEWAY_PRESETS,
   detectGatewayFromBaseUrl,
-  getDefaultModelForProvider,
   normalizeProviderConfigToStudio,
-  PRIMARY_STUDIO_PROVIDERS,
-  PROVIDER_CATALOG,
   type CustomGatewayId,
 } from '../data/models';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
@@ -52,17 +53,16 @@ export function ProvidersModal({
   onIncident,
 }: ProvidersModalProps) {
   const normalizedInit = normalizeProviderConfigToStudio(config);
-  const [provider, setProvider] = useState<'gemini' | 'custom'>(
-    normalizedInit.provider === 'gemini' ? 'gemini' : 'custom',
-  );
   const [gatewayId, setGatewayId] = useState<CustomGatewayId>(
     detectGatewayFromBaseUrl(normalizedInit.baseUrl),
   );
-  const [model, setModel] = useState(normalizedInit.model);
-  const [apiKey, setApiKey] = useState(normalizedInit.apiKey || '');
+  const [providerName, setProviderName] = useState(normalizedInit.name || 'OpenRouter');
   const [baseUrl, setBaseUrl] = useState(
     normalizedInit.baseUrl || CUSTOM_GATEWAY_PRESETS[0].baseUrl,
   );
+  const [apiKey, setApiKey] = useState(normalizedInit.apiKey || '');
+  const [showKey, setShowKey] = useState(false);
+  const [model, setModel] = useState(normalizedInit.model);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
     ok: boolean;
@@ -73,11 +73,12 @@ export function ProvidersModal({
   useEffect(() => {
     if (isOpen) {
       const norm = normalizeProviderConfigToStudio(config);
-      setProvider(norm.provider === 'gemini' ? 'gemini' : 'custom');
       setGatewayId(detectGatewayFromBaseUrl(norm.baseUrl));
-      setModel(norm.model);
+      setProviderName(norm.name || 'Custom Provider');
+      setBaseUrl(norm.baseUrl || '');
       setApiKey(norm.apiKey || '');
-      setBaseUrl(norm.baseUrl || CUSTOM_GATEWAY_PRESETS[0].baseUrl);
+      setModel(norm.model);
+      setShowKey(false);
       setTestResult(null);
     }
   }, [isOpen, config]);
@@ -85,37 +86,25 @@ export function ProvidersModal({
   const activeGateway =
     CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
 
-  const handleSelectProvider = (next: 'gemini' | 'custom') => {
-    setProvider(next);
-    if (next === 'gemini') {
-      setModel(getDefaultModelForProvider('gemini'));
-    } else {
-      const gw = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
-      if (!baseUrl.trim() && gw.baseUrl) setBaseUrl(gw.baseUrl);
-      if (!gw.models.some((m) => m.id === model)) {
-        setModel(gw.models[0].id);
-      }
-    }
-    setTestResult(null);
-  };
-
   const handleSelectGateway = (nextGwId: CustomGatewayId) => {
     setGatewayId(nextGwId);
     const gw = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === nextGwId)!;
+    setProviderName(gw.name);
     if (gw.baseUrl) {
       setBaseUrl(gw.baseUrl);
+    } else if (nextGwId === 'custom_url' && CUSTOM_GATEWAY_PRESETS.some((p) => p.baseUrl === baseUrl)) {
+      setBaseUrl('');
     }
     setModel(gw.models[0].id);
     setTestResult(null);
   };
 
   const buildDraftConfig = (): AiProviderConfig => ({
-    provider,
-    model:
-      model.trim() ||
-      (provider === 'gemini' ? getDefaultModelForProvider('gemini') : activeGateway.models[0].id),
-    apiKey: provider === 'gemini' ? undefined : apiKey.trim(),
-    baseUrl: provider === 'custom' ? baseUrl.trim() : undefined,
+    provider: 'custom',
+    name: providerName.trim() || activeGateway.name || 'Custom Provider',
+    baseUrl: baseUrl.trim(),
+    apiKey: apiKey.trim(),
+    model: model.trim() || activeGateway.models[0].id,
   });
 
   const handleTestConnection = async () => {
@@ -146,7 +135,7 @@ export function ProvidersModal({
         onIncident?.(null);
         setTestResult({
           ok: true,
-          message: `${draft.model} responded cleanly and is ready for generation.`,
+          message: `${draft.name} (${draft.model}) connected cleanly and is ready.`,
         });
       }
     } catch (err) {
@@ -176,28 +165,35 @@ export function ProvidersModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 18 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 14 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full sm:max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950 mist-scrollbar"
+            className="w-full sm:max-w-lg max-h-[92dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950 mist-scrollbar"
           >
             <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
               <div className="flex items-center gap-2.5">
-                <KeyRound className="h-4 w-4 text-blue-500" aria-hidden="true" />
-                <h2 id="providers-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
-                  AI Models &amp; Custom Endpoints
-                </h2>
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg mist-primary-gradient text-white shadow-sm">
+                  <KeyRound className="h-4 w-4" aria-hidden="true" />
+                </div>
+                <div>
+                  <h2 id="providers-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
+                    BYOK Models &amp; API Keys
+                  </h2>
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    Connect your own Name, Base URL, API Key &amp; Model
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
                 aria-label="Close providers modal"
                 onClick={onClose}
-                className="rounded-lg p-1 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-900 cursor-pointer"
+                className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-900 cursor-pointer"
               >
                 <X className="h-4 w-4" aria-hidden="true" />
               </button>
@@ -224,132 +220,139 @@ export function ProvidersModal({
               )}
 
               <div>
-                <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-2">Provider Mode</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {PRIMARY_STUDIO_PROVIDERS.map((pid) => (
+                <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Quick-Fill Gateway Preset
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                  {CUSTOM_GATEWAY_PRESETS.map((gw) => (
                     <button
-                      key={pid}
+                      key={gw.id}
                       type="button"
-                      onClick={() => handleSelectProvider(pid)}
-                      className={`min-h-[42px] rounded-xl border px-3 py-2 font-medium transition-all cursor-pointer ${
-                        provider === pid
-                          ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500/70 dark:bg-blue-500/15 dark:text-blue-300'
+                      onClick={() => handleSelectGateway(gw.id)}
+                      className={`min-h-[36px] rounded-xl border px-2.5 py-1.5 text-[11px] font-medium transition-all cursor-pointer ${
+                        gatewayId === gw.id
+                          ? 'border-blue-600 bg-gradient-to-r from-blue-500/15 to-indigo-500/15 text-blue-700 dark:border-blue-500/70 dark:text-blue-300'
                           : 'border-zinc-200 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900'
                       }`}
                     >
-                      {PROVIDER_CATALOG[pid].name}
+                      {gw.name}
                     </button>
                   ))}
                 </div>
               </div>
 
-              {provider === 'custom' && (
+              {/* Explicit Custom Name, Base URL, API Key fields */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                    Custom Endpoint Preset
-                  </p>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                    {CUSTOM_GATEWAY_PRESETS.map((gw) => (
-                      <button
-                        key={gw.id}
-                        type="button"
-                        onClick={() => handleSelectGateway(gw.id)}
-                        className={`min-h-[36px] rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition-colors cursor-pointer ${
-                          gatewayId === gw.id
-                            ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500/70 dark:bg-blue-500/15 dark:text-blue-300'
-                            : 'border-zinc-200 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900'
-                        }`}
-                      >
-                        {gw.name}
-                      </button>
-                    ))}
-                  </div>
+                  <label htmlFor="mist-provider-name" className="block font-medium text-zinc-700 dark:text-zinc-300">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Tag className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
+                      <span>Provider Name</span>
+                    </span>
+                  </label>
+                  <input
+                    id="mist-provider-name"
+                    type="text"
+                    required
+                    value={providerName}
+                    onChange={(e) => setProviderName(e.target.value)}
+                    placeholder="e.g. OpenRouter, Groq, My Endpoint"
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
+                  />
                 </div>
-              )}
+
+                <div>
+                  <label htmlFor="mist-custom-url" className="block font-medium text-zinc-700 dark:text-zinc-300">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Link2 className="h-3.5 w-3.5 text-indigo-500" aria-hidden="true" />
+                      <span>Base URL</span>
+                    </span>
+                  </label>
+                  <input
+                    id="mist-custom-url"
+                    type="url"
+                    required
+                    value={baseUrl}
+                    onChange={(e) => {
+                      setBaseUrl(e.target.value);
+                      setGatewayId(detectGatewayFromBaseUrl(e.target.value));
+                    }}
+                    placeholder="https://openrouter.ai/api/v1"
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
+                  />
+                </div>
+              </div>
 
               <div>
-                <div className="mb-2 flex items-center justify-between">
+                <label htmlFor="mist-byok-key" className="block font-medium text-zinc-700 dark:text-zinc-300">
+                  <span className="inline-flex items-center gap-1.5">
+                    <KeyRound className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+                    <span>API Key (BYOK)</span>
+                  </span>
+                </label>
+                <div className="relative mt-1.5">
+                  <input
+                    id="mist-byok-key"
+                    type={showKey ? 'text' : 'password'}
+                    required
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder={activeGateway.placeholder}
+                    className="w-full rounded-xl border border-zinc-200 bg-white pl-3 pr-10 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
+                  />
+                  <button
+                    type="button"
+                    aria-label={showKey ? 'Hide API key' : 'Show API key'}
+                    onClick={() => setShowKey((s) => !s)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
+                  >
+                    {showKey ? <EyeOff className="h-3.5 w-3.5" aria-hidden="true" /> : <Eye className="h-3.5 w-3.5" aria-hidden="true" />}
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                  100% BYOK: stored locally in your browser and sent directly to your configured Base URL.
+                </p>
+              </div>
+
+              <div>
+                <div className="mb-1.5 flex items-center justify-between">
                   <p className="font-medium text-zinc-700 dark:text-zinc-300">
-                    Select Model ({provider === 'gemini' ? PROVIDER_CATALOG.gemini.models.length : activeGateway.models.length} models · Free &amp; Paid labeled)
+                    Model ({activeGateway.models.length} presets · Free &amp; Paid labeled)
                   </p>
                 </div>
                 <ModelSelectorDropdown
-                  provider={provider}
+                  provider="custom"
                   value={model}
                   onChange={setModel}
-                  modelsOverride={provider === 'custom' ? activeGateway.models : undefined}
-                  gatewayLabel={provider === 'custom' ? activeGateway.name : 'Gemini'}
+                  modelsOverride={activeGateway.models}
+                  gatewayLabel={providerName.trim() || activeGateway.name}
                 />
               </div>
 
-              {provider === 'gemini' ? (
-                <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 text-[11px] leading-relaxed text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-400">
-                  <strong className="text-zinc-900 dark:text-zinc-200">Free</strong> Gemini models (like Gemini 4 Hydrogen, 3.1 Flash Lite, and 3.8 Live Voice) run on Mist&apos;s server key automatically. <strong className="text-zinc-900 dark:text-zinc-200">Paid</strong> Gemini models require a billing-enabled Gemini API key.
-                </div>
-              ) : (
-                <>
-                  {activeGateway.steps && (
-                    <div className="rounded-xl border border-zinc-200 bg-zinc-50/90 p-3.5 space-y-2 dark:border-zinc-800 dark:bg-zinc-900/70">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="font-semibold text-zinc-900 dark:text-zinc-100">
-                          {activeGateway.name} API Key Setup
-                        </p>
-                        {activeGateway.portalUrl && (
-                          <a
-                            href={activeGateway.portalUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 font-mono text-[11px] text-blue-600 hover:underline dark:text-blue-400"
-                          >
-                            <span>{activeGateway.portalLabel}</span>
-                            <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                          </a>
-                        )}
-                      </div>
-                      <ol className="list-decimal pl-4 space-y-1 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
-                        {activeGateway.steps.map((step, i) => (
-                          <li key={i}>{step}</li>
-                        ))}
-                      </ol>
-                    </div>
-                  )}
-
-                  <div>
-                    <label htmlFor="mist-custom-url" className="block font-medium text-zinc-700 dark:text-zinc-300">
-                      OpenAI-Compatible Base URL
-                    </label>
-                    <input
-                      id="mist-custom-url"
-                      type="url"
-                      required
-                      value={baseUrl}
-                      onChange={(e) => {
-                        setBaseUrl(e.target.value);
-                        setGatewayId(detectGatewayFromBaseUrl(e.target.value));
-                      }}
-                      placeholder="https://openrouter.ai/api/v1"
-                      className="mt-1.5 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
-                    />
-                  </div>
-
-                  <div>
-                    <label htmlFor="mist-byok-key" className="block font-medium text-zinc-700 dark:text-zinc-300">
-                      {activeGateway.name} API Key
-                    </label>
-                    <input
-                      id="mist-byok-key"
-                      type="password"
-                      required
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder={activeGateway.placeholder}
-                      className="mt-1.5 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
-                    />
-                    <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                      Stored locally in your browser and sent only when testing or generating with your custom endpoint.
+              {activeGateway.steps && (
+                <div className="rounded-xl border border-zinc-200 bg-zinc-50/90 p-3.5 space-y-2 dark:border-zinc-800 dark:bg-zinc-900/70">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold text-zinc-900 dark:text-zinc-100">
+                      How to get a {activeGateway.name} key
                     </p>
+                    {activeGateway.portalUrl && (
+                      <a
+                        href={activeGateway.portalUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 font-mono text-[11px] text-blue-600 hover:underline dark:text-blue-400"
+                      >
+                        <span>{activeGateway.portalLabel}</span>
+                        <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                      </a>
+                    )}
                   </div>
-                </>
+                  <ol className="list-decimal pl-4 space-y-1 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
+                    {activeGateway.steps.map((step, i) => (
+                      <li key={i}>{step}</li>
+                    ))}
+                  </ol>
+                </div>
               )}
 
               {testResult && (
@@ -378,9 +381,9 @@ export function ProvidersModal({
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 pt-4 dark:border-zinc-800">
                 <button
                   type="button"
-                  disabled={isTesting || (provider !== 'gemini' && !apiKey.trim())}
+                  disabled={isTesting || !apiKey.trim() || !baseUrl.trim()}
                   onClick={() => void handleTestConnection()}
-                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-zinc-200 px-3.5 py-2 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900 transition-colors cursor-pointer"
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-zinc-200 px-3.5 py-2 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900 transition-colors cursor-pointer"
                 >
                   {isTesting && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
                   <span>{isTesting ? 'Checking...' : 'Test Connection'}</span>
@@ -390,13 +393,13 @@ export function ProvidersModal({
                   <button
                     type="button"
                     onClick={onClose}
-                    className="min-h-[40px] rounded-lg border border-zinc-200 px-4 py-2 font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900 cursor-pointer"
+                    className="min-h-[40px] rounded-xl border border-zinc-200 px-4 py-2 font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900 cursor-pointer"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    className="min-h-[40px] rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 transition-colors cursor-pointer"
+                    className="min-h-[40px] rounded-xl mist-primary-gradient px-4 py-2 font-medium text-white shadow-sm transition-all cursor-pointer"
                   >
                     Save Provider
                   </button>
@@ -465,7 +468,7 @@ export function DeployModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 18 }}
@@ -476,9 +479,14 @@ export function DeployModal({
           >
             <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
-              <h2 id="deploy-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
-                Publish Website
-              </h2>
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg mist-primary-gradient text-white shadow-sm">
+                  <Globe className="h-4 w-4" aria-hidden="true" />
+                </div>
+                <h2 id="deploy-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
+                  Publish Website
+                </h2>
+              </div>
               <button
                 type="button"
                 aria-label="Close publish modal"
@@ -494,7 +502,7 @@ export function DeployModal({
                 <label htmlFor="mist-deploy-slug" className="block font-medium text-zinc-700 dark:text-zinc-300">
                   Deployment Slug
                 </label>
-                <div className="mt-1.5 flex items-center rounded-lg border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="mt-1.5 flex items-center rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
                   <span className="border-r border-zinc-200 px-3 py-2 font-mono text-zinc-500 dark:border-zinc-800">
                     /p/
                   </span>
@@ -509,7 +517,7 @@ export function DeployModal({
               </div>
 
               {deployError && (
-                <p role="alert" className="rounded-lg bg-red-50 p-2.5 text-red-700 dark:bg-red-950/60 dark:text-red-300">
+                <p role="alert" className="rounded-xl bg-red-50 p-2.5 text-red-700 dark:bg-red-950/60 dark:text-red-300">
                   {deployError}
                 </p>
               )}
@@ -548,7 +556,7 @@ export function DeployModal({
                 <button
                   type="button"
                   onClick={onClose}
-                  className="rounded-lg border border-zinc-200 px-4 py-2 font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900 cursor-pointer"
+                  className="rounded-xl border border-zinc-200 px-4 py-2 font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900 cursor-pointer"
                 >
                   Close
                 </button>
@@ -556,7 +564,7 @@ export function DeployModal({
                   type="button"
                   disabled={isDeploying}
                   onClick={() => onDeploy(sanitizeSlug(slug))}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-xl mist-primary-gradient px-4 py-2 font-medium text-white shadow-sm disabled:opacity-50 transition-all cursor-pointer"
                 >
                   <Globe className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>{isDeploying ? 'Publishing...' : 'Publish Live'}</span>
@@ -574,12 +582,14 @@ interface DeploymentsModalProps {
   isOpen: boolean;
   deployments: DeploymentRecord[];
   onClose: () => void;
+  onDeleteDeployment?: (slug: string) => void;
 }
 
 export function DeploymentsModal({
   isOpen,
   deployments,
   onClose,
+  onDeleteDeployment,
 }: DeploymentsModalProps) {
   return (
     <AnimatePresence>
@@ -592,7 +602,7 @@ export function DeploymentsModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 18 }}
@@ -603,9 +613,14 @@ export function DeploymentsModal({
           >
             <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
-              <h2 id="deployments-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
-                Published Websites
-              </h2>
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg mist-primary-gradient text-white shadow-sm">
+                  <Globe className="h-4 w-4" aria-hidden="true" />
+                </div>
+                <h2 id="deployments-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
+                  Published Websites
+                </h2>
+              </div>
               <button
                 type="button"
                 aria-label="Close deployments modal"
@@ -619,25 +634,37 @@ export function DeploymentsModal({
             <div className="max-h-96 overflow-y-auto p-5 mist-scrollbar">
               {deployments.length === 0 ? (
                 <p className="text-center text-xs text-zinc-500 py-8">
-                  No deployments published yet. Open any project and click Deploy.
+                  No websites published yet. Open any project you generate and click Deploy.
                 </p>
               ) : (
                 <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
                   {deployments.map((dep) => (
-                    <div key={dep.slug} className="flex items-center justify-between py-3 text-xs">
-                      <div className="min-w-0 pr-3">
+                    <div key={dep.slug} className="flex items-center justify-between gap-3 py-3 text-xs">
+                      <div className="min-w-0 flex-1">
                         <p className="font-semibold text-zinc-900 dark:text-white truncate">{dep.title}</p>
                         <p className="font-mono text-[11px] text-zinc-500 truncate">{dep.url}</p>
                       </div>
-                      <a
-                        href={dep.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-800 dark:text-blue-400 dark:hover:bg-zinc-900 shrink-0"
-                      >
-                        <span>Visit</span>
-                        <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                      </a>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <a
+                          href={dep.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-800 dark:text-blue-400 dark:hover:bg-zinc-900"
+                        >
+                          <span>Visit</span>
+                          <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                        </a>
+                        {onDeleteDeployment && (
+                          <button
+                            type="button"
+                            aria-label={`Unpublish ${dep.title}`}
+                            onClick={() => onDeleteDeployment(dep.slug)}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-200 text-zinc-500 hover:border-red-200 hover:bg-red-50 hover:text-red-600 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-red-900 dark:hover:bg-red-950/60 dark:hover:text-red-400 cursor-pointer"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -680,7 +707,7 @@ export function AccountModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 18 }}
@@ -746,12 +773,12 @@ export function AccountModal({
                     </div>
                   </div>
                   <p className="text-zinc-500 dark:text-zinc-400">
-                    Your websites and live deployments are synced to your cloud workspace.
+                    Your websites and live deployments are saved across sessions and devices.
                   </p>
                   <button
                     type="button"
                     onClick={onSignOut}
-                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-zinc-200 px-4 py-2 font-medium text-zinc-800 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-900 transition-colors cursor-pointer"
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-zinc-200 px-4 py-2 font-medium text-zinc-800 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-900 transition-colors cursor-pointer"
                   >
                     <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>Sign Out</span>
@@ -765,7 +792,7 @@ export function AccountModal({
                   <button
                     type="button"
                     onClick={onSignIn}
-                    className="w-full rounded-lg bg-blue-600 px-4 py-2.5 font-medium text-white hover:bg-blue-700 transition-colors cursor-pointer"
+                    className="w-full rounded-xl mist-primary-gradient px-4 py-2.5 font-medium text-white shadow-sm transition-all cursor-pointer"
                   >
                     Continue with Google
                   </button>

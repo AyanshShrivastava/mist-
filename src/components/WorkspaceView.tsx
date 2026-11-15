@@ -3,8 +3,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   Check,
-  Cloud,
-  CloudOff,
+  CheckCircle2,
   Code2,
   Columns2,
   Copy,
@@ -32,11 +31,10 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
+  AiStreamProgress,
   MistProject,
-  ProjectSyncRecord,
   SelectedVisualElement,
   ViewportSize,
   VisualElementPatch,
@@ -46,13 +44,11 @@ import type { ModelHealthIncident } from '../utils/aiErrors';
 import { detectGatewayFromBaseUrl, findModelEntry } from '../data/models';
 import CodeEditor from './CodeEditor';
 import VisualInspector from './VisualInspector';
-import MistLogo from './MistLogo';
+import MistLogo, { MistMark } from './MistLogo';
 
 interface WorkspaceViewProps {
   project: MistProject;
-  user: User | null;
   providerConfig: AiProviderConfig;
-  syncRecord?: ProjectSyncRecord;
   defaultViewMode?: WorkspaceViewMode;
   defaultViewport?: ViewportSize;
   modelIncident: ModelHealthIncident | null;
@@ -60,8 +56,8 @@ interface WorkspaceViewProps {
   bundleError: string | null;
   isBundling: boolean;
   isRefining: boolean;
+  streamProgress: AiStreamProgress | null;
   refineError: string | null;
-  isSavingCloud: boolean;
   onBackHome: () => void;
   onUpdateProjectName: (name: string) => void;
   onChangeFileContent: (path: string, content: string) => void;
@@ -80,16 +76,14 @@ interface WorkspaceViewProps {
 }
 
 const REFINEMENT_SUGGESTIONS = [
-  'Make the navbar smaller',
+  'Change theme colors & polish animations',
   'Add a live AI assistant using POST /api/app-ai',
-  'Polish mobile responsiveness & spacing',
+  'Improve mobile touch controls & layout',
 ];
 
 export default function WorkspaceView({
   project,
-  user,
   providerConfig,
-  syncRecord,
   defaultViewMode = 'preview',
   defaultViewport = 'desktop',
   modelIncident,
@@ -97,8 +91,8 @@ export default function WorkspaceView({
   bundleError,
   isBundling,
   isRefining,
+  streamProgress,
   refineError,
-  isSavingCloud,
   onBackHome,
   onUpdateProjectName,
   onChangeFileContent,
@@ -124,25 +118,21 @@ export default function WorkspaceView({
     providerConfig.model,
     providerConfig.baseUrl,
   );
+  const detectedGw = detectGatewayFromBaseUrl(providerConfig.baseUrl);
   const shortProviderLabel =
-    providerConfig.provider === 'gemini'
-      ? 'Gemini'
-      : detectGatewayFromBaseUrl(providerConfig.baseUrl) === 'openrouter'
-        ? 'OpenRouter'
-        : detectGatewayFromBaseUrl(providerConfig.baseUrl) === 'groq'
-          ? 'Groq'
-          : detectGatewayFromBaseUrl(providerConfig.baseUrl) === 'nvidia'
+    providerConfig.name?.trim() ||
+    (detectedGw === 'openrouter'
+      ? 'OpenRouter'
+      : detectedGw === 'groq'
+        ? 'Groq'
+        : detectedGw === 'gemini_byok'
+          ? 'Gemini'
+          : detectedGw === 'nvidia'
             ? 'NVIDIA'
-            : 'Custom';
-  const syncStateLabel = !user
-    ? 'Local only'
-    : isSavingCloud || syncRecord?.state === 'syncing'
-      ? 'Syncing...'
-      : syncRecord?.state === 'error'
-        ? 'Sync error'
-        : syncRecord?.state === 'synced'
-          ? 'Synced'
-          : 'Pending sync';
+            : detectedGw === 'openai'
+              ? 'OpenAI'
+              : 'Custom');
+
   const [activeFilePath, setActiveFilePath] = useState<string>(
     project.files.find((f) => f.path === 'src/App.tsx')?.path || project.files[0]?.path || 'src/App.tsx',
   );
@@ -162,8 +152,22 @@ export default function WorkspaceView({
   );
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
+  const [refineElapsed, setRefineElapsed] = useState(0);
 
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  useEffect(() => {
+    if (!isRefining || !streamProgress) {
+      setRefineElapsed(0);
+      return;
+    }
+    const update = () => {
+      setRefineElapsed(Math.max(1, Math.floor((Date.now() - streamProgress.startedAt) / 1000)));
+    };
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [isRefining, streamProgress]);
 
   useEffect(() => {
     if (!project.files.some((f) => f.path === activeFilePath)) {
@@ -185,24 +189,26 @@ export default function WorkspaceView({
     return () => window.removeEventListener('message', handler);
   }, []);
 
-  useEffect(() => {
+  const syncBridgeToIframe = () => {
     const win = iframeRef.current?.contentWindow;
     if (win) {
       win.postMessage(
         { type: 'MIST_TOGGLE_INSPECTOR', enabled: viewMode === 'visual' },
         '*',
       );
+      win.postMessage(
+        { type: 'MIST_SET_BYOK', payload: providerConfig },
+        '*',
+      );
     }
-  }, [viewMode, bundledHtml]);
+  };
+
+  useEffect(() => {
+    syncBridgeToIframe();
+  });
 
   const handleIframeLoad = () => {
-    const win = iframeRef.current?.contentWindow;
-    if (win) {
-      win.postMessage(
-        { type: 'MIST_TOGGLE_INSPECTOR', enabled: viewMode === 'visual' },
-        '*',
-      );
-    }
+    syncBridgeToIframe();
   };
 
   const handleLivePreviewPatch = (patch: VisualElementPatch) => {
@@ -282,7 +288,7 @@ export default function WorkspaceView({
           <button
             type="button"
             onClick={onOpenDeploy}
-            className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-blue-600 px-3 text-xs font-medium text-white hover:bg-blue-700 transition-colors whitespace-nowrap cursor-pointer"
+            className="inline-flex h-10 items-center gap-1.5 rounded-xl mist-primary-gradient px-3 text-xs font-medium text-white shadow-sm transition-all whitespace-nowrap cursor-pointer"
           >
             <Globe className="h-3.5 w-3.5" aria-hidden="true" />
             <span>{project.isPublished ? 'Live' : 'Deploy'}</span>
@@ -323,40 +329,12 @@ export default function WorkspaceView({
               setTitleSavedToast(true);
               setTimeout(() => setTitleSavedToast(false), 1200);
             }}
-            className="min-w-[72px] max-w-[168px] flex-1 truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 font-display text-xs sm:text-sm font-semibold text-zinc-950 hover:border-zinc-200 focus:border-blue-500 focus:bg-white focus:outline-none dark:text-white dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
+            className="min-w-[72px] max-w-[190px] flex-1 truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 font-display text-xs sm:text-sm font-semibold text-zinc-950 hover:border-zinc-200 focus:border-blue-500 focus:bg-white focus:outline-none dark:text-white dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
           />
 
-          {titleSavedToast ? (
+          {titleSavedToast && (
             <span className="hidden xl:inline text-[11px] text-emerald-600 dark:text-emerald-400 whitespace-nowrap shrink-0">
               Saved
-            </span>
-          ) : (
-            <span
-              title={
-                user
-                  ? `Firestore sync status: ${syncStateLabel}${syncRecord?.lastSyncedAt ? ` (${new Date(syncRecord.lastSyncedAt).toLocaleTimeString()})` : ''}`
-                  : 'Sign in with Google to sync this project to Firestore'
-              }
-              className={`hidden xl:inline-flex items-center gap-1 text-[11px] whitespace-nowrap shrink-0 ${
-                !user
-                  ? 'text-zinc-400'
-                  : isSavingCloud || syncRecord?.state === 'syncing'
-                    ? 'text-blue-500'
-                    : syncRecord?.state === 'error'
-                      ? 'text-red-500'
-                      : syncRecord?.state === 'synced'
-                        ? 'text-emerald-600 dark:text-emerald-400'
-                        : 'text-amber-600 dark:text-amber-400'
-              }`}
-            >
-              {!user ? (
-                <CloudOff className="h-3 w-3 shrink-0" aria-hidden="true" />
-              ) : isSavingCloud || syncRecord?.state === 'syncing' ? (
-                <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
-              ) : (
-                <Cloud className="h-3 w-3 shrink-0" aria-hidden="true" />
-              )}
-              <span>{syncStateLabel}</span>
             </span>
           )}
         </div>
@@ -479,7 +457,7 @@ export default function WorkspaceView({
           <button
             type="button"
             onClick={onOpenDeploy}
-            className="inline-flex h-9 sm:h-8 items-center gap-1.5 rounded-lg bg-blue-600 px-2.5 sm:px-3.5 text-xs font-medium text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex h-9 sm:h-8 items-center gap-1.5 rounded-lg mist-primary-gradient px-2.5 sm:px-3.5 text-xs font-medium text-white shadow-sm transition-all whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Globe className="h-3.5 w-3.5" aria-hidden="true" />
             <span>{project.isPublished ? 'Published' : 'Deploy'}</span>
@@ -505,9 +483,9 @@ export default function WorkspaceView({
         </div>
       </header>
 
-      {/* Main Body: Mobile switches clean single panes; Desktop (>= md) shows default 3-Pane IDE */}
+      {/* Main Body */}
       <div className="relative flex flex-1 min-h-0 overflow-hidden pb-16 md:pb-0">
-        {/* Left Sidebar (Full-screen AI/Files pane on mobile when selected, fixed 320px rail on desktop) */}
+        {/* Left Sidebar */}
         <aside
           className={`${
             mobilePane === 'ai' ? 'flex w-full' : 'hidden'
@@ -564,6 +542,43 @@ export default function WorkspaceView({
                     )}
                   </motion.div>
                 ))}
+
+                {/* Live SSE Streaming Refinement Card */}
+                {isRefining && streamProgress && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    aria-live="polite"
+                    className="rounded-xl border border-blue-500/35 bg-gradient-to-br from-blue-50/90 to-indigo-50/60 p-3 text-xs dark:border-blue-500/30 dark:from-blue-950/35 dark:to-indigo-950/25"
+                  >
+                    <div className="relative h-1 w-full overflow-hidden rounded-full bg-blue-500/15 mb-2.5">
+                      <div className="mist-shimmer-bar absolute inset-y-0 left-0 w-1/2 rounded-full mist-primary-gradient" />
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 font-semibold text-zinc-950 dark:text-white truncate">
+                        <MistMark className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400 animate-pulse shrink-0" title="Refining" />
+                        <span className="truncate">
+                          {streamProgress.activeFile
+                            ? `Editing ${streamProgress.activeFile}...`
+                            : streamProgress.phase}
+                        </span>
+                      </span>
+                      <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 tabular-nums shrink-0">
+                        {refineElapsed}s
+                      </span>
+                    </div>
+                    {streamProgress.completedFiles.length > 0 && (
+                      <div className="mt-2 space-y-1 font-mono text-[11px]">
+                        {streamProgress.completedFiles.map((filePath) => (
+                          <div key={filePath} className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
+                            <CheckCircle2 className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            <span className="truncate">{filePath}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </motion.div>
+                )}
               </div>
 
               {modelIncident && (
@@ -644,7 +659,7 @@ export default function WorkspaceView({
                       setRefineInput(e.target.value);
                       if (refineValidationError) setRefineValidationError(null);
                     }}
-                    placeholder='e.g. "Make the navbar smaller"'
+                    placeholder='Describe updates, color changes, or bug fixes...'
                     className="flex-1 resize-none bg-transparent text-xs text-zinc-950 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100"
                   />
                   <button
@@ -659,9 +674,13 @@ export default function WorkspaceView({
                     type="submit"
                     disabled={isRefining}
                     aria-label="Apply AI refinement"
-                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors cursor-pointer"
+                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg mist-primary-gradient text-white shadow-sm disabled:opacity-50 transition-all cursor-pointer"
                   >
-                    <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                    {isRefining ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                    )}
                   </button>
                 </div>
               </form>
@@ -1067,7 +1086,7 @@ export default function WorkspaceView({
         </AnimatePresence>
       </div>
 
-      {/* Fixed Mobile Bottom Tab Bar (< md thumb navigation) */}
+      {/* Fixed Mobile Bottom Tab Bar */}
       <nav
         aria-label="Mobile workspace navigation"
         className="fixed bottom-0 inset-x-0 z-30 grid h-16 grid-cols-4 border-t border-zinc-200 bg-white/95 backdrop-blur-lg md:hidden dark:border-zinc-800 dark:bg-[#0F0F12]/95"

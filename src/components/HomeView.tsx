@@ -1,23 +1,25 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
+  Box,
   CheckCircle2,
   ChevronDown,
-  Cloud,
-  CloudOff,
+  Code2,
   Copy,
   Cpu,
+  FileCode2,
   FolderOpen,
   Globe,
+  KeyRound,
   Loader2,
   Menu,
   Mic,
   Moon,
-  RefreshCw,
   Search,
   Settings,
   Sun,
+  Terminal,
   Trash2,
   User as UserIcon,
   X,
@@ -26,18 +28,15 @@ import { AnimatePresence, motion } from 'motion/react';
 import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
+  AiStreamProgress,
   DeploymentRecord,
   MistProject,
-  ProjectSyncRecord,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
 import {
   CUSTOM_GATEWAY_PRESETS,
   detectGatewayFromBaseUrl,
   findModelEntry,
-  getDefaultModelForProvider,
-  PRIMARY_STUDIO_PROVIDERS,
-  PROVIDER_CATALOG,
   type CustomGatewayId,
 } from '../data/models';
 import MistLogo, { MistMark } from './MistLogo';
@@ -49,10 +48,8 @@ interface HomeViewProps {
   deployments: DeploymentRecord[];
   providerConfig: AiProviderConfig;
   modelIncident: ModelHealthIncident | null;
-  syncRecords: Record<string, ProjectSyncRecord>;
-  firestoreConnection: 'checking' | 'online' | 'offline';
-  isSyncingAll?: boolean;
   isGenerating: boolean;
+  streamProgress: AiStreamProgress | null;
   generationError: string | null;
   darkMode: boolean;
   enableAppAi: boolean;
@@ -63,7 +60,6 @@ interface HomeViewProps {
   onOpenProject: (project: MistProject) => void;
   onDuplicateProject: (project: MistProject) => void;
   onDeleteProject: (projectId: string) => void;
-  onSyncAllToCloud?: () => void;
   onOpenProviders: () => void;
   onOpenSettings: () => void;
   onOpenDeployments: () => void;
@@ -72,24 +68,28 @@ interface HomeViewProps {
 
 const QUICK_PROMPTS = [
   {
+    label: 'Subway Surfers 2D',
+    icon: Box,
+    prompt:
+      'Interactive Subway Surfers 2D endless runner game on an HTML5 canvas with 3 train lanes, coin pickups, oncoming trains & barriers, smooth keyboard/swipe lane switching, jump & slide, combo score HUD, and working Play Game & Restart buttons.',
+  },
+  {
+    label: '3D Three.js Showcase',
+    icon: Code2,
+    prompt:
+      'Interactive Three.js 3D architectural product studio with OrbitControls, real-time PBR materials, lighting presets, camera angles, and clean HUD overlay.',
+  },
+  {
     label: 'AI Writing Workspace',
+    icon: Terminal,
     prompt:
       'Editorial AI writing & editing web app with a clean split workspace, tone controls, and a live AI assistant powered by POST /api/app-ai.',
   },
   {
-    label: 'Specialty Coffee Roastery',
+    label: 'Coffee Roastery',
+    icon: Globe,
     prompt:
       'Minimalist Tokyo specialty coffee roastery website with single-origin menu, brew ratio calculator, and bar reservation.',
-  },
-  {
-    label: 'Architecture Practice',
-    prompt:
-      'Nordic architecture firm portfolio with selected works table, studio philosophy, and inquiry form.',
-  },
-  {
-    label: 'SaaS Operations Platform',
-    prompt:
-      'Clean B2B financial operations dashboard marketing site with interactive pricing matrix, security overview, and a live AI Q&A helper.',
   },
 ];
 
@@ -99,10 +99,8 @@ export default function HomeView({
   deployments,
   providerConfig,
   modelIncident,
-  syncRecords,
-  firestoreConnection,
-  isSyncingAll = false,
   isGenerating,
+  streamProgress,
   generationError,
   darkMode,
   enableAppAi,
@@ -113,7 +111,6 @@ export default function HomeView({
   onOpenProject,
   onDuplicateProject,
   onDeleteProject,
-  onSyncAllToCloud,
   onOpenProviders,
   onOpenSettings,
   onOpenDeployments,
@@ -125,7 +122,21 @@ export default function HomeView({
   const [projectFilter, setProjectFilter] = useState<'all' | 'published' | 'draft'>('all');
   const [quickModelOpen, setQuickModelOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!isGenerating || !streamProgress) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const update = () => {
+      setElapsedSeconds(Math.max(1, Math.floor((Date.now() - streamProgress.startedAt) / 1000)));
+    };
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [isGenerating, streamProgress]);
 
   const filteredProjects = useMemo(() => {
     return projects.filter((proj) => {
@@ -153,17 +164,7 @@ export default function HomeView({
     onGenerate(promptInput.trim());
   };
 
-  const isGeminiMode = providerConfig.provider === 'gemini';
-  const activeGatewayId: CustomGatewayId = isGeminiMode
-    ? 'openrouter'
-    : detectGatewayFromBaseUrl(
-        providerConfig.baseUrl ||
-          (providerConfig.provider === 'openrouter'
-            ? 'https://openrouter.ai/api/v1'
-            : providerConfig.provider === 'groq'
-              ? 'https://api.groq.com/openai/v1'
-              : ''),
-      );
+  const activeGatewayId: CustomGatewayId = detectGatewayFromBaseUrl(providerConfig.baseUrl);
   const activeGateway =
     CUSTOM_GATEWAY_PRESETS.find((g) => g.id === activeGatewayId) || CUSTOM_GATEWAY_PRESETS[0];
   const currentModelMeta = findModelEntry(
@@ -171,19 +172,9 @@ export default function HomeView({
     providerConfig.model,
     providerConfig.baseUrl,
   );
-  const providerLabel = isGeminiMode
-    ? `Gemini · ${currentModelMeta?.label || providerConfig.model}`
-    : `${activeGateway.name} · ${currentModelMeta?.label || providerConfig.model}`;
-
-  const syncedCount = user
-    ? projects.filter((p) => syncRecords[p.id]?.state === 'synced').length
-    : 0;
-  const allProjectsSynced = Boolean(user && projects.length > 0 && syncedCount === projects.length);
-
-  const activeIncidentMatchesCurrent =
-    modelIncident &&
-    modelIncident.provider === providerConfig.provider &&
-    modelIncident.model === providerConfig.model;
+  const providerDisplayName = providerConfig.name?.trim() || activeGateway.name;
+  const hasApiKey = Boolean(providerConfig.apiKey?.trim());
+  const providerLabel = `${providerDisplayName} · ${currentModelMeta?.label || providerConfig.model}`;
 
   return (
     <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] flex flex-col">
@@ -215,16 +206,18 @@ export default function HomeView({
             <button
               type="button"
               onClick={onOpenProviders}
-              className="hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              Models &amp; Keys
+              <KeyRound className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
+              <span>Models &amp; Keys</span>
             </button>
             <button
               type="button"
               onClick={onOpenDeployments}
-              className="hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              Deployments
+              <Globe className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" aria-hidden="true" />
+              <span>Deployments</span>
             </button>
             <button
               type="button"
@@ -311,7 +304,7 @@ export default function HomeView({
                   }}
                   className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50/80 px-3.5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer"
                 >
-                  <Cpu className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
+                  <KeyRound className="h-3.5 w-3.5 text-indigo-500" aria-hidden="true" />
                   <span>Models &amp; Keys</span>
                 </button>
                 <button
@@ -322,7 +315,7 @@ export default function HomeView({
                   }}
                   className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50/80 px-3.5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer"
                 >
-                  <Globe className="h-3.5 w-3.5" aria-hidden="true" />
+                  <Globe className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
                   <span>Deployments</span>
                 </button>
                 <button
@@ -331,7 +324,7 @@ export default function HomeView({
                     setMobileMenuOpen(false);
                     onOpenSettings();
                   }}
-                  className="col-span-2 flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-zinc-950 text-white dark:bg-white dark:text-zinc-950 cursor-pointer"
+                  className="col-span-2 flex min-h-[44px] items-center justify-center gap-2 rounded-xl mist-primary-gradient text-white cursor-pointer"
                 >
                   <Settings className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>Open Studio Settings</span>
@@ -344,15 +337,19 @@ export default function HomeView({
 
       <main id="top" className="flex-1">
         {/* Hero Prompt Composer */}
-        <section className="mx-auto max-w-4xl px-4 sm:px-6 pt-6 pb-9 sm:pt-16 sm:pb-14 lg:pt-24 lg:pb-24">
+        <section className="mx-auto max-w-4xl px-4 sm:px-6 pt-6 pb-9 sm:pt-14 sm:pb-14 lg:pt-20 lg:pb-20">
           <motion.div
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
             className="text-center sm:text-left"
           >
-            <p className="text-xs font-medium tracking-wide text-blue-600 dark:text-blue-400">
-              Prompt &rarr; Create &rarr; Deploy
+            <p className="inline-flex items-center gap-2 text-xs font-medium tracking-wide text-blue-600 dark:text-blue-400">
+              <span>Prompt</span>
+              <span aria-hidden="true">&rarr;</span>
+              <span>Create</span>
+              <span aria-hidden="true">&rarr;</span>
+              <span>Deploy</span>
             </p>
             <h1 className="mt-2.5 sm:mt-3 font-display text-[30px] sm:text-5xl lg:text-[56px] font-semibold tracking-tight leading-[1.08] text-zinc-950 dark:text-white [text-wrap:balance]">
               Mist —{' '}
@@ -361,8 +358,28 @@ export default function HomeView({
               </span>
             </h1>
             <p className="mt-3 sm:mt-4 text-sm sm:text-lg leading-relaxed text-zinc-600 dark:text-zinc-400 max-w-2xl mx-auto sm:mx-0">
-              Describe a website or talk through your idea live. Mist builds multi-file React, TypeScript, and Tailwind CSS sites — including live AI features powered by <code className="font-mono text-xs text-zinc-800 dark:text-zinc-200 whitespace-nowrap">/api/app-ai</code>.
+              Build React apps, interactive 2D Canvas games, Three.js 3D experiences, and AI-enabled tools on your own BYOK model and API key.
             </p>
+
+            {/* Clean Capability Markers (Unboxed typography + functional symbols) */}
+            <div className="mt-4 flex flex-wrap items-center justify-center sm:justify-start gap-x-5 gap-y-2 text-xs text-zinc-500 dark:text-zinc-400">
+              <span className="inline-flex items-center gap-1.5">
+                <Code2 className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
+                <span>React + TypeScript</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <Box className="h-3.5 w-3.5 text-indigo-500" aria-hidden="true" />
+                <span>Three.js &amp; 2D Canvas</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <Terminal className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+                <span>Live /api/app-ai</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <KeyRound className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
+                <span>100% BYOK</span>
+              </span>
+            </div>
           </motion.div>
 
           {/* Model Health Warning Banner (Rate Limits / Server Outages) */}
@@ -412,16 +429,76 @@ export default function HomeView({
                 setPromptInput(e.target.value);
                 if (promptValidationError) setPromptValidationError(null);
               }}
-              placeholder="Describe your website: e.g., A customer research hub with a live AI transcript summarizer and clean responsive layout..."
+              placeholder="Describe your website, 2D game, or Three.js scene: e.g., Subway Surfers 2D runner with coins and lane switching, or a SaaS dashboard with live AI..."
               className="w-full resize-none bg-transparent text-sm sm:text-base text-zinc-950 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500"
             />
+
+            {/* Live Lovable / Base44 Build Activity Feed while generating */}
+            <AnimatePresence>
+              {isGenerating && streamProgress && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  aria-live="polite"
+                  className="mt-3 overflow-hidden rounded-xl border border-blue-500/30 bg-gradient-to-br from-blue-50/90 via-indigo-50/70 to-white p-3.5 text-xs dark:border-blue-500/30 dark:from-blue-950/35 dark:via-indigo-950/25 dark:to-zinc-900/90"
+                >
+                  <div className="relative h-1 w-full overflow-hidden rounded-full bg-blue-500/15 mb-3">
+                    <div className="mist-shimmer-bar absolute inset-y-0 left-0 w-1/2 rounded-full mist-primary-gradient" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <MistMark className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0 animate-pulse" title="Building" />
+                      <span className="font-semibold text-zinc-950 dark:text-white truncate">
+                        {streamProgress.activeFile
+                          ? `Writing ${streamProgress.activeFile}...`
+                          : streamProgress.phase}
+                      </span>
+                    </div>
+                    <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400 tabular-nums shrink-0">
+                      {elapsedSeconds}s · {Math.max(1, Math.round(streamProgress.charsReceived / 1024))} KB
+                    </span>
+                  </div>
+
+                  {streamProgress.completedFiles.length > 0 && (
+                    <div className="mt-2.5 flex flex-wrap gap-2 text-[11px]">
+                      {streamProgress.completedFiles.map((filePath) => (
+                        <span
+                          key={filePath}
+                          className="inline-flex items-center gap-1 font-mono text-emerald-700 dark:text-emerald-400"
+                        >
+                          <CheckCircle2 className="h-3 w-3 shrink-0" aria-hidden="true" />
+                          <span>{filePath}</span>
+                        </span>
+                      ))}
+                      {streamProgress.activeFile && (
+                        <span className="inline-flex items-center gap-1 font-mono text-blue-600 dark:text-blue-400">
+                          <Loader2 className="h-3 w-3 animate-spin shrink-0" aria-hidden="true" />
+                          <span>{streamProgress.activeFile}</span>
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {(promptValidationError || generationError) && (
               <div
                 role="alert"
-                className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-700 dark:border-red-900/60 dark:bg-red-950/50 dark:text-red-300"
+                className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-700 dark:border-red-900/60 dark:bg-red-950/50 dark:text-red-300"
               >
-                {promptValidationError || generationError}
+                <span>{promptValidationError || generationError}</span>
+                {!hasApiKey && (
+                  <button
+                    type="button"
+                    onClick={onOpenProviders}
+                    className="rounded-lg bg-red-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-red-700 cursor-pointer"
+                  >
+                    Configure BYOK Key
+                  </button>
+                )}
               </div>
             )}
 
@@ -432,15 +509,21 @@ export default function HomeView({
                   aria-expanded={quickModelOpen}
                   onClick={() => setQuickModelOpen((v) => !v)}
                   className={`inline-flex min-h-[44px] sm:min-h-[34px] items-center justify-between sm:justify-start gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    activeIncidentMatchesCurrent
+                    activeIncidentMatches(modelIncident, providerConfig)
                       ? 'border-amber-400/70 bg-amber-50 text-amber-900 dark:border-amber-700/70 dark:bg-amber-950/50 dark:text-amber-200'
-                      : 'border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
+                      : !hasApiKey
+                        ? 'border-blue-400/70 bg-blue-50/90 text-blue-800 dark:border-blue-700/60 dark:bg-blue-950/40 dark:text-blue-200'
+                        : 'border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
                   }`}
                 >
                   <span className="inline-flex items-center gap-1.5 min-w-0">
                     <Cpu className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" aria-hidden="true" />
                     <span className="max-w-[96px] sm:max-w-[180px] truncate">{providerLabel}</span>
-                    {currentModelMeta && (
+                    {!hasApiKey ? (
+                      <span className="hidden sm:inline text-[10px] font-semibold text-blue-600 dark:text-blue-300">
+                        · Add key
+                      </span>
+                    ) : currentModelMeta ? (
                       <span
                         className={`hidden sm:inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${
                           currentModelMeta.billing === 'free'
@@ -450,7 +533,7 @@ export default function HomeView({
                       >
                         {currentModelMeta.billingLabel}
                       </span>
-                    )}
+                    ) : null}
                   </span>
                   <motion.span
                     animate={{ rotate: quickModelOpen ? 180 : 0 }}
@@ -473,7 +556,7 @@ export default function HomeView({
 
                 {enableAppAi && (
                   <span className="hidden xl:inline text-[11px] text-zinc-500 dark:text-zinc-400 whitespace-nowrap">
-                    · App AI ready
+                    · App AI enabled
                   </span>
                 )}
               </div>
@@ -489,7 +572,7 @@ export default function HomeView({
                   whileHover={{ y: -1 }}
                   whileTap={{ scale: 0.97 }}
                   disabled={isGenerating}
-                  className="inline-flex min-h-[48px] sm:min-h-[40px] w-full sm:w-auto items-center justify-center gap-2 rounded-xl bg-zinc-950 px-5 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-zinc-800 dark:bg-blue-600 dark:hover:bg-blue-500 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex min-h-[48px] sm:min-h-[40px] w-full sm:w-auto items-center justify-center gap-2 rounded-xl mist-primary-gradient px-5 py-2.5 text-sm font-medium text-white shadow-md shadow-blue-600/20 disabled:opacity-60 transition-all whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   {isGenerating ? (
                     <>
@@ -507,7 +590,7 @@ export default function HomeView({
               </div>
             </div>
 
-            {/* Expandable Quick Model Switcher Drawer inside Composer (Gemini + Custom only) */}
+            {/* Expandable Quick BYOK Model & Gateway Drawer */}
             <AnimatePresence initial={false}>
               {quickModelOpen && (
                 <motion.div
@@ -520,54 +603,7 @@ export default function HomeView({
                   <div className="mt-4 space-y-3 rounded-xl border border-zinc-200 bg-white/95 p-3.5 text-xs dark:border-zinc-800 dark:bg-zinc-950/95">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        {PRIMARY_STUDIO_PROVIDERS.map((pid) => {
-                          const selected =
-                            pid === 'gemini' ? isGeminiMode : !isGeminiMode;
-                          return (
-                            <button
-                              key={pid}
-                              type="button"
-                              onClick={() => {
-                                if (pid === 'gemini') {
-                                  onSaveProvider({
-                                    ...providerConfig,
-                                    provider: 'gemini',
-                                    model: getDefaultModelForProvider('gemini'),
-                                  });
-                                } else {
-                                  const gw = CUSTOM_GATEWAY_PRESETS[0];
-                                  onSaveProvider({
-                                    ...providerConfig,
-                                    provider: 'custom',
-                                    baseUrl: providerConfig.baseUrl || gw.baseUrl,
-                                    model: gw.models[0].id,
-                                  });
-                                }
-                              }}
-                              className={`min-h-[34px] rounded-lg border px-3 py-1 text-xs font-medium transition-colors cursor-pointer ${
-                                selected
-                                  ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500/70 dark:bg-blue-500/15 dark:text-blue-300'
-                                  : 'border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900'
-                              }`}
-                            >
-                              {PROVIDER_CATALOG[pid].name}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={onOpenProviders}
-                        className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400 cursor-pointer"
-                      >
-                        API Keys &amp; Endpoint Setup &rarr;
-                      </button>
-                    </div>
-
-                    {!isGeminiMode && (
-                      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                        <span className="text-[11px] text-zinc-500 dark:text-zinc-400 mr-1">
+                        <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mr-1">
                           Preset:
                         </span>
                         {CUSTOM_GATEWAY_PRESETS.map((gw) => (
@@ -578,11 +614,12 @@ export default function HomeView({
                               onSaveProvider({
                                 ...providerConfig,
                                 provider: 'custom',
+                                name: gw.name,
                                 baseUrl: gw.baseUrl || providerConfig.baseUrl || '',
                                 model: gw.models[0].id,
                               })
                             }
-                            className={`min-h-[28px] rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                            className={`min-h-[28px] rounded-lg border px-2.5 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
                               activeGatewayId === gw.id
                                 ? 'border-blue-500/70 bg-blue-500/10 text-blue-700 dark:text-blue-300'
                                 : 'border-zinc-200 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-900'
@@ -592,18 +629,26 @@ export default function HomeView({
                           </button>
                         ))}
                       </div>
-                    )}
+
+                      <button
+                        type="button"
+                        onClick={onOpenProviders}
+                        className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400 cursor-pointer"
+                      >
+                        Configure Name, URL &amp; Key &rarr;
+                      </button>
+                    </div>
 
                     <ModelSelectorDropdown
-                      provider={isGeminiMode ? 'gemini' : 'custom'}
+                      provider="custom"
                       value={providerConfig.model}
-                      modelsOverride={!isGeminiMode ? activeGateway.models : undefined}
-                      gatewayLabel={!isGeminiMode ? activeGateway.name : 'Gemini'}
+                      modelsOverride={activeGateway.models}
+                      gatewayLabel={providerDisplayName}
                       compact
                       onChange={(nextModel) =>
                         onSaveProvider({
                           ...providerConfig,
-                          provider: isGeminiMode ? 'gemini' : 'custom',
+                          provider: 'custom',
                           model: nextModel,
                         })
                       }
@@ -625,22 +670,26 @@ export default function HomeView({
               Try a prompt:
             </span>
             <div className="grid grid-cols-2 gap-2 sm:contents">
-              {QUICK_PROMPTS.map((item) => (
-                <motion.button
-                  key={item.label}
-                  type="button"
-                  whileHover={{ y: -1 }}
-                  whileTap={{ scale: 0.97 }}
-                  onClick={() => {
-                    setPromptInput(item.prompt);
-                    setPromptValidationError(null);
-                    promptInputRef.current?.focus();
-                  }}
-                  className="min-h-[42px] sm:min-h-[30px] rounded-xl sm:rounded-lg border border-zinc-200/90 bg-white/90 px-2.5 sm:px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-zinc-300 hover:bg-white dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:border-zinc-700 dark:hover:bg-zinc-900 transition-colors truncate sm:whitespace-nowrap sm:shrink-0 cursor-pointer"
-                >
-                  {item.label}
-                </motion.button>
-              ))}
+              {QUICK_PROMPTS.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <motion.button
+                    key={item.label}
+                    type="button"
+                    whileHover={{ y: -1 }}
+                    whileTap={{ scale: 0.97 }}
+                    onClick={() => {
+                      setPromptInput(item.prompt);
+                      setPromptValidationError(null);
+                      promptInputRef.current?.focus();
+                    }}
+                    className="inline-flex min-h-[42px] sm:min-h-[32px] items-center justify-center sm:justify-start gap-1.5 rounded-xl sm:rounded-lg border border-zinc-200/90 bg-white/90 px-2.5 sm:px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-blue-300 hover:bg-white dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:border-blue-700/60 dark:hover:bg-zinc-900 transition-colors truncate sm:whitespace-nowrap sm:shrink-0 cursor-pointer"
+                  >
+                    <Icon className="h-3.5 w-3.5 text-blue-500 shrink-0" aria-hidden="true" />
+                    <span className="truncate">{item.label}</span>
+                  </motion.button>
+                );
+              })}
             </div>
           </motion.div>
         </section>
@@ -653,54 +702,13 @@ export default function HomeView({
           <div className="mx-auto max-w-7xl px-4 sm:px-6">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
               <div>
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <h2 className="font-display text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
-                    Your Websites
-                  </h2>
-                  {user && (
-                    <span
-                      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-0.5 text-[11px] font-medium ${
-                        firestoreConnection === 'offline'
-                          ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800/70 dark:bg-amber-950/40 dark:text-amber-300'
-                          : allProjectsSynced || projects.length === 0
-                            ? 'border-emerald-300/80 bg-emerald-50 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300'
-                            : 'border-blue-300/80 bg-blue-50 text-blue-700 dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300'
-                      }`}
-                    >
-                      {firestoreConnection === 'offline' ? (
-                        <CloudOff className="h-3 w-3" aria-hidden="true" />
-                      ) : allProjectsSynced || projects.length === 0 ? (
-                        <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-                      ) : (
-                        <Cloud className="h-3 w-3" aria-hidden="true" />
-                      )}
-                      <span>
-                        {firestoreConnection === 'offline'
-                          ? 'Firestore offline (saved locally)'
-                          : projects.length === 0
-                            ? 'Firestore connected'
-                            : allProjectsSynced
-                              ? `All ${projects.length} synced to Firestore`
-                              : `${syncedCount}/${projects.length} synced to Firestore`}
-                      </span>
-                    </span>
-                  )}
-                  {user && projects.length > 0 && !allProjectsSynced && onSyncAllToCloud && (
-                    <button
-                      type="button"
-                      disabled={isSyncingAll}
-                      onClick={onSyncAllToCloud}
-                      className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-0.5 text-[11px] font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800 cursor-pointer"
-                    >
-                      <RefreshCw className={`h-3 w-3 ${isSyncingAll ? 'animate-spin' : ''}`} aria-hidden="true" />
-                      <span>{isSyncingAll ? 'Syncing...' : 'Sync all'}</span>
-                    </button>
-                  )}
-                </div>
+                <h2 className="font-display text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
+                  Your Websites
+                </h2>
                 <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
                   {user
-                    ? `All projects saved to Firestore for ${user.email}`
-                    : 'Sign in with Google to save every website you create across sessions and devices.'}
+                    ? `Projects created for ${user.email}`
+                    : 'Sign in with Google to keep your websites saved across devices.'}
                 </p>
               </div>
 
@@ -765,7 +773,7 @@ export default function HomeView({
                         window.scrollTo({ top: 0, behavior: 'smooth' });
                         promptInputRef.current?.focus();
                       }}
-                      className="inline-flex min-h-[42px] items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200 transition-colors cursor-pointer"
+                      className="inline-flex min-h-[42px] items-center gap-2 rounded-xl mist-primary-gradient px-4 py-2 text-xs font-medium text-white shadow-sm cursor-pointer"
                     >
                       <MistMark className="h-3.5 w-3.5" title="Start" />
                       <span>Start from a Prompt</span>
@@ -783,28 +791,7 @@ export default function HomeView({
               </div>
             ) : (
               <div className="divide-y divide-zinc-200 rounded-2xl border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900/75 overflow-hidden">
-                {filteredProjects.map((project, index) => {
-                  const sync = syncRecords[project.id];
-                  const syncLabel = !user
-                    ? 'Local only (Sign in to sync)'
-                    : sync?.state === 'syncing'
-                      ? 'Syncing...'
-                      : sync?.state === 'error'
-                        ? 'Sync error'
-                        : sync?.state === 'synced'
-                          ? 'Synced in Firestore'
-                          : 'Pending Firestore sync';
-                  const syncTone = !user
-                    ? 'text-zinc-500 dark:text-zinc-400'
-                    : sync?.state === 'syncing'
-                      ? 'text-blue-600 dark:text-blue-400'
-                      : sync?.state === 'error'
-                        ? 'text-red-600 dark:text-red-400'
-                        : sync?.state === 'synced'
-                          ? 'text-emerald-700 dark:text-emerald-400'
-                          : 'text-amber-700 dark:text-amber-300';
-
-                  return (
+                {filteredProjects.map((project, index) => (
                   <motion.div
                     key={project.id}
                     initial={{ opacity: 0, y: 8 }}
@@ -822,21 +809,9 @@ export default function HomeView({
                           {project.name}
                         </button>
                         <span className="text-xs text-zinc-400">·</span>
-                        <span className="text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
-                          {project.files.length} files
-                        </span>
-                        <span className="text-xs text-zinc-400">·</span>
-                        <span className={`inline-flex items-center gap-1 text-[11px] font-medium ${syncTone}`}>
-                          {!user ? (
-                            <CloudOff className="h-3 w-3" aria-hidden="true" />
-                          ) : sync?.state === 'syncing' ? (
-                            <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
-                          ) : sync?.state === 'synced' ? (
-                            <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-                          ) : (
-                            <Cloud className="h-3 w-3" aria-hidden="true" />
-                          )}
-                          <span>{syncLabel}</span>
+                        <span className="inline-flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
+                          <FileCode2 className="h-3 w-3 opacity-70" aria-hidden="true" />
+                          <span>{project.files.length} files</span>
                         </span>
                         {project.isPublished && project.publishedSlug && (
                           <>
@@ -884,8 +859,7 @@ export default function HomeView({
                       </button>
                     </div>
                   </motion.div>
-                  );
-                })}
+                ))}
               </div>
             )}
           </div>
@@ -929,5 +903,16 @@ export default function HomeView({
         </div>
       </footer>
     </div>
+  );
+}
+
+function activeIncidentMatches(
+  incident: ModelHealthIncident | null,
+  config: AiProviderConfig,
+): boolean {
+  return Boolean(
+    incident &&
+      incident.provider === config.provider &&
+      incident.model === config.model,
   );
 }

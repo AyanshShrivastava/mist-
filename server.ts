@@ -5,10 +5,9 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import * as esbuild from 'esbuild';
 import { compile as compileTailwind } from 'tailwindcss';
-import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
-import { WebSocketServer } from 'ws';
 import dotenv from 'dotenv';
 import type { AiProviderConfig, AiProviderId, ProjectFile } from './src/types/mist';
+import { normalizeProviderConfigToStudio } from './src/data/models';
 import { classifyModelError, type ModelHealthIncident } from './src/utils/aiErrors';
 import { normalizeProjectFilePath, resolveAppEntryPath } from './src/utils/projectOps';
 
@@ -19,7 +18,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const DEPLOYMENTS_FILE = path.resolve(process.cwd(), '.mist-deployments.json');
 
-app.use(express.json({ limit: '4mb' }));
+app.use(express.json({ limit: '6mb' }));
 app.use('/src/assets', express.static(path.resolve(process.cwd(), 'src/assets')));
 
 // Track observed model rate-limit & server-outage incidents
@@ -128,7 +127,7 @@ function extractTailwindCandidates(files: ProjectFile[]): string[] {
   return Array.from(tokens);
 }
 
-// --- 3. Multi-File React + TSX Bundler ---
+// --- 3. Multi-File React + TSX + Three.js Bundler ---
 const INSPECTOR_BRIDGE_SCRIPT = `
 (function() {
   var inspectorActive = false;
@@ -305,6 +304,53 @@ const INSPECTOR_BRIDGE_SCRIPT = `
 })();
 `;
 
+function collectImportedLucideSymbols(files: ProjectFile[]): string[] {
+  const extra = new Set<string>();
+  const importRegex = /import\s*\{([^}]+)\}\s*from\s*['"]lucide-react['"]/g;
+  for (const f of files) {
+    let match: RegExpExecArray | null;
+    while ((match = importRegex.exec(f.content)) !== null) {
+      const parts = match[1].split(',');
+      for (const part of parts) {
+        const cleaned = part.trim().split(/\s+as\s+/)[0].trim();
+        if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(cleaned)) {
+          extra.add(cleaned);
+        }
+      }
+    }
+  }
+  return Array.from(extra);
+}
+
+function resolveThreeModulePath(specifier: string): string | null {
+  const threeDir = path.resolve(process.cwd(), 'node_modules/three');
+  if (specifier === 'three') {
+    return path.join(threeDir, 'build/three.module.js');
+  }
+  if (specifier === 'three/addons') {
+    return path.join(threeDir, 'examples/jsm/Addons.js');
+  }
+  if (specifier.startsWith('three/addons/')) {
+    const rel = specifier.slice('three/addons/'.length);
+    const candidate = path.join(threeDir, 'examples/jsm', rel);
+    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(`${candidate}.js`)) return `${candidate}.js`;
+  }
+  if (specifier.startsWith('three/examples/jsm/')) {
+    const rel = specifier.slice('three/examples/jsm/'.length);
+    const candidate = path.join(threeDir, 'examples/jsm', rel);
+    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(`${candidate}.js`)) return `${candidate}.js`;
+  }
+  if (specifier.startsWith('three/')) {
+    const rel = specifier.slice('three/'.length);
+    const candidate = path.join(threeDir, rel);
+    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(`${candidate}.js`)) return `${candidate}.js`;
+  }
+  return null;
+}
+
 async function bundleProjectToHtml(params: {
   files: ProjectFile[];
   title: string;
@@ -323,6 +369,9 @@ async function bundleProjectToHtml(params: {
     fileMap.set(f.path, f);
     lowerFileMap.set(f.path.toLowerCase(), f.path);
   }
+
+  const importedLucideSymbols = collectImportedLucideSymbols(normalizedFiles);
+  const allLucideExports = Array.from(new Set([...lucideExportNames, ...importedLucideSymbols]));
 
   const appEntry = resolveAppEntryPath(normalizedFiles);
   const entryPath = fileMap.has('src/main.tsx') ? 'src/main.tsx' : '__mist_entry.tsx';
@@ -399,16 +448,30 @@ async function bundleProjectToHtml(params: {
         namespace: 'mist-vendor',
       }));
 
+      // Three.js & addons resolution from node_modules
+      build.onResolve({ filter: /^three(\/.*)?$/ }, (args) => {
+        const resolved = resolveThreeModulePath(args.path);
+        if (resolved) {
+          return { path: resolved, namespace: 'file' };
+        }
+        return undefined;
+      });
+
       build.onResolve({ filter: /.*/ }, (args) => {
+        // Real node_modules imports (e.g., Three.js internal relative imports) use default file resolver
+        if (args.resolveDir && args.importer && !fileMap.has(args.importer) && args.importer !== entryPath) {
+          return undefined;
+        }
         if (args.path === entryPath) {
           return { path: entryPath, namespace: 'mist-fs' };
         }
         if (args.path.endsWith('.css')) {
           return { path: args.path, namespace: 'mist-css-noop' };
         }
-        const importerDir = args.importer && args.importer !== entryPath
-          ? path.posix.dirname(args.importer)
-          : '';
+        const importerDir =
+          args.importer && args.importer !== entryPath
+            ? path.posix.dirname(args.importer)
+            : '';
         const baseResolved = args.path.startsWith('.')
           ? path.posix.normalize(path.posix.join(importerDir, args.path))
           : args.path.replace(/^(@\/|\/)/, '');
@@ -467,10 +530,28 @@ async function bundleProjectToHtml(params: {
           };
         }
         if (args.path === 'lucide-react') {
-          const icons = lucideExportNames
-            .map((k) => `export const ${k} = window.__MIST_VENDOR__.LucideReact["${k}"];`)
+          const lucideHeader = `
+            const React = window.__MIST_VENDOR__.React;
+            const LR = window.__MIST_VENDOR__.LucideReact;
+            function FallbackIcon(props) {
+              return React.createElement('svg', {
+                viewBox: '0 0 24 24',
+                width: props?.size || 16,
+                height: props?.size || 16,
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+                className: props?.className || '',
+                'aria-hidden': 'true'
+              }, React.createElement('circle', { cx: 12, cy: 12, r: 9 }));
+            }
+          `;
+          const icons = allLucideExports
+            .map((k) => `export const ${k} = LR["${k}"] || FallbackIcon;`)
             .join('\n');
-          return { contents: icons, loader: 'js' };
+          return { contents: `${lucideHeader}\n${icons}`, loader: 'js' };
         }
         return { contents: '', loader: 'js' };
       });
@@ -487,12 +568,16 @@ async function bundleProjectToHtml(params: {
 
       build.onLoad({ filter: /.*/, namespace: 'mist-fs' }, (args) => {
         if (args.path === '__mist_entry.tsx') {
-          return { contents: syntheticEntry, loader: 'tsx' };
+          return { contents: syntheticEntry, loader: 'tsx', resolveDir: process.cwd() };
         }
         const file = fileMap.get(args.path);
-        if (!file) return { contents: '', loader: 'tsx' };
-        const loader = file.path.endsWith('.ts') ? 'ts' : file.path.endsWith('.json') ? 'json' : 'tsx';
-        return { contents: file.content, loader };
+        if (!file) return { contents: '', loader: 'tsx', resolveDir: process.cwd() };
+        const loader = file.path.endsWith('.ts')
+          ? 'ts'
+          : file.path.endsWith('.json')
+            ? 'json'
+            : 'tsx';
+        return { contents: file.content, loader, resolveDir: process.cwd() };
       });
     },
   };
@@ -537,19 +622,66 @@ async function bundleProjectToHtml(params: {
     .join('\n');
 
   const safeTitle = params.title.replace(/[<>]/g, '');
+
+  // Safe BYOK runtime bridge + srcDoc anchor navigation guard (prevents clicking /links from loading Mist's SPA HTML inside iframe)
   const MIST_APP_AI_RUNTIME_SCRIPT = `
 (function() {
+  var activeByok = null;
+  var origFetch = window.fetch ? window.fetch.bind(window) : null;
+
+  window.addEventListener('message', function(e) {
+    if (e && e.data && e.data.type === 'MIST_SET_BYOK') {
+      activeByok = e.data.payload || null;
+    }
+  });
+
+  if (origFetch) {
+    window.fetch = function(input, init) {
+      try {
+        var url = typeof input === 'string' ? input : (input && input.url) || '';
+        if (url.indexOf('/api/app-ai') !== -1 && init && typeof init.body === 'string' && activeByok) {
+          var parsed = JSON.parse(init.body);
+          if (!parsed.providerConfig) {
+            parsed.providerConfig = activeByok;
+            init = Object.assign({}, init, { body: JSON.stringify(parsed) });
+          }
+        }
+      } catch (err) {}
+      return origFetch(input, init);
+    };
+  }
+
+  document.addEventListener('click', function(e) {
+    var el = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!el) return;
+    var href = el.getAttribute('href') || '';
+    if (el.hasAttribute('download') || el.getAttribute('target') === '_blank') return;
+    if (href.startsWith('#')) {
+      e.preventDefault();
+      var id = href.slice(1);
+      if (id) {
+        var target = document.getElementById(id);
+        if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth' });
+      }
+      return;
+    }
+    if (href.startsWith('/') && !href.startsWith('/p/')) {
+      e.preventDefault();
+    }
+  }, false);
+
   window.mistAI = {
     complete: async function(prompt, options) {
       var opts = options || {};
-      var res = await fetch('/api/app-ai', {
+      var res = await window.fetch('/api/app-ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: prompt,
           messages: opts.messages,
           systemInstruction: opts.systemInstruction,
-          jsonMode: Boolean(opts.jsonMode)
+          jsonMode: Boolean(opts.jsonMode),
+          providerConfig: opts.providerConfig || activeByok || undefined
         })
       });
       var data = await res.json();
@@ -608,24 +740,34 @@ app.post('/api/bundle', async (req, res) => {
   }
 });
 
-// --- 4. AI Generation, Refinement, Provider Testing, & Model Health Status ---
-const SYSTEM_GENERATOR_PROMPT = `You are Mist, a senior product designer and React + TypeScript + Tailwind CSS frontend engineer.
-Generate clean, cohesive, responsive, accessible websites with deliberate typography, strong contrast, mobile responsiveness, and crisp layouts.
-Rules:
+// --- 4. Pure BYOK AI Generation, Streaming Progress, Refinement, Voice Turn & Model Health ---
+const SYSTEM_GENERATOR_PROMPT = `You are Mist, a senior product designer, interactive game developer, and React + TypeScript + Tailwind CSS + Three.js engineer.
+Generate clean, cohesive, responsive, fully playable/interactive web apps with strong contrast, crisp typography, mobile support, and zero broken links.
+
+CRITICAL RULES:
 - Use React 19, TypeScript (.tsx), and Tailwind CSS utility classes.
-- Allowed imports: 'react', 'lucide-react', and local relative imports like './components/Navbar'. Do NOT import unrequested third-party libraries.
-- Never use broken external URLs like unsplash.com or placeholder.com; for imagery use crisp SVG/CSS illustrations or local Mist studio assets if needed.
-- Never use Sparkles, Star, or Wand icons from lucide-react; prefer crisp functional icons (Send, MessageSquare, Cpu, ArrowRight, Terminal, Layers, Check).
+- Allowed imports: 'react', 'react-dom/client', 'lucide-react', 'three', 'three/addons/*' (e.g., OrbitControls, RoomEnvironment), and local relative imports like './components/Navbar'.
+- NEVER use Sparkles, Star, or Wand icons from lucide-react; prefer crisp functional icons (Send, Play, RotateCcw, Cpu, ArrowRight, Terminal, Layers, Check, Pause, Trophy, Volume2).
+- NEVER return raw HTML documents ('<!doctype html>', '<script>', or raw HTML strings in JSX) — write pure TypeScript React components with working event handlers.
+- NEVER use <a href="/..."> links on interactive buttons (such as "Play Game", "Start", "Restart") — ALWAYS use <button type="button" onClick={...}> so clicks never navigate away from the app.
 - Ensure src/App.tsx is the default-exported root component and src/index.css starts with @import "tailwindcss";.
-- Real AI Feature Integration: Whenever the user's idea calls for AI functionality (assistant, chat widget, content generator, analyzer, summarizer, planner, quiz builder, smart search, etc.), implement it with a REAL live HTTP call to POST /api/app-ai:
-  const res = await fetch('/api/app-ai', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, messages, systemInstruction })
-  });
-  const data = await res.json(); // returns { text, model, provider } or { error }
-  Include real loading state, disabled submit guard while pending, and inline error state. NEVER fake AI replies with setTimeout stubs or canned static arrays.
-- Use clean, natural copy without fake telemetry tickers or placeholder lorem ipsum.`;
+- Never use broken external URLs like unsplash.com or external .hdr/.gltf files; use crisp inline SVG graphics, Canvas2D procedural art, or procedural Three.js geometry and CanvasTexture materials.
+
+2D GAME & CANVAS RULES (apply when building 2D games such as Subway Surfers 2D runners, arcade, platformers, or Canvas apps):
+- Mount a real <canvas ref={canvasRef} className="block w-full h-full touch-none" /> ALWAYS at the root of the viewport across all screens ('title', 'playing', 'paused', 'gameover') — NEVER conditionally mount <canvas> inside {screen === 'playing' && <canvas>} where useEffect([], []) misses it!
+- Keep high-frequency 60 FPS physics, lanes, player velocity, obstacles, coins, score, and input inside useRef objects driven by requestAnimationFrame(loop) with clamped dt = Math.min(rawDt, 0.05). Sync HUD numbers to React state cleanly.
+- Support keyboard controls (ArrowLeft/A, ArrowRight/D to switch lanes; ArrowUp/W/Space to jump; ArrowDown/S to slide/roll; Escape/P to pause) AND pointer/touch swipe or mobile tap controls.
+- On clicking "Play Game" (also Space/Enter on Title), immediately switch phaseRef.current = 'playing' and react phase state = 'playing', reset obstacles/score cleanly, and start active gameplay on the running canvas!
+- Put HUD overlays in a <div className="pointer-events-none fixed inset-0 ..."> wrapper with pointer-events-auto ONLY on buttons; NEVER put backdrop-blur over the active <canvas>.
+
+THREE.JS & 3D RULES (apply when building 3D scenes, viewers, or 3D games):
+- Import * as THREE from 'three' (and optional 'three/addons/controls/OrbitControls.js' or 'three/addons/environments/RoomEnvironment.js').
+- Mount renderer.domElement inside a dedicated empty <div ref={mountRef} className="w-full h-full" /> inside useEffect(..., []), handle ResizeObserver/resize, cancel animation frame and call renderer.dispose() on unmount.
+- Use THREE.ACESFilmicToneMapping, PMREMGenerator + RoomEnvironment for rich metallic/PBR reflections, and a warm DirectionalLight + cool HemisphereLight fill.
+- Build multi-part THREE.Group objects and procedural CanvasTextures (zero external 404 texture URLs), and never place CSS backdrop-blur over the WebGL viewport.
+
+LIVE AI FEATURES INSIDE GENERATED APPS:
+- Whenever the user's request involves AI features (chat widget, writer, analyzer, summarizer, quiz builder, smart helper), implement real fetch('/api/app-ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, messages, systemInstruction }) }) calls returning { text } — with real loading & error states, never setTimeout/mock stubs.`;
 
 function extractJsonObject(raw: string): Record<string, unknown> {
   const trimmed = raw.trim();
@@ -653,7 +795,12 @@ class ProviderHttpError extends Error {
 
 function getHttpStatusFromError(err: unknown): number {
   if (err instanceof ProviderHttpError) return err.status;
-  if (err && typeof err === 'object' && 'status' in err && typeof (err as { status: unknown }).status === 'number') {
+  if (
+    err &&
+    typeof err === 'object' &&
+    'status' in err &&
+    typeof (err as { status: unknown }).status === 'number'
+  ) {
     return (err as { status: number }).status;
   }
   const msg = err instanceof Error ? err.message : String(err);
@@ -665,47 +812,66 @@ function getHttpStatusFromError(err: unknown): number {
   return 500;
 }
 
-async function callOpenAiCompatibleRaw(params: {
+function resolveByokRequestParams(rawConfig?: AiProviderConfig): {
   config: AiProviderConfig;
+  providerLabel: string;
+  endpoint: string;
+  headers: Record<string, string>;
+} {
+  const config = normalizeProviderConfigToStudio(
+    rawConfig || {
+      provider: 'custom',
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
+      apiKey: '',
+    },
+  );
+  const providerLabel = config.name?.trim() || 'Custom BYOK';
+  const apiKey = config.apiKey?.trim();
+  if (!apiKey) {
+    throw new ProviderHttpError(
+      401,
+      `Enter your BYOK API key for ${providerLabel} in Models & API Keys or Settings.`,
+    );
+  }
+  const base = (config.baseUrl || '').trim().replace(/\/+$/, '');
+  if (!base) {
+    throw new ProviderHttpError(
+      400,
+      `${providerLabel} requires an OpenAI-compatible Base URL (e.g. https://openrouter.ai/api/v1).`,
+    );
+  }
+  const endpoint = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  };
+  if (endpoint.includes('openrouter.ai')) {
+    headers['HTTP-Referer'] = process.env.APP_URL || 'http://localhost:3000';
+    headers['X-Title'] = 'Mist Website Builder';
+  }
+  return { config, providerLabel, endpoint, headers };
+}
+
+async function callByokCompletionRaw(params: {
+  config?: AiProviderConfig;
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   jsonMode?: boolean;
   temperature?: number;
   maxTokens?: number;
 }): Promise<string> {
-  const { config, messages, jsonMode = true, temperature = 0.4, maxTokens = 4096 } = params;
-  const apiKey = config.apiKey?.trim();
-  if (!apiKey) {
-    throw new ProviderHttpError(401, `Please add your API key for ${config.provider} in Settings or Models.`);
-  }
+  const { messages, jsonMode = true, temperature = 0.4, maxTokens = 10240 } = params;
+  const { config, providerLabel, endpoint, headers } = resolveByokRequestParams(params.config);
 
-  let endpoint = 'https://openrouter.ai/api/v1/chat/completions';
-  if (config.provider === 'groq') {
-    endpoint = 'https://api.groq.com/openai/v1/chat/completions';
-  } else if (config.provider === 'custom') {
-    const base = (config.baseUrl || '').trim().replace(/\/+$/, '');
-    if (!base) {
-      throw new ProviderHttpError(400, 'Custom provider requires a Base URL (or select an endpoint preset).');
-    }
-    endpoint = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
-  }
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${apiKey}`,
-  };
-  if (config.provider === 'openrouter' || endpoint.includes('openrouter.ai')) {
-    headers['HTTP-Referer'] = process.env.APP_URL || 'http://localhost:3000';
-    headers['X-Title'] = 'Mist Website Builder';
-  }
-
-  const runRequest = async (limitTokens: number) => {
+  const runRequest = async (limitTokens: number, useJsonFormat: boolean) => {
     const body: Record<string, unknown> = {
       model: config.model,
       messages,
       temperature,
       max_tokens: limitTokens,
     };
-    if (jsonMode) {
+    if (useJsonFormat) {
       body.response_format = { type: 'json_object' };
     }
     return fetch(endpoint, {
@@ -715,21 +881,31 @@ async function callOpenAiCompatibleRaw(params: {
     });
   };
 
-  let resp = await runRequest(maxTokens);
+  let resp = await runRequest(maxTokens, jsonMode);
+  if (!resp.ok && resp.status === 400 && jsonMode) {
+    // Some custom/OpenAI-compatible models reject response_format json_object
+    const errPreview = await resp.text();
+    if (errPreview.toLowerCase().includes('response_format') || errPreview.toLowerCase().includes('json_object')) {
+      resp = await runRequest(maxTokens, false);
+    } else {
+      throw new ProviderHttpError(400, `${providerLabel} error (400): ${errPreview.slice(0, 350)}`);
+    }
+  }
+
   if (!resp.ok && resp.status === 402) {
     const errText = await resp.text();
     const affordMatch = errText.match(/can only afford\s+(\d+)/i);
     const affordable = affordMatch ? Number(affordMatch[1]) : 0;
     if (affordable >= 1024 && maxTokens > affordable - 128) {
-      resp = await runRequest(Math.max(1024, affordable - 128));
+      resp = await runRequest(Math.max(1024, affordable - 128), jsonMode);
     } else {
-      throw new ProviderHttpError(402, `${config.provider} error (402): ${errText.slice(0, 350)}`);
+      throw new ProviderHttpError(402, `${providerLabel} error (402): ${errText.slice(0, 350)}`);
     }
   }
 
   if (!resp.ok) {
     const errText = await resp.text();
-    throw new ProviderHttpError(resp.status, `${config.provider} error (${resp.status}): ${errText.slice(0, 350)}`);
+    throw new ProviderHttpError(resp.status, `${providerLabel} error (${resp.status}): ${errText.slice(0, 350)}`);
   }
 
   const data = (await resp.json()) as {
@@ -737,105 +913,226 @@ async function callOpenAiCompatibleRaw(params: {
   };
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
-    throw new ProviderHttpError(502, `${config.provider} returned an empty response.`);
+    throw new ProviderHttpError(502, `${providerLabel} returned an empty response.`);
   }
   return content;
 }
 
-async function callOpenAiCompatibleProvider(params: {
-  config: AiProviderConfig;
-  systemInstruction: string;
-  userPrompt: string;
+async function streamByokCompletion(params: {
+  config?: AiProviderConfig;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  jsonMode?: boolean;
+  temperature?: number;
   maxTokens?: number;
-}): Promise<Record<string, unknown>> {
-  const content = await callOpenAiCompatibleRaw({
-    config: params.config,
-    messages: [
-      { role: 'system', content: params.systemInstruction },
-      { role: 'user', content: params.userPrompt },
-    ],
-    jsonMode: true,
-    temperature: 0.4,
-    maxTokens: params.maxTokens,
-  });
-  return extractJsonObject(content);
+  onDelta: (accumulatedText: string) => void;
+}): Promise<string> {
+  const { messages, jsonMode = true, temperature = 0.4, maxTokens = 12288, onDelta } = params;
+  const { config, providerLabel, endpoint, headers } = resolveByokRequestParams(params.config);
+
+  const runStreamRequest = async (limitTokens: number, useJsonFormat: boolean) => {
+    const body: Record<string, unknown> = {
+      model: config.model,
+      messages,
+      temperature,
+      max_tokens: limitTokens,
+      stream: true,
+    };
+    if (useJsonFormat) {
+      body.response_format = { type: 'json_object' };
+    }
+    return fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+  };
+
+  let resp = await runStreamRequest(maxTokens, jsonMode);
+  if (!resp.ok && resp.status === 400 && jsonMode) {
+    const errPreview = await resp.text();
+    if (errPreview.toLowerCase().includes('response_format') || errPreview.toLowerCase().includes('json_object')) {
+      resp = await runStreamRequest(maxTokens, false);
+    } else {
+      throw new ProviderHttpError(400, `${providerLabel} error (400): ${errPreview.slice(0, 350)}`);
+    }
+  }
+
+  if (!resp.ok && resp.status === 402) {
+    const errText = await resp.text();
+    const affordMatch = errText.match(/can only afford\s+(\d+)/i);
+    const affordable = affordMatch ? Number(affordMatch[1]) : 0;
+    if (affordable >= 1024 && maxTokens > affordable - 128) {
+      resp = await runStreamRequest(Math.max(1024, affordable - 128), jsonMode);
+    } else {
+      throw new ProviderHttpError(402, `${providerLabel} error (402): ${errText.slice(0, 350)}`);
+    }
+  }
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new ProviderHttpError(resp.status, `${providerLabel} error (${resp.status}): ${errText.slice(0, 350)}`);
+  }
+
+  if (!resp.body) {
+    const text = await callByokCompletionRaw({ config, messages, jsonMode, temperature, maxTokens });
+    onDelta(text);
+    return text;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = '';
+  let fullContent = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    sseBuffer += decoder.decode(value, { stream: true });
+
+    let nlIndex: number;
+    while ((nlIndex = sseBuffer.indexOf('\n')) !== -1) {
+      const line = sseBuffer.slice(0, nlIndex).trim();
+      sseBuffer = sseBuffer.slice(nlIndex + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try {
+        const parsed = JSON.parse(payload) as {
+          choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>;
+          error?: { message?: string };
+        };
+        if (parsed.error?.message) {
+          throw new ProviderHttpError(502, parsed.error.message);
+        }
+        const delta = parsed.choices?.[0]?.delta?.content ?? parsed.choices?.[0]?.message?.content ?? '';
+        if (delta) {
+          fullContent += delta;
+          onDelta(fullContent);
+        }
+      } catch (parseErr) {
+        if (parseErr instanceof ProviderHttpError) throw parseErr;
+      }
+    }
+  }
+
+  if (!fullContent.trim()) {
+    throw new ProviderHttpError(502, `${providerLabel} returned an empty stream.`);
+  }
+  return fullContent;
 }
 
-app.get('/api/ai/status', (_req, res) => {
-  res.json({
-    geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
-    incidents: Array.from(recentModelIncidents.values()),
-  });
-});
-
-app.post('/api/ai/test-provider', async (req, res) => {
-  const config = req.body as AiProviderConfig;
-  const provider = config?.provider || 'gemini';
-  const model = config?.model || 'gemini-4-hydrogen';
-
-  try {
-    if (provider === 'gemini') {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new ProviderHttpError(503, 'Gemini inference key is unavailable on server.');
-      }
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-      });
-      await ai.models.generateContent({
-        model,
-        contents: 'Reply with OK',
-      });
-    } else {
-      await callOpenAiCompatibleProvider({
-        config,
-        systemInstruction: 'Return JSON {"ok": true}',
-        userPrompt: 'Return {"ok": true}',
-        maxTokens: 64,
-      });
+function detectStreamedPaths(accumulatedText: string): string[] {
+  const paths: string[] = [];
+  const regex = /"path"\s*:\s*"([^"]+)"/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(accumulatedText)) !== null) {
+    const clean = normalizeProjectFilePath(match[1]);
+    if (!paths.includes(clean)) {
+      paths.push(clean);
     }
-    clearIncident(provider, model);
-    res.json({ ok: true, provider, model });
-  } catch (err) {
-    const status = getHttpStatusFromError(err);
-    const message = err instanceof Error ? err.message : String(err);
-    const incident = classifyModelError({ status, message, provider, model });
-    recordIncident(incident);
-    res.status(status).json({ ok: false, error: incident.message, incident });
   }
-});
+  return paths;
+}
 
-app.post('/api/ai/generate', async (req, res) => {
-  const { prompt, providerConfig, enableAppAi = true } = req.body as {
-    prompt: string;
-    providerConfig?: AiProviderConfig;
-    enableAppAi?: boolean;
-  };
-  const config: AiProviderConfig = providerConfig || {
-    provider: 'gemini',
-    model: 'gemini-4-hydrogen',
-  };
+async function postProcessGeneratedProject(params: {
+  parsed: Record<string, unknown>;
+  prompt: string;
+  config: AiProviderConfig;
+}): Promise<Record<string, unknown>> {
+  const { parsed, prompt, config } = params;
+  let normalizedFiles: Array<{ path: string; language: string; content: string }> = Array.isArray(parsed.files)
+    ? (parsed.files as Array<{ path?: string; language?: string; content?: string }>).map((f) => {
+        const cleanPath = normalizeProjectFilePath(String(f.path || 'src/App.tsx'));
+        return {
+          path: cleanPath,
+          language: String(
+            f.language || (cleanPath.endsWith('.css') ? 'css' : cleanPath.endsWith('.ts') ? 'ts' : 'tsx'),
+          ),
+          content: String(f.content || ''),
+        };
+      })
+    : [];
 
-  try {
-    if (!prompt || !prompt.trim()) {
-      res.status(400).json({ error: 'Prompt is required.' });
-      return;
+  const hasRootApp = normalizedFiles.some((f) => {
+    const lower = f.path.toLowerCase();
+    return lower === 'src/app.tsx' || lower === 'src/app.jsx' || lower === 'app.tsx' || lower === 'app.jsx';
+  });
+
+  if (!hasRootApp && normalizedFiles.length > 0) {
+    const existingSummary = normalizedFiles
+      .map((f) => `--- ${f.path} ---\n${f.content.slice(0, 1800)}`)
+      .join('\n\n');
+    const repairPrompt = `You generated files for "${prompt.trim()}" but omitted src/App.tsx.
+Write the complete root "src/App.tsx" (default-exported function App) that composes the generated components cleanly with full responsive UI and working state.
+
+Existing generated files:
+${existingSummary}
+
+Return JSON: { "content": "..." }`;
+
+    let synthesizedAppContent = '';
+    try {
+      const repairRaw = await callByokCompletionRaw({
+        config,
+        messages: [
+          { role: 'system', content: `${SYSTEM_GENERATOR_PROMPT}\nRespond strictly with valid JSON.` },
+          { role: 'user', content: repairPrompt },
+        ],
+        jsonMode: true,
+        maxTokens: 6144,
+      });
+      const repairJson = extractJsonObject(repairRaw);
+      if (typeof repairJson.content === 'string' && repairJson.content.trim()) {
+        synthesizedAppContent = repairJson.content;
+      }
+    } catch {
+      // Fallback below guarantees valid src/App.tsx
     }
 
-    const aiCapabilityDirective = enableAppAi
-      ? '\n- Interactive App AI Runtime is enabled: whenever the site benefits from live AI (chatbots, content generators, smart search, summarizers, analyzers), wire real fetch(\'/api/app-ai\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify({ prompt, systemInstruction }) }) calls directly in the generated UI.'
-      : '';
+    if (!synthesizedAppContent) {
+      const firstComp = normalizedFiles.find((f) => f.path.endsWith('.tsx'));
+      if (firstComp) {
+        const rel = './' + firstComp.path.replace(/^src\//, '').replace(/\.tsx$/, '');
+        synthesizedAppContent = `import React from 'react';\nimport PrimaryView from '${rel}';\n\nexport default function App() {\n  return <PrimaryView />;\n}\n`;
+      }
+    }
 
-    const userPrompt = `Build a complete, multi-file React + TypeScript + Tailwind CSS website for this request:
+    if (synthesizedAppContent) {
+      normalizedFiles = [
+        { path: 'src/App.tsx', language: 'tsx', content: synthesizedAppContent },
+        ...normalizedFiles,
+      ];
+    }
+  }
+
+  if (!normalizedFiles.some((f) => f.path.toLowerCase() === 'src/index.css')) {
+    normalizedFiles.push({
+      path: 'src/index.css',
+      language: 'css',
+      content: '@import "tailwindcss";\n',
+    });
+  }
+
+  parsed.files = normalizedFiles;
+  if (!parsed.projectName && typeof parsed.title === 'string') {
+    parsed.projectName = parsed.title;
+  }
+  return parsed;
+}
+
+function buildGenerateUserPrompt(prompt: string, enableAppAi: boolean): string {
+  const aiCapabilityDirective = enableAppAi
+    ? '\n- Interactive App AI Runtime is enabled: whenever the site benefits from live AI (chatbots, content generators, smart search, summarizers, analyzers), wire real fetch(\'/api/app-ai\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify({ prompt, systemInstruction }) }) calls directly in the generated UI.'
+    : '';
+
+  return `Build a complete, multi-file React + TypeScript + Tailwind CSS web app (or Three.js / Canvas game) for this request:
 "${prompt.trim()}"${aiCapabilityDirective}
 
 CRITICAL OUTPUT RULES:
 - "src/App.tsx" MUST be the VERY FIRST file in the "files" array and MUST default-export App (export default function App()).
-- Keep mock/seed datasets concise (4-6 realistic items max) so every file, especially src/App.tsx and all imported components, completes without truncation.
+- Complete EVERY component and handler without placeholders or truncation.
 - Also include "src/index.css" starting with @import "tailwindcss";.
-
-Return JSON with this exact shape:
+- Respond strictly with valid JSON matching this shape:
 {
   "projectName": "Short site title",
   "description": "One-sentence summary of the site",
@@ -846,157 +1143,219 @@ Return JSON with this exact shape:
     { "path": "src/index.css", "language": "css", "content": "@import \\"tailwindcss\\";\\n" }
   ]
 }`;
+}
 
-    let parsed: Record<string, unknown>;
+function buildRefineUserPrompt(
+  instruction: string,
+  files: ProjectFile[],
+  selectedElement?: { tagName: string; textContent: string; className: string },
+): string {
+  const fileBundleText = (files || [])
+    .map((f) => `--- FILE: ${f.path} ---\n${f.content}`)
+    .join('\n\n');
 
-    if (config.provider === 'gemini') {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new ProviderHttpError(503, 'Server GEMINI_API_KEY is not configured.');
-      }
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-      });
-      const response = await ai.models.generateContent({
-        model: config.model || 'gemini-4-hydrogen',
-        contents: userPrompt,
-        config: {
-          systemInstruction: SYSTEM_GENERATOR_PROMPT,
-          maxOutputTokens: 32768,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              projectName: { type: Type.STRING },
-              description: { type: Type.STRING },
-              summary: { type: Type.STRING },
-              files: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    path: { type: Type.STRING },
-                    language: { type: Type.STRING },
-                    content: { type: Type.STRING },
-                  },
-                  required: ['path', 'language', 'content'],
-                },
-              },
-            },
-            required: ['projectName', 'description', 'summary', 'files'],
-          },
-        },
-      });
-      parsed = extractJsonObject(response.text || '{}');
-    } else {
-      parsed = await callOpenAiCompatibleProvider({
-        config,
-        systemInstruction: `${SYSTEM_GENERATOR_PROMPT}\nAlways respond strictly with valid JSON.`,
-        userPrompt,
-      });
+  const elementContext = selectedElement
+    ? `\nFocused element selected by user: <${selectedElement.tagName}> className="${selectedElement.className}" text="${selectedElement.textContent}"`
+    : '';
+
+  return `Refine the existing application according to EVERY detail in this instruction:
+"${instruction.trim()}"${elementContext}
+
+MULTI-PART REFINEMENT MANDATE:
+- Read every clause in the user's message carefully (e.g., color/palette changes, game/canvas bug fixes, speed/physics tweaks, new buttons or panels, layout changes) and apply ALL of them together in this single pass!
+- If fixing a broken game or "Play Game" button: ensure <canvas> is always mounted (never hidden before effect initialization), buttons use <button type="button" onClick={...}> (never <a href="/...">), and requestAnimationFrame loop transitions cleanly into active play.
+- If adding or updating AI features in the website, integrate real calls to POST /api/app-ai ({ prompt, messages, systemInstruction }) returning { text } — never fake setTimeout stubs.
+
+Current files:
+${fileBundleText}
+
+Return valid JSON containing ONLY the modified or newly created files (full complete file contents, never ellipses):
+{
+  "summary": "Concise list of every change applied",
+  "files": [
+    { "path": "src/App.tsx", "language": "tsx", "content": "..." }
+  ]
+}`;
+}
+
+app.get('/api/ai/status', (_req, res) => {
+  res.json({
+    byokOnly: true,
+    incidents: Array.from(recentModelIncidents.values()),
+  });
+});
+
+app.post('/api/ai/test-provider', async (req, res) => {
+  const config = normalizeProviderConfigToStudio(req.body as AiProviderConfig);
+  const provider = config.provider;
+  const model = config.model;
+
+  try {
+    await callByokCompletionRaw({
+      config,
+      messages: [
+        { role: 'system', content: 'Return JSON {"ok": true}' },
+        { role: 'user', content: 'Return {"ok": true}' },
+      ],
+      jsonMode: true,
+      maxTokens: 64,
+    });
+    clearIncident(provider, model);
+    res.json({ ok: true, provider, model, name: config.name });
+  } catch (err) {
+    const status = getHttpStatusFromError(err);
+    const message = err instanceof Error ? err.message : String(err);
+    const incident = classifyModelError({ status, message, provider, model });
+    recordIncident(incident);
+    res.status(status).json({ ok: false, error: incident.message, incident });
+  }
+});
+
+// Streaming website generation (SSE) for real-time Lovable/Base44-style progress
+app.post('/api/ai/generate/stream', async (req, res) => {
+  const { prompt, providerConfig, enableAppAi = true } = req.body as {
+    prompt: string;
+    providerConfig?: AiProviderConfig;
+    enableAppAi?: boolean;
+  };
+  const config = normalizeProviderConfigToStudio(
+    providerConfig || {
+      provider: 'custom',
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
+    },
+  );
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const sendEvent = (event: Record<string, unknown>) => {
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+  };
+
+  try {
+    if (!prompt || !prompt.trim()) {
+      sendEvent({ type: 'error', error: 'Prompt is required.' });
+      res.end();
+      return;
     }
 
-    let normalizedFiles: Array<{ path: string; language: string; content: string }> = Array.isArray(parsed.files)
-      ? (parsed.files as Array<{ path?: string; language?: string; content?: string }>).map((f) => {
-          const cleanPath = normalizeProjectFilePath(String(f.path || 'src/App.tsx'));
-          return {
-            path: cleanPath,
-            language: String(f.language || (cleanPath.endsWith('.css') ? 'css' : cleanPath.endsWith('.ts') ? 'ts' : 'tsx')),
-            content: String(f.content || ''),
-          };
-        })
-      : [];
-
-    const hasRootApp = normalizedFiles.some((f) => {
-      const lower = f.path.toLowerCase();
-      return lower === 'src/app.tsx' || lower === 'src/app.jsx' || lower === 'app.tsx' || lower === 'app.jsx';
+    const providerTitle = config.name?.trim() || 'BYOK Model';
+    sendEvent({
+      type: 'phase',
+      phase: `Connecting to ${providerTitle} (${config.model})...`,
     });
 
-    if (!hasRootApp && normalizedFiles.length > 0) {
-      const existingSummary = normalizedFiles
-        .map((f) => `--- ${f.path} ---\n${f.content.slice(0, 1800)}`)
-        .join('\n\n');
-      const repairPrompt = `You generated files for "${prompt.trim()}" but omitted src/App.tsx.
-Write the complete root "src/App.tsx" (default-exported function App) that composes the generated components cleanly with full responsive UI and working state.
+    const userPrompt = buildGenerateUserPrompt(prompt, enableAppAi);
+    let seenPaths: string[] = [];
+    let lastEmitAt = 0;
 
-Existing generated files:
-${existingSummary}
-
-Return JSON: { "content": "..." }`;
-
-      let synthesizedAppContent = '';
-      try {
-        if (config.provider === 'gemini' && process.env.GEMINI_API_KEY) {
-          const ai = new GoogleGenAI({
-            apiKey: process.env.GEMINI_API_KEY,
-            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-          });
-          const repairResp = await ai.models.generateContent({
-            model: config.model || 'gemini-4-hydrogen',
-            contents: repairPrompt,
-            config: {
-              systemInstruction: SYSTEM_GENERATOR_PROMPT,
-              maxOutputTokens: 8192,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  content: { type: Type.STRING },
-                },
-                required: ['content'],
-              },
-            },
-          });
-          const repairJson = extractJsonObject(repairResp.text || '{}');
-          if (typeof repairJson.content === 'string' && repairJson.content.trim()) {
-            synthesizedAppContent = repairJson.content;
+    const rawText = await streamByokCompletion({
+      config,
+      messages: [
+        { role: 'system', content: `${SYSTEM_GENERATOR_PROMPT}\nAlways respond strictly with valid JSON.` },
+        { role: 'user', content: userPrompt },
+      ],
+      jsonMode: true,
+      maxTokens: 12288,
+      onDelta: (accumulated) => {
+        const currentPaths = detectStreamedPaths(accumulated);
+        const now = Date.now();
+        if (currentPaths.length > seenPaths.length) {
+          if (seenPaths.length > 0) {
+            const justFinished = seenPaths[seenPaths.length - 1];
+            sendEvent({ type: 'file_done', path: justFinished });
           }
-        } else if (config.provider !== 'gemini') {
-          const repairJson = await callOpenAiCompatibleProvider({
-            config,
-            systemInstruction: `${SYSTEM_GENERATOR_PROMPT}\nRespond strictly with valid JSON.`,
-            userPrompt: repairPrompt,
+          const active = currentPaths[currentPaths.length - 1];
+          seenPaths = currentPaths;
+          sendEvent({
+            type: 'file_start',
+            path: active,
+            completedFiles: seenPaths.slice(0, -1),
+            chars: accumulated.length,
           });
-          if (typeof repairJson.content === 'string' && repairJson.content.trim()) {
-            synthesizedAppContent = repairJson.content;
-          }
+          lastEmitAt = now;
+        } else if (now - lastEmitAt > 250) {
+          lastEmitAt = now;
+          sendEvent({
+            type: 'progress',
+            activeFile: seenPaths[seenPaths.length - 1],
+            completedFiles: seenPaths.slice(0, -1),
+            chars: accumulated.length,
+          });
         }
-      } catch {
-        // Fallback below guarantees valid src/App.tsx
-      }
+      },
+    });
 
-      if (!synthesizedAppContent) {
-        const firstComp = normalizedFiles.find((f) => f.path.endsWith('.tsx'));
-        if (firstComp) {
-          const rel = './' + firstComp.path.replace(/^src\//, '').replace(/\.tsx$/, '');
-          synthesizedAppContent = `import React from 'react';\nimport PrimaryView from '${rel}';\n\nexport default function App() {\n  return <PrimaryView />;\n}\n`;
-        }
-      }
+    sendEvent({
+      type: 'phase',
+      phase: 'Validating files & preparing preview...',
+      completedFiles: seenPaths,
+      chars: rawText.length,
+    });
 
-      if (synthesizedAppContent) {
-        normalizedFiles = [
-          { path: 'src/App.tsx', language: 'tsx', content: synthesizedAppContent },
-          ...normalizedFiles,
-        ];
-      }
-    }
-
-    if (!normalizedFiles.some((f) => f.path.toLowerCase() === 'src/index.css')) {
-      normalizedFiles.push({
-        path: 'src/index.css',
-        language: 'css',
-        content: '@import "tailwindcss";\n',
-      });
-    }
-
-    parsed.files = normalizedFiles;
-    if (!parsed.projectName && typeof parsed.title === 'string') {
-      parsed.projectName = parsed.title;
-    }
-
+    const parsed = extractJsonObject(rawText);
+    const finalized = await postProcessGeneratedProject({ parsed, prompt, config });
     clearIncident(config.provider, config.model);
-    res.json(parsed);
+    sendEvent({ type: 'complete', result: finalized });
+    res.end();
+  } catch (err) {
+    const status = getHttpStatusFromError(err);
+    const message = err instanceof Error ? err.message : 'Generation failed';
+    const incident = classifyModelError({
+      status,
+      message,
+      provider: config.provider,
+      model: config.model,
+    });
+    recordIncident(incident);
+    sendEvent({ type: 'error', error: incident.message, incident });
+    res.end();
+  }
+});
+
+// Standard non-streaming website generation endpoint (compat fallback)
+app.post('/api/ai/generate', async (req, res) => {
+  const { prompt, providerConfig, enableAppAi = true } = req.body as {
+    prompt: string;
+    providerConfig?: AiProviderConfig;
+    enableAppAi?: boolean;
+  };
+  const config = normalizeProviderConfigToStudio(
+    providerConfig || {
+      provider: 'custom',
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
+    },
+  );
+
+  try {
+    if (!prompt || !prompt.trim()) {
+      res.status(400).json({ error: 'Prompt is required.' });
+      return;
+    }
+
+    const userPrompt = buildGenerateUserPrompt(prompt, enableAppAi);
+    const raw = await callByokCompletionRaw({
+      config,
+      messages: [
+        { role: 'system', content: `${SYSTEM_GENERATOR_PROMPT}\nAlways respond strictly with valid JSON.` },
+        { role: 'user', content: userPrompt },
+      ],
+      jsonMode: true,
+      maxTokens: 12288,
+    });
+
+    const parsed = extractJsonObject(raw);
+    const finalized = await postProcessGeneratedProject({ parsed, prompt, config });
+    clearIncident(config.provider, config.model);
+    res.json(finalized);
   } catch (err) {
     const status = getHttpStatusFromError(err);
     const message = err instanceof Error ? err.message : 'Generation failed';
@@ -1011,6 +1370,114 @@ Return JSON: { "content": "..." }`;
   }
 });
 
+// Streaming website refinement (SSE)
+app.post('/api/ai/refine/stream', async (req, res) => {
+  const { instruction, files, selectedElement, providerConfig } = req.body as {
+    instruction: string;
+    files: ProjectFile[];
+    selectedElement?: { tagName: string; textContent: string; className: string };
+    providerConfig?: AiProviderConfig;
+  };
+  const config = normalizeProviderConfigToStudio(
+    providerConfig || {
+      provider: 'custom',
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
+    },
+  );
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const sendEvent = (event: Record<string, unknown>) => {
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+  };
+
+  try {
+    if (!instruction || !instruction.trim()) {
+      sendEvent({ type: 'error', error: 'Refinement instruction is required.' });
+      res.end();
+      return;
+    }
+
+    const providerTitle = config.name?.trim() || 'BYOK Model';
+    sendEvent({
+      type: 'phase',
+      phase: `Analyzing codebase with ${providerTitle} (${config.model})...`,
+    });
+
+    const userPrompt = buildRefineUserPrompt(instruction, files, selectedElement);
+    let seenPaths: string[] = [];
+    let lastEmitAt = 0;
+
+    const rawText = await streamByokCompletion({
+      config,
+      messages: [
+        { role: 'system', content: `${SYSTEM_GENERATOR_PROMPT}\nAlways respond strictly with valid JSON.` },
+        { role: 'user', content: userPrompt },
+      ],
+      jsonMode: true,
+      maxTokens: 12288,
+      onDelta: (accumulated) => {
+        const currentPaths = detectStreamedPaths(accumulated);
+        const now = Date.now();
+        if (currentPaths.length > seenPaths.length) {
+          if (seenPaths.length > 0) {
+            sendEvent({ type: 'file_done', path: seenPaths[seenPaths.length - 1] });
+          }
+          const active = currentPaths[currentPaths.length - 1];
+          seenPaths = currentPaths;
+          sendEvent({
+            type: 'file_start',
+            path: active,
+            completedFiles: seenPaths.slice(0, -1),
+            chars: accumulated.length,
+          });
+          lastEmitAt = now;
+        } else if (now - lastEmitAt > 250) {
+          lastEmitAt = now;
+          sendEvent({
+            type: 'progress',
+            activeFile: seenPaths[seenPaths.length - 1],
+            completedFiles: seenPaths.slice(0, -1),
+            chars: accumulated.length,
+          });
+        }
+      },
+    });
+
+    const parsed = extractJsonObject(rawText);
+    if (Array.isArray(parsed.files)) {
+      parsed.files = (parsed.files as Array<{ path?: string; language?: string; content?: string }>).map((f) => ({
+        ...f,
+        path: normalizeProjectFilePath(String(f.path || 'src/App.tsx')),
+      }));
+    }
+
+    clearIncident(config.provider, config.model);
+    sendEvent({ type: 'complete', result: parsed });
+    res.end();
+  } catch (err) {
+    const status = getHttpStatusFromError(err);
+    const message = err instanceof Error ? err.message : 'Refinement failed';
+    const incident = classifyModelError({
+      status,
+      message,
+      provider: config.provider,
+      model: config.model,
+    });
+    recordIncident(incident);
+    sendEvent({ type: 'error', error: incident.message, incident });
+    res.end();
+  }
+});
+
+// Standard non-streaming refine endpoint
 app.post('/api/ai/refine', async (req, res) => {
   const { instruction, files, selectedElement, providerConfig } = req.body as {
     instruction: string;
@@ -1018,10 +1485,14 @@ app.post('/api/ai/refine', async (req, res) => {
     selectedElement?: { tagName: string; textContent: string; className: string };
     providerConfig?: AiProviderConfig;
   };
-  const config: AiProviderConfig = providerConfig || {
-    provider: 'gemini',
-    model: 'gemini-4-hydrogen',
-  };
+  const config = normalizeProviderConfigToStudio(
+    providerConfig || {
+      provider: 'custom',
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
+    },
+  );
 
   try {
     if (!instruction || !instruction.trim()) {
@@ -1029,77 +1500,18 @@ app.post('/api/ai/refine', async (req, res) => {
       return;
     }
 
-    const fileBundleText = (files || [])
-      .map((f) => `--- FILE: ${f.path} ---\n${f.content}`)
-      .join('\n\n');
+    const userPrompt = buildRefineUserPrompt(instruction, files, selectedElement);
+    const raw = await callByokCompletionRaw({
+      config,
+      messages: [
+        { role: 'system', content: `${SYSTEM_GENERATOR_PROMPT}\nAlways respond strictly with valid JSON.` },
+        { role: 'user', content: userPrompt },
+      ],
+      jsonMode: true,
+      maxTokens: 12288,
+    });
 
-    const elementContext = selectedElement
-      ? `\nFocused element selected by user: <${selectedElement.tagName}> className="${selectedElement.className}" text="${selectedElement.textContent}"`
-      : '';
-
-    const userPrompt = `Refine the existing website according to this instruction:
-"${instruction.trim()}"${elementContext}
-
-If adding or updating AI features in the website, always integrate real calls to POST /api/app-ai ({ prompt, messages, systemInstruction }) returning { text } — never fake setTimeout stubs.
-
-Current files:
-${fileBundleText}
-
-Return JSON containing ONLY the modified or newly created files (full file contents, never ellipses):
-{
-  "summary": "Brief description of the change made",
-  "files": [
-    { "path": "src/App.tsx", "language": "tsx", "content": "..." }
-  ]
-}`;
-
-    let parsed: Record<string, unknown>;
-
-    if (config.provider === 'gemini') {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new ProviderHttpError(503, 'Server GEMINI_API_KEY is not configured.');
-      }
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-      });
-      const response = await ai.models.generateContent({
-        model: config.model || 'gemini-4-hydrogen',
-        contents: userPrompt,
-        config: {
-          systemInstruction: SYSTEM_GENERATOR_PROMPT,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              summary: { type: Type.STRING },
-              files: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    path: { type: Type.STRING },
-                    language: { type: Type.STRING },
-                    content: { type: Type.STRING },
-                  },
-                  required: ['path', 'language', 'content'],
-                },
-              },
-            },
-            required: ['summary', 'files'],
-          },
-        },
-      });
-      parsed = extractJsonObject(response.text || '{}');
-    } else {
-      parsed = await callOpenAiCompatibleProvider({
-        config,
-        systemInstruction: `${SYSTEM_GENERATOR_PROMPT}\nAlways respond strictly with valid JSON.`,
-        userPrompt,
-      });
-    }
-
+    const parsed = extractJsonObject(raw);
     if (Array.isArray(parsed.files)) {
       parsed.files = (parsed.files as Array<{ path?: string; language?: string; content?: string }>).map(
         (f) => ({
@@ -1125,7 +1537,59 @@ Return JSON containing ONLY the modified or newly created files (full file conte
   }
 });
 
-// Live AI runtime endpoint called directly by generated apps (Preview & Published /p/:slug)
+// Pure BYOK Voice Studio conversational turn (zero hardcoded Gemini Live keys)
+app.post('/api/ai/voice-turn', async (req, res) => {
+  const { messages, mode, projectName, providerConfig } = req.body as {
+    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    mode?: 'create' | 'refine';
+    projectName?: string;
+    providerConfig?: AiProviderConfig;
+  };
+  const config = normalizeProviderConfigToStudio(
+    providerConfig || {
+      provider: 'custom',
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
+    },
+  );
+
+  try {
+    const sys =
+      mode === 'refine' && projectName
+        ? `You are Mist, a sharp, concise AI website & game design partner speaking aloud with a user refining "${projectName}". Keep each response crisp (1-3 short conversational sentences), practical, and focused on concrete UI, color, physics, or feature decisions.`
+        : 'You are Mist, a sharp, concise AI website & game design partner speaking aloud with a user brainstorming a new site or game. Keep each response crisp (1-3 short conversational sentences), helpful, and actionable.';
+
+    const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: sys },
+      ...(Array.isArray(messages) ? messages : []),
+    ];
+
+    const text = await callByokCompletionRaw({
+      config,
+      messages: chatMessages,
+      jsonMode: false,
+      temperature: 0.65,
+      maxTokens: 512,
+    });
+
+    clearIncident(config.provider, config.model);
+    res.json({ text: text.trim(), provider: config.name || config.provider, model: config.model });
+  } catch (err) {
+    const status = getHttpStatusFromError(err);
+    const message = err instanceof Error ? err.message : 'Voice request failed';
+    const incident = classifyModelError({
+      status,
+      message,
+      provider: config.provider,
+      model: config.model,
+    });
+    recordIncident(incident);
+    res.status(status).json({ error: incident.message, incident });
+  }
+});
+
+// Live BYOK AI runtime endpoint called directly by generated apps (Preview & Published /p/:slug)
 app.post('/api/app-ai', async (req, res) => {
   const { prompt, messages, systemInstruction, jsonMode, providerConfig } = req.body as {
     prompt?: string;
@@ -1134,10 +1598,15 @@ app.post('/api/app-ai', async (req, res) => {
     jsonMode?: boolean;
     providerConfig?: AiProviderConfig;
   };
-  const config: AiProviderConfig = providerConfig || {
-    provider: 'gemini',
-    model: 'gemini-4-hydrogen',
-  };
+  const config = normalizeProviderConfigToStudio(
+    providerConfig || {
+      provider: 'custom',
+      name: 'BYOK Provider',
+      baseUrl: '',
+      model: '',
+      apiKey: '',
+    },
+  );
 
   try {
     const trimmedPrompt = (prompt || '').trim();
@@ -1147,55 +1616,28 @@ app.post('/api/app-ai', async (req, res) => {
       return;
     }
 
-    let text = '';
-    if (config.provider === 'gemini') {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new ProviderHttpError(503, 'Server GEMINI_API_KEY is not configured.');
-      }
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-      });
-      const contents = hasMessages
-        ? messages!
-            .filter((m) => m.role !== 'system')
-            .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
-            .join('\n\n')
-        : trimmedPrompt;
-      const response = await ai.models.generateContent({
-        model: config.model || 'gemini-4-hydrogen',
-        contents,
-        config: {
-          systemInstruction:
-            systemInstruction ||
-            'You are a concise, helpful backend AI powering an interactive web application built with Mist.',
-          ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
-        },
-      });
-      text = response.text || '';
-    } else {
-      const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        {
-          role: 'system',
-          content:
-            systemInstruction ||
-            'You are a concise, helpful backend AI powering an interactive web application built with Mist.',
-        },
-        ...(hasMessages ? messages! : [{ role: 'user' as const, content: trimmedPrompt }]),
-      ];
-      text = await callOpenAiCompatibleRaw({
-        config,
-        messages: chatMessages,
-        jsonMode: Boolean(jsonMode),
-        temperature: 0.6,
-      });
-    }
+    const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      {
+        role: 'system',
+        content:
+          systemInstruction ||
+          'You are a concise, helpful backend AI powering an interactive web application built with Mist.',
+      },
+      ...(hasMessages ? messages! : [{ role: 'user' as const, content: trimmedPrompt }]),
+    ];
+
+    const text = await callByokCompletionRaw({
+      config,
+      messages: chatMessages,
+      jsonMode: Boolean(jsonMode),
+      temperature: 0.6,
+      maxTokens: 2048,
+    });
 
     clearIncident(config.provider, config.model);
     res.json({
       text,
-      provider: config.provider,
+      provider: config.name || config.provider,
       model: config.model,
     });
   } catch (err) {
@@ -1256,7 +1698,10 @@ app.post('/api/deployments', async (req, res) => {
       title: string;
       files: ProjectFile[];
     };
-    const cleanSlug = (slug || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+    const cleanSlug = (slug || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
     if (cleanSlug.length < 2 || !Array.isArray(files)) {
       res.status(400).json({ error: 'Valid slug and project files are required.' });
       return;
@@ -1291,6 +1736,16 @@ app.post('/api/deployments', async (req, res) => {
   }
 });
 
+app.delete('/api/deployments/:slug', (req, res) => {
+  const cleanSlug = (req.params.slug || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+  const store = readDeploymentsStore();
+  if (store[cleanSlug]) {
+    delete store[cleanSlug];
+    writeDeploymentsStore(store);
+  }
+  res.json({ ok: true, slug: cleanSlug });
+});
+
 app.get('/p/:slug', (req, res) => {
   const cleanSlug = (req.params.slug || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-');
   const store = readDeploymentsStore();
@@ -1308,148 +1763,7 @@ app.get('/p/:slug', (req, res) => {
   res.send(record.htmlBundle);
 });
 
-// --- 6. Gemini Live API Voice Chat WebSocket Bridge (/api/voice/live) ---
-function setupVoiceLiveWebSocket(server: http.Server) {
-  const wss = new WebSocketServer({ noServer: true });
-
-  server.on('upgrade', (request, socket, head) => {
-    const reqUrl = request.url || '';
-    if (reqUrl.startsWith('/api/voice/live')) {
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request);
-      });
-    }
-  });
-
-  wss.on('connection', async (clientWs) => {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      const incident = classifyModelError({
-        status: 503,
-        message: 'Server GEMINI_API_KEY is not configured for voice chat.',
-        provider: 'gemini',
-        model: 'gemini-3.8-live',
-      });
-      recordIncident(incident);
-      clientWs.send(JSON.stringify({ type: 'error', incident }));
-      clientWs.close();
-      return;
-    }
-
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-    });
-
-    let liveSession: Awaited<ReturnType<typeof ai.live.connect>> | null = null;
-    let isClosed = false;
-
-    try {
-      liveSession = await ai.live.connect({
-        model: 'gemini-3.8-live',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
-          },
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          systemInstruction:
-            'You are Mist, a sharp, concise AI website builder partner. Help the user brainstorm, structure, and refine their website design through natural spoken conversation. Keep replies crisp, practical, and focused on layout, copy, colors, and features.',
-        },
-        callbacks: {
-          onopen: () => {
-            if (!isClosed) {
-              clearIncident('gemini', 'gemini-3.8-live');
-              clientWs.send(JSON.stringify({ type: 'ready', model: 'gemini-3.8-live' }));
-            }
-          },
-          onmessage: (message: LiveServerMessage) => {
-            if (isClosed) return;
-            const content = message.serverContent;
-            if (content?.inputTranscription?.text) {
-              clientWs.send(
-                JSON.stringify({ type: 'inputTranscript', text: content.inputTranscription.text }),
-              );
-            }
-            if (content?.outputTranscription?.text) {
-              clientWs.send(
-                JSON.stringify({ type: 'outputTranscript', text: content.outputTranscription.text }),
-              );
-            }
-            for (const part of content?.modelTurn?.parts ?? []) {
-              if (part.inlineData?.data) {
-                clientWs.send(JSON.stringify({ type: 'audio', audio: part.inlineData.data }));
-              }
-            }
-            if (content?.interrupted) {
-              clientWs.send(JSON.stringify({ type: 'interrupted' }));
-            }
-            if (content?.turnComplete) {
-              clientWs.send(JSON.stringify({ type: 'turnComplete' }));
-            }
-          },
-          onerror: (err: unknown) => {
-            if (isClosed) return;
-            const msg = err instanceof Error ? err.message : String(err);
-            const incident = classifyModelError({
-              status: getHttpStatusFromError(err),
-              message: msg,
-              provider: 'gemini',
-              model: 'gemini-3.8-live',
-            });
-            recordIncident(incident);
-            clientWs.send(JSON.stringify({ type: 'error', incident }));
-          },
-          onclose: () => {
-            if (!isClosed) {
-              clientWs.send(JSON.stringify({ type: 'closed' }));
-            }
-          },
-        },
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unable to connect to Gemini Live voice API.';
-      const incident = classifyModelError({
-        status: getHttpStatusFromError(err),
-        message: msg,
-        provider: 'gemini',
-        model: 'gemini-3.8-live',
-      });
-      recordIncident(incident);
-      clientWs.send(JSON.stringify({ type: 'error', incident }));
-      clientWs.close();
-      return;
-    }
-
-    clientWs.on('message', (rawData) => {
-      if (isClosed || !liveSession) return;
-      try {
-        const msg = JSON.parse(rawData.toString()) as { audio?: string; text?: string };
-        if (msg.audio) {
-          liveSession.sendRealtimeInput({
-            audio: { data: msg.audio, mimeType: 'audio/pcm;rate=16000' },
-          });
-        } else if (msg.text) {
-          liveSession.sendRealtimeInput({ text: msg.text });
-        }
-      } catch {
-        // Ignore malformed socket frames
-      }
-    });
-
-    clientWs.on('close', () => {
-      isClosed = true;
-      try {
-        liveSession?.close();
-      } catch {
-        // Ignore close errors
-      }
-    });
-  });
-}
-
-// --- 7. Vite Dev Middleware / Production Static Serving ---
+// --- 6. Vite Dev Middleware / Production Static Serving ---
 async function startServer() {
   await ensureVendorRuntime();
 
@@ -1469,8 +1783,6 @@ async function startServer() {
   }
 
   const server = http.createServer(app);
-  setupVoiceLiveWebSocket(server);
-
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Mist server listening on http://0.0.0.0:${PORT}`);
   });

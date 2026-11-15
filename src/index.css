@@ -23,48 +23,71 @@
   }
 }
 
-/* Soft dual-mode atmospheric surface blending */
+/* Multi-stop studio atmospheric gradients for light & dark themes */
 .mist-ambient-canvas {
-  background-color: #fafafa;
+  background-color: #f8fafc;
   background-image:
-    radial-gradient(ellipse 80% 52% at 50% -12%, rgba(37, 99, 235, 0.11), transparent 72%),
-    radial-gradient(ellipse 55% 38% at 88% 12%, rgba(99, 102, 241, 0.08), transparent 68%),
-    radial-gradient(ellipse 48% 34% at 10% 30%, rgba(14, 165, 233, 0.07), transparent 64%);
+    radial-gradient(ellipse 82% 52% at 50% -14%, rgba(37, 99, 235, 0.14), transparent 72%),
+    radial-gradient(ellipse 56% 42% at 88% 10%, rgba(79, 70, 229, 0.10), transparent 68%),
+    radial-gradient(ellipse 48% 36% at 8% 32%, rgba(6, 182, 212, 0.09), transparent 64%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7) 0%, rgba(248, 250, 252, 1) 100%);
   transition: background-color 0.3s ease, color 0.25s ease;
 }
 
 .dark .mist-ambient-canvas {
-  background-color: #09090b;
+  background-color: #08090d;
   background-image:
-    radial-gradient(ellipse 85% 58% at 50% -14%, rgba(37, 99, 235, 0.24), transparent 72%),
-    radial-gradient(ellipse 58% 42% at 86% 16%, rgba(79, 70, 229, 0.16), transparent 68%),
-    radial-gradient(ellipse 48% 36% at 12% 36%, rgba(14, 165, 233, 0.11), transparent 65%);
+    radial-gradient(ellipse 88% 58% at 50% -16%, rgba(37, 99, 235, 0.28), transparent 72%),
+    radial-gradient(ellipse 60% 44% at 88% 14%, rgba(99, 102, 241, 0.19), transparent 68%),
+    radial-gradient(ellipse 50% 38% at 10% 34%, rgba(14, 165, 233, 0.14), transparent 65%),
+    linear-gradient(180deg, rgba(10, 12, 20, 0.5) 0%, rgba(8, 9, 13, 1) 100%);
 }
 
 .mist-composer-shell {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.94) 100%);
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.98) 0%, rgba(244, 247, 255, 0.94) 100%);
   box-shadow:
-    0 22px 54px -26px rgba(15, 23, 42, 0.18),
-    0 1px 0 0 rgba(255, 255, 255, 0.9) inset;
-  backdrop-filter: blur(14px);
+    0 24px 58px -26px rgba(37, 99, 235, 0.22),
+    0 1px 0 0 rgba(255, 255, 255, 0.95) inset;
+  backdrop-filter: blur(16px);
 }
 
 .dark .mist-composer-shell {
-  background: linear-gradient(180deg, rgba(24, 24, 27, 0.9) 0%, rgba(14, 14, 17, 0.95) 100%);
+  background: linear-gradient(165deg, rgba(22, 24, 34, 0.92) 0%, rgba(12, 13, 19, 0.96) 100%);
   box-shadow:
-    0 26px 68px -22px rgba(0, 0, 0, 0.78),
-    0 0 0 1px rgba(255, 255, 255, 0.06) inset;
-  backdrop-filter: blur(14px);
+    0 28px 72px -22px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(148, 163, 184, 0.08) inset;
+  backdrop-filter: blur(16px);
 }
 
 .mist-surface-card {
-  background: rgba(255, 255, 255, 0.86);
-  backdrop-filter: blur(10px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92) 0%, rgba(248, 250, 252, 0.86) 100%);
+  backdrop-filter: blur(12px);
 }
 
 .dark .mist-surface-card {
-  background: rgba(18, 18, 22, 0.82);
-  backdrop-filter: blur(10px);
+  background: linear-gradient(180deg, rgba(20, 22, 30, 0.88) 0%, rgba(14, 15, 20, 0.86) 100%);
+  backdrop-filter: blur(12px);
+}
+
+.mist-primary-gradient {
+  background-image: linear-gradient(135deg, #2563eb 0%, #4f46e5 52%, #0284c7 100%);
+}
+
+.mist-primary-gradient:hover {
+  background-image: linear-gradient(135deg, #1d4ed8 0%, #4338ca 52%, #0369a1 100%);
+}
+
+@keyframes mistProgressShimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(220%);
+  }
+}
+
+.mist-shimmer-bar {
+  animation: mistProgressShimmer 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
 .mist-scrollbar::-webkit-scrollbar {
