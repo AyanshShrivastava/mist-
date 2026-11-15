@@ -18,13 +18,32 @@ export interface ModelHealthIncident {
   updatedAt: string;
 }
 
+/**
+ * Scrubs API keys, bearer tokens, and ephemeral session tokens from arbitrary error strings
+ * so secrets never appear in UI banners or server logs.
+ */
+export function redactSecrets(input: string): string {
+  if (!input) return '';
+  return input
+    .replace(/Bearer\s+[A-Za-z0-9._\-+=]+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(sk-or-v1-[A-Za-z0-9_-]{8,})/g, 'sk-or-v1-[REDACTED]')
+    .replace(/\b(sk-proj-[A-Za-z0-9_-]{8,})/g, 'sk-proj-[REDACTED]')
+    .replace(/\b(sk-[A-Za-z0-9_-]{12,})/g, 'sk-[REDACTED]')
+    .replace(/\b(gsk_[A-Za-z0-9_-]{8,})/g, 'gsk_[REDACTED]')
+    .replace(/\b(AIza[0-9A-Za-z_-]{12,})/g, 'AIza[REDACTED]')
+    .replace(/\b(nvapi-[A-Za-z0-9_-]{8,})/g, 'nvapi-[REDACTED]')
+    .replace(/\b(mist_sess_[A-Za-z0-9_-]{8,})/g, 'mist_sess_[REDACTED]')
+    .replace(/([?&](?:key|api_key|token)=)[^&\s]+/gi, '$1[REDACTED]');
+}
+
 export function classifyModelError(params: {
   status?: number;
   message: string;
   provider: AiProviderId;
   model: string;
 }): ModelHealthIncident {
-  const { status, message, provider, model } = params;
+  const { status, provider, model } = params;
+  const message = redactSecrets(params.message || '');
   const lower = message.toLowerCase();
   const now = new Date().toISOString();
 

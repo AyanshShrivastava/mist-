@@ -124,6 +124,7 @@ export async function listUserProjectsFromFirestore(uid: string): Promise<MistPr
         description: String(data.description || ''),
         prompt: String(data.prompt || ''),
         templateId: data.templateId ? String(data.templateId) : undefined,
+        appAiEnabled: typeof data.appAiEnabled === 'boolean' ? data.appAiEnabled : undefined,
         publishedSlug: data.publishedSlug ? String(data.publishedSlug) : undefined,
         isPublished: Boolean(data.isPublished),
         createdAt: toIsoString(data.createdAt),
@@ -264,6 +265,7 @@ export async function saveProjectToFirestore(
             name: safeName,
             description: safeDescription,
             prompt: safePrompt,
+            appAiEnabled: Boolean(project.appAiEnabled),
             isPublished: Boolean(project.isPublished),
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
@@ -304,6 +306,7 @@ export async function saveProjectToFirestore(
           name: safeName,
           description: safeDescription,
           prompt: safePrompt,
+          appAiEnabled: Boolean(project.appAiEnabled),
           isPublished: Boolean(project.isPublished),
           updatedAt: serverTimestamp(),
         };

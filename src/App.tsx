@@ -14,6 +14,7 @@ import type { ModelHealthIncident } from './utils/aiErrors';
 import {
   DEFAULT_BYOK_CONFIG,
   normalizeProviderConfigToStudio,
+  shouldEnableAppAi,
 } from './data/models';
 import {
   applyVisualPatchToFiles,
@@ -60,7 +61,8 @@ const DEFAULT_STUDIO_SETTINGS: StudioSettings = {
   theme: 'dark',
   defaultViewMode: 'preview',
   defaultViewport: 'desktop',
-  enableAppAi: true,
+  enableAppAi: false,
+  appAiMode: 'on_request',
 };
 
 function loadLocalProjects(): MistProject[] {
@@ -86,11 +88,36 @@ function loadProviderConfig(): AiProviderConfig {
   return { ...DEFAULT_BYOK_CONFIG };
 }
 
+function persistProviderConfig(config: AiProviderConfig): void {
+  try {
+    const safeToPersist: AiProviderConfig = config.sessionOnlyKey
+      ? { ...config, apiKey: '' }
+      : config;
+    localStorage.setItem(STORAGE_PROVIDER_KEY, JSON.stringify(safeToPersist));
+  } catch {
+    // ignore
+  }
+}
+
 function loadStudioSettings(): StudioSettings {
   try {
     const raw = localStorage.getItem(STORAGE_SETTINGS_KEY);
     if (raw) {
-      return { ...DEFAULT_STUDIO_SETTINGS, ...(JSON.parse(raw) as Partial<StudioSettings>) };
+      const parsed = JSON.parse(raw) as Partial<StudioSettings>;
+      const resolvedMode =
+        parsed.appAiMode === 'on_request' ||
+        parsed.appAiMode === 'always' ||
+        parsed.appAiMode === 'off'
+          ? parsed.appAiMode
+          : parsed.enableAppAi === false
+            ? 'off'
+            : 'on_request';
+      return {
+        ...DEFAULT_STUDIO_SETTINGS,
+        ...parsed,
+        appAiMode: resolvedMode,
+        enableAppAi: resolvedMode === 'always',
+      };
     }
     const legacyTheme = localStorage.getItem(STORAGE_THEME_KEY);
     if (legacyTheme === 'light' || legacyTheme === 'dark') {
@@ -270,6 +297,10 @@ export default function App() {
   // Bundle active project for live preview
   const runBundle = useCallback(async (project: MistProject) => {
     setIsBundling(true);
+    const hasAppAi = Boolean(
+      project.appAiEnabled ||
+        project.files.some((f) => /\/api\/app-ai|window\.mistAI/.test(f.content)),
+    );
     try {
       const resp = await fetch('/api/bundle', {
         method: 'POST',
@@ -278,6 +309,7 @@ export default function App() {
           files: project.files,
           title: project.name,
           includeInspector: true,
+          enableAppAi: hasAppAi,
         }),
       });
       const data = (await resp.json()) as { html?: string; bundleError?: string; error?: string };
@@ -345,6 +377,11 @@ export default function App() {
         return;
       }
 
+      const enableAppAiForBuild = shouldEnableAppAi(
+        prompt,
+        studioSettingsRef.current.appAiMode,
+      );
+
       setIsGenerating(true);
       setGenerationError(null);
       const startedAt = Date.now();
@@ -362,7 +399,7 @@ export default function App() {
           body: JSON.stringify({
             prompt,
             providerConfig: cfg,
-            enableAppAi: studioSettingsRef.current.enableAppAi,
+            enableAppAi: enableAppAiForBuild,
           }),
         });
 
@@ -432,6 +469,7 @@ export default function App() {
           name: (data.projectName || 'Generated Website').slice(0, 120),
           description: (data.description || prompt).slice(0, 500),
           prompt,
+          appAiEnabled: enableAppAiForBuild,
           isPublished: false,
           createdAt: now,
           updatedAt: now,
@@ -497,23 +535,26 @@ export default function App() {
                   provider: cloudPrefs.preferredProvider || prev.provider,
                   model: cloudPrefs.preferredModel || prev.model,
                 });
-                try {
-                  localStorage.setItem(STORAGE_PROVIDER_KEY, JSON.stringify(updated));
-                } catch {
-                  // ignore
-                }
+                persistProviderConfig(updated);
                 return updated;
               });
             }
-            setStudioSettings((prev) => ({
-              theme: cloudPrefs.theme || prev.theme,
-              defaultViewMode: cloudPrefs.defaultViewMode || prev.defaultViewMode,
-              defaultViewport: cloudPrefs.defaultViewport || prev.defaultViewport,
-              enableAppAi:
-                typeof cloudPrefs.enableAppAi === 'boolean'
+            setStudioSettings((prev) => {
+              const nextMode =
+                cloudPrefs.appAiMode ||
+                (typeof cloudPrefs.enableAppAi === 'boolean'
                   ? cloudPrefs.enableAppAi
-                  : prev.enableAppAi,
-            }));
+                    ? 'always'
+                    : prev.appAiMode
+                  : prev.appAiMode);
+              return {
+                theme: cloudPrefs.theme || prev.theme,
+                defaultViewMode: cloudPrefs.defaultViewMode || prev.defaultViewMode,
+                defaultViewport: cloudPrefs.defaultViewport || prev.defaultViewport,
+                appAiMode: nextMode,
+                enableAppAi: nextMode === 'always',
+              };
+            });
           }
 
           await syncUserProfile(firebaseUser, {
@@ -526,6 +567,7 @@ export default function App() {
               typeof cloudPrefs?.enableAppAi === 'boolean'
                 ? cloudPrefs.enableAppAi
                 : studioSettingsRef.current.enableAppAi,
+            appAiMode: cloudPrefs?.appAiMode || studioSettingsRef.current.appAiMode,
           });
 
           const cloudProjects = await listUserProjectsFromFirestore(firebaseUser.uid);
@@ -603,6 +645,12 @@ export default function App() {
       return;
     }
 
+    const enableAppAiForRefine = shouldEnableAppAi(
+      instruction,
+      studioSettingsRef.current.appAiMode,
+      activeProject.appAiEnabled ? true : undefined,
+    );
+
     setIsRefining(true);
     setRefineError(null);
     const startedAt = Date.now();
@@ -620,6 +668,7 @@ export default function App() {
         body: JSON.stringify({
           instruction,
           files: activeProject.files,
+          enableAppAi: enableAppAiForRefine,
           selectedElement: selectedElement
             ? {
                 tagName: selectedElement.tagName,
@@ -693,6 +742,7 @@ export default function App() {
 
       updateActiveProject((prev) => ({
         ...prev,
+        appAiEnabled: Boolean(prev.appAiEnabled || enableAppAiForRefine),
         files: mergeProjectFiles(prev.files, data.files!),
         chatHistory: [
           ...prev.chatHistory,
@@ -736,17 +786,32 @@ export default function App() {
 
   const handleDeployProject = async (slug: string) => {
     if (!activeProject) return;
+    if (!user) {
+      setDeployError('Sign in with Google before publishing a live website.');
+      setAuthPromptReason('Sign in with Google to publish and own live website URLs.');
+      setAccountOpen(true);
+      return;
+    }
     setIsDeploying(true);
     setDeployError(null);
+    const hasAppAi = Boolean(
+      activeProject.appAiEnabled ||
+        activeProject.files.some((f) => /\/api\/app-ai|window\.mistAI/.test(f.content)),
+    );
     try {
+      const idToken = await user.getIdToken();
       const resp = await fetch('/api/deployments', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
         body: JSON.stringify({
           slug,
           projectId: activeProject.id,
           title: activeProject.name,
           files: activeProject.files,
+          enableAppAi: hasAppAi,
         }),
       });
       const data = (await resp.json()) as {
@@ -768,7 +833,7 @@ export default function App() {
       };
       updateActiveProject(() => deployedProject);
 
-      if (user && data.htmlBundle) {
+      if (data.htmlBundle) {
         await saveProjectToFirestore(deployedProject);
         await saveDeploymentToFirestore({
           slug: data.slug,
@@ -786,8 +851,19 @@ export default function App() {
   };
 
   const handleDeleteDeployment = async (slug: string) => {
+    if (!user) {
+      setAuthPromptReason('Sign in with Google to unpublish your website.');
+      setAccountOpen(true);
+      return;
+    }
     try {
-      await fetch(`/api/deployments/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+      const idToken = await user.getIdToken();
+      await fetch(`/api/deployments/${encodeURIComponent(slug)}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
       await refreshDeployments();
     } catch {
       // ignore
@@ -802,11 +878,7 @@ export default function App() {
     setModelIncident((prev) =>
       prev && (prev.provider !== next.provider || prev.model !== next.model) ? null : prev,
     );
-    try {
-      localStorage.setItem(STORAGE_PROVIDER_KEY, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
+    persistProviderConfig(next);
     if (user) {
       void syncUserProfile(user, {
         preferredProvider: next.provider,
@@ -817,13 +889,23 @@ export default function App() {
 
   const handleUpdateSettings = (partial: Partial<StudioSettings>) => {
     setStudioSettings((prev) => {
-      const next = { ...prev, ...partial };
+      const next: StudioSettings = {
+        ...prev,
+        ...partial,
+        enableAppAi:
+          partial.appAiMode !== undefined
+            ? partial.appAiMode === 'always'
+            : typeof partial.enableAppAi === 'boolean'
+              ? partial.enableAppAi
+              : prev.appAiMode === 'always',
+      };
       if (user) {
         void syncUserProfile(user, {
           theme: next.theme,
           defaultViewMode: next.defaultViewMode,
           defaultViewport: next.defaultViewport,
           enableAppAi: next.enableAppAi,
+          appAiMode: next.appAiMode,
         }).catch(() => {});
       }
       return next;
@@ -962,7 +1044,10 @@ export default function App() {
           streamProgress={aiStreamProgress}
           generationError={generationError}
           darkMode={darkMode}
-          enableAppAi={studioSettings.enableAppAi}
+          appAiMode={studioSettings.appAiMode}
+          onChangeAppAiMode={(mode) =>
+            handleUpdateSettings({ appAiMode: mode, enableAppAi: mode === 'always' })
+          }
           onToggleDarkMode={() =>
             handleUpdateSettings({ theme: darkMode ? 'light' : 'dark' })
           }

@@ -7,9 +7,20 @@ import * as esbuild from 'esbuild';
 import { compile as compileTailwind } from 'tailwindcss';
 import dotenv from 'dotenv';
 import type { AiProviderConfig, AiProviderId, ProjectFile } from './src/types/mist';
-import { normalizeProviderConfigToStudio } from './src/data/models';
-import { classifyModelError, type ModelHealthIncident } from './src/utils/aiErrors';
+import { normalizeProviderConfigToStudio, shouldEnableAppAi } from './src/data/models';
+import { classifyModelError, redactSecrets, type ModelHealthIncident } from './src/utils/aiErrors';
 import { normalizeProjectFilePath, resolveAppEntryPath } from './src/utils/projectOps';
+import {
+  assertSafeExternalUrl,
+  createPreviewAiSession,
+  createRateLimiter,
+  resolvePreviewAiSession,
+  revokePreviewAiSession,
+  sanitizeErrorMessage,
+  SecurityValidationError,
+  verifyFirebaseAuthHeader,
+} from './src/utils/serverSecurity';
+import { fetchGatewayModelsCatalog } from './src/utils/modelCatalogServer';
 
 dotenv.config();
 
@@ -18,8 +29,18 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const DEPLOYMENTS_FILE = path.resolve(process.cwd(), '.mist-deployments.json');
 
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 app.use(express.json({ limit: '6mb' }));
 app.use('/src/assets', express.static(path.resolve(process.cwd(), 'src/assets')));
+
+const aiRateLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 60, label: 'AI' });
+const catalogRateLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 120, label: 'model catalog' });
+const deployRateLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 30, label: 'deployment' });
 
 // Track observed model rate-limit & server-outage incidents
 const recentModelIncidents = new Map<string, ModelHealthIncident>();
@@ -355,6 +376,7 @@ async function bundleProjectToHtml(params: {
   files: ProjectFile[];
   title: string;
   includeInspector?: boolean;
+  enableAppAi?: boolean;
 }): Promise<{ html: string; bundleError?: string }> {
   await ensureVendorRuntime();
 
@@ -623,15 +645,23 @@ async function bundleProjectToHtml(params: {
 
   const safeTitle = params.title.replace(/[<>]/g, '');
 
-  // Safe BYOK runtime bridge + srcDoc anchor navigation guard (prevents clicking /links from loading Mist's SPA HTML inside iframe)
+  const initialAppAiEnabled = Boolean(params.enableAppAi);
+
+  // Scoped session runtime bridge (never receives raw API keys) + srcDoc anchor navigation guard
   const MIST_APP_AI_RUNTIME_SCRIPT = `
 (function() {
-  var activeByok = null;
+  var activeSessionToken = null;
+  var appAiEnabled = ${initialAppAiEnabled ? 'true' : 'false'};
   var origFetch = window.fetch ? window.fetch.bind(window) : null;
 
   window.addEventListener('message', function(e) {
-    if (e && e.data && e.data.type === 'MIST_SET_BYOK') {
-      activeByok = e.data.payload || null;
+    if (e.source !== window.parent) return;
+    if (e && e.data && e.data.type === 'MIST_SET_BYOK_SESSION') {
+      var payload = e.data.payload || {};
+      activeSessionToken = typeof payload.token === 'string' ? payload.token : null;
+      if (typeof payload.appAiEnabled === 'boolean') {
+        appAiEnabled = payload.appAiEnabled;
+      }
     }
   });
 
@@ -639,10 +669,10 @@ async function bundleProjectToHtml(params: {
     window.fetch = function(input, init) {
       try {
         var url = typeof input === 'string' ? input : (input && input.url) || '';
-        if (url.indexOf('/api/app-ai') !== -1 && init && typeof init.body === 'string' && activeByok) {
+        if (url.indexOf('/api/app-ai') !== -1 && init && typeof init.body === 'string' && activeSessionToken) {
           var parsed = JSON.parse(init.body);
-          if (!parsed.providerConfig) {
-            parsed.providerConfig = activeByok;
+          if (!parsed.sessionToken && !parsed.providerConfig) {
+            parsed.sessionToken = activeSessionToken;
             init = Object.assign({}, init, { body: JSON.stringify(parsed) });
           }
         }
@@ -671,7 +701,11 @@ async function bundleProjectToHtml(params: {
   }, false);
 
   window.mistAI = {
+    isEnabled: function() { return appAiEnabled; },
     complete: async function(prompt, options) {
+      if (!appAiEnabled) {
+        throw new Error('Live App AI is disabled for this project unless requested or enabled in Mist.');
+      }
       var opts = options || {};
       var res = await window.fetch('/api/app-ai', {
         method: 'POST',
@@ -681,7 +715,7 @@ async function bundleProjectToHtml(params: {
           messages: opts.messages,
           systemInstruction: opts.systemInstruction,
           jsonMode: Boolean(opts.jsonMode),
-          providerConfig: opts.providerConfig || activeByok || undefined
+          sessionToken: activeSessionToken || undefined
         })
       });
       var data = await res.json();
@@ -718,12 +752,13 @@ async function bundleProjectToHtml(params: {
   return { html, bundleError };
 }
 
-app.post('/api/bundle', async (req, res) => {
+app.post('/api/bundle', catalogRateLimiter, async (req, res) => {
   try {
-    const { files, title, includeInspector } = req.body as {
+    const { files, title, includeInspector, enableAppAi } = req.body as {
       files: ProjectFile[];
       title?: string;
       includeInspector?: boolean;
+      enableAppAi?: boolean;
     };
     if (!Array.isArray(files)) {
       res.status(400).json({ error: 'Invalid files payload' });
@@ -733,10 +768,11 @@ app.post('/api/bundle', async (req, res) => {
       files,
       title: title || 'Mist Preview',
       includeInspector: includeInspector !== false,
+      enableAppAi: Boolean(enableAppAi),
     });
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Bundling failed' });
+    res.status(500).json({ error: sanitizeErrorMessage(err) || 'Bundling failed' });
   }
 });
 
@@ -766,8 +802,9 @@ THREE.JS & 3D RULES (apply when building 3D scenes, viewers, or 3D games):
 - Use THREE.ACESFilmicToneMapping, PMREMGenerator + RoomEnvironment for rich metallic/PBR reflections, and a warm DirectionalLight + cool HemisphereLight fill.
 - Build multi-part THREE.Group objects and procedural CanvasTextures (zero external 404 texture URLs), and never place CSS backdrop-blur over the WebGL viewport.
 
-LIVE AI FEATURES INSIDE GENERATED APPS:
-- Whenever the user's request involves AI features (chat widget, writer, analyzer, summarizer, quiz builder, smart helper), implement real fetch('/api/app-ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, messages, systemInstruction }) }) calls returning { text } — with real loading & error states, never setTimeout/mock stubs.`;
+LIVE AI FEATURES INSIDE GENERATED APPS (REQUESTED-ONLY POLICY):
+- Do NOT add chatbots, "Ask AI" widgets, or /api/app-ai calls to standard websites, portfolios, stores, 2D Canvas games, or Three.js apps unless specifically requested or enabled in the user instructions.
+- ONLY when AI features are explicitly requested or enabled in the prompt, implement real fetch('/api/app-ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, messages, systemInstruction }) }) calls returning { text } — with real loading & error states, never setTimeout/mock stubs.`;
 
 function extractJsonObject(raw: string): Record<string, unknown> {
   const trimmed = raw.trim();
@@ -794,6 +831,7 @@ class ProviderHttpError extends Error {
 }
 
 function getHttpStatusFromError(err: unknown): number {
+  if (err instanceof SecurityValidationError) return err.status;
   if (err instanceof ProviderHttpError) return err.status;
   if (
     err &&
@@ -812,12 +850,12 @@ function getHttpStatusFromError(err: unknown): number {
   return 500;
 }
 
-function resolveByokRequestParams(rawConfig?: AiProviderConfig): {
+async function resolveByokRequestParams(rawConfig?: AiProviderConfig): Promise<{
   config: AiProviderConfig;
   providerLabel: string;
   endpoint: string;
   headers: Record<string, string>;
-} {
+}> {
   const config = normalizeProviderConfigToStudio(
     rawConfig || {
       provider: 'custom',
@@ -839,9 +877,12 @@ function resolveByokRequestParams(rawConfig?: AiProviderConfig): {
   if (!base) {
     throw new ProviderHttpError(
       400,
-      `${providerLabel} requires an OpenAI-compatible Base URL (e.g. https://openrouter.ai/api/v1).`,
+      `${providerLabel} requires an HTTPS OpenAI-compatible Base URL (e.g. https://openrouter.ai/api/v1).`,
     );
   }
+
+  await assertSafeExternalUrl(base);
+
   const endpoint = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -862,7 +903,7 @@ async function callByokCompletionRaw(params: {
   maxTokens?: number;
 }): Promise<string> {
   const { messages, jsonMode = true, temperature = 0.4, maxTokens = 10240 } = params;
-  const { config, providerLabel, endpoint, headers } = resolveByokRequestParams(params.config);
+  const { config, providerLabel, endpoint, headers } = await resolveByokRequestParams(params.config);
 
   const runRequest = async (limitTokens: number, useJsonFormat: boolean) => {
     const body: Record<string, unknown> = {
@@ -874,17 +915,24 @@ async function callByokCompletionRaw(params: {
     if (useJsonFormat) {
       body.response_format = { type: 'json_object' };
     }
-    return fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000);
+    try {
+      return await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
   };
 
   let resp = await runRequest(maxTokens, jsonMode);
   if (!resp.ok && resp.status === 400 && jsonMode) {
     // Some custom/OpenAI-compatible models reject response_format json_object
-    const errPreview = await resp.text();
+    const errPreview = redactSecrets(await resp.text());
     if (errPreview.toLowerCase().includes('response_format') || errPreview.toLowerCase().includes('json_object')) {
       resp = await runRequest(maxTokens, false);
     } else {
@@ -893,7 +941,7 @@ async function callByokCompletionRaw(params: {
   }
 
   if (!resp.ok && resp.status === 402) {
-    const errText = await resp.text();
+    const errText = redactSecrets(await resp.text());
     const affordMatch = errText.match(/can only afford\s+(\d+)/i);
     const affordable = affordMatch ? Number(affordMatch[1]) : 0;
     if (affordable >= 1024 && maxTokens > affordable - 128) {
@@ -904,7 +952,7 @@ async function callByokCompletionRaw(params: {
   }
 
   if (!resp.ok) {
-    const errText = await resp.text();
+    const errText = redactSecrets(await resp.text());
     throw new ProviderHttpError(resp.status, `${providerLabel} error (${resp.status}): ${errText.slice(0, 350)}`);
   }
 
@@ -927,7 +975,7 @@ async function streamByokCompletion(params: {
   onDelta: (accumulatedText: string) => void;
 }): Promise<string> {
   const { messages, jsonMode = true, temperature = 0.4, maxTokens = 12288, onDelta } = params;
-  const { config, providerLabel, endpoint, headers } = resolveByokRequestParams(params.config);
+  const { config, providerLabel, endpoint, headers } = await resolveByokRequestParams(params.config);
 
   const runStreamRequest = async (limitTokens: number, useJsonFormat: boolean) => {
     const body: Record<string, unknown> = {
@@ -949,7 +997,7 @@ async function streamByokCompletion(params: {
 
   let resp = await runStreamRequest(maxTokens, jsonMode);
   if (!resp.ok && resp.status === 400 && jsonMode) {
-    const errPreview = await resp.text();
+    const errPreview = redactSecrets(await resp.text());
     if (errPreview.toLowerCase().includes('response_format') || errPreview.toLowerCase().includes('json_object')) {
       resp = await runStreamRequest(maxTokens, false);
     } else {
@@ -958,7 +1006,7 @@ async function streamByokCompletion(params: {
   }
 
   if (!resp.ok && resp.status === 402) {
-    const errText = await resp.text();
+    const errText = redactSecrets(await resp.text());
     const affordMatch = errText.match(/can only afford\s+(\d+)/i);
     const affordable = affordMatch ? Number(affordMatch[1]) : 0;
     if (affordable >= 1024 && maxTokens > affordable - 128) {
@@ -969,7 +1017,7 @@ async function streamByokCompletion(params: {
   }
 
   if (!resp.ok) {
-    const errText = await resp.text();
+    const errText = redactSecrets(await resp.text());
     throw new ProviderHttpError(resp.status, `${providerLabel} error (${resp.status}): ${errText.slice(0, 350)}`);
   }
 
@@ -1122,8 +1170,8 @@ Return JSON: { "content": "..." }`;
 
 function buildGenerateUserPrompt(prompt: string, enableAppAi: boolean): string {
   const aiCapabilityDirective = enableAppAi
-    ? '\n- Interactive App AI Runtime is enabled: whenever the site benefits from live AI (chatbots, content generators, smart search, summarizers, analyzers), wire real fetch(\'/api/app-ai\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify({ prompt, systemInstruction }) }) calls directly in the generated UI.'
-    : '';
+    ? '\n- Interactive App AI Runtime is requested/enabled: wire real fetch(\'/api/app-ai\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify({ prompt, messages, systemInstruction }) }) calls directly in the generated UI with real loading & error states.'
+    : '\n- Do NOT include AI chatbots, "Ask AI" sidebars, or /api/app-ai calls — build a clean, self-contained application tailored purely to the user request.';
 
   return `Build a complete, multi-file React + TypeScript + Tailwind CSS web app (or Three.js / Canvas game) for this request:
 "${prompt.trim()}"${aiCapabilityDirective}
@@ -1149,6 +1197,7 @@ function buildRefineUserPrompt(
   instruction: string,
   files: ProjectFile[],
   selectedElement?: { tagName: string; textContent: string; className: string },
+  enableAppAi?: boolean,
 ): string {
   const fileBundleText = (files || [])
     .map((f) => `--- FILE: ${f.path} ---\n${f.content}`)
@@ -1158,13 +1207,17 @@ function buildRefineUserPrompt(
     ? `\nFocused element selected by user: <${selectedElement.tagName}> className="${selectedElement.className}" text="${selectedElement.textContent}"`
     : '';
 
+  const aiDirective = enableAppAi
+    ? `- Wire real calls to POST /api/app-ai ({ prompt, messages, systemInstruction }) returning { text } if adding/updating live AI features — never fake setTimeout stubs.`
+    : `- Do NOT introduce unrequested AI chatbots or /api/app-ai calls unless the instruction asks for them.`;
+
   return `Refine the existing application according to EVERY detail in this instruction:
 "${instruction.trim()}"${elementContext}
 
 MULTI-PART REFINEMENT MANDATE:
 - Read every clause in the user's message carefully (e.g., color/palette changes, game/canvas bug fixes, speed/physics tweaks, new buttons or panels, layout changes) and apply ALL of them together in this single pass!
 - If fixing a broken game or "Play Game" button: ensure <canvas> is always mounted (never hidden before effect initialization), buttons use <button type="button" onClick={...}> (never <a href="/...">), and requestAnimationFrame loop transitions cleanly into active play.
-- If adding or updating AI features in the website, integrate real calls to POST /api/app-ai ({ prompt, messages, systemInstruction }) returning { text } — never fake setTimeout stubs.
+${aiDirective}
 
 Current files:
 ${fileBundleText}
@@ -1185,7 +1238,61 @@ app.get('/api/ai/status', (_req, res) => {
   });
 });
 
-app.post('/api/ai/test-provider', async (req, res) => {
+// Live gateway model catalog proxy (OpenRouter, Groq, Gemini BYOK, NVIDIA, OpenAI, Custom)
+app.get('/api/ai/models', catalogRateLimiter, async (req, res) => {
+  const baseUrl =
+    typeof req.query.baseUrl === 'string' && req.query.baseUrl.trim()
+      ? req.query.baseUrl.trim()
+      : 'https://openrouter.ai/api/v1';
+  const forceRefresh = req.query.forceRefresh === 'true';
+  try {
+    const result = await fetchGatewayModelsCatalog({ baseUrl, forceRefresh });
+    res.json(result);
+  } catch (err) {
+    const status = err instanceof SecurityValidationError ? err.status : 502;
+    res.status(status).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.post('/api/ai/models', catalogRateLimiter, async (req, res) => {
+  const { baseUrl, apiKey, forceRefresh } = req.body as {
+    baseUrl?: string;
+    apiKey?: string;
+    forceRefresh?: boolean;
+  };
+  const targetUrl = (baseUrl || 'https://openrouter.ai/api/v1').trim();
+  try {
+    const result = await fetchGatewayModelsCatalog({
+      baseUrl: targetUrl,
+      apiKey,
+      forceRefresh: Boolean(forceRefresh),
+    });
+    res.json(result);
+  } catch (err) {
+    const status = err instanceof SecurityValidationError ? err.status : 502;
+    res.status(status).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+// Ephemeral scoped preview AI session token endpoints (keeps raw BYOK keys out of preview iframes)
+app.post('/api/ai/session', aiRateLimiter, async (req, res) => {
+  try {
+    const { providerConfig } = req.body as { providerConfig?: AiProviderConfig };
+    const { config } = await resolveByokRequestParams(providerConfig);
+    const session = createPreviewAiSession(config);
+    res.json(session);
+  } catch (err) {
+    const status = getHttpStatusFromError(err);
+    res.status(status).json({ error: sanitizeErrorMessage(err) });
+  }
+});
+
+app.delete('/api/ai/session/:token', (req, res) => {
+  const revoked = revokePreviewAiSession(req.params.token);
+  res.json({ ok: true, revoked });
+});
+
+app.post('/api/ai/test-provider', aiRateLimiter, async (req, res) => {
   const config = normalizeProviderConfigToStudio(req.body as AiProviderConfig);
   const provider = config.provider;
   const model = config.model;
@@ -1204,20 +1311,25 @@ app.post('/api/ai/test-provider', async (req, res) => {
     res.json({ ok: true, provider, model, name: config.name });
   } catch (err) {
     const status = getHttpStatusFromError(err);
-    const message = err instanceof Error ? err.message : String(err);
+    const message = sanitizeErrorMessage(err);
     const incident = classifyModelError({ status, message, provider, model });
     recordIncident(incident);
     res.status(status).json({ ok: false, error: incident.message, incident });
   }
 });
 
-// Streaming website generation (SSE) for real-time Lovable/Base44-style progress
-app.post('/api/ai/generate/stream', async (req, res) => {
-  const { prompt, providerConfig, enableAppAi = true } = req.body as {
+// Streaming website generation (SSE) for real-time progress
+app.post('/api/ai/generate/stream', aiRateLimiter, async (req, res) => {
+  const { prompt, providerConfig, enableAppAi } = req.body as {
     prompt: string;
     providerConfig?: AiProviderConfig;
     enableAppAi?: boolean;
   };
+  const effectiveEnableAppAi = shouldEnableAppAi(
+    prompt || '',
+    'on_request',
+    typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
+  );
   const config = normalizeProviderConfigToStudio(
     providerConfig || {
       provider: 'custom',
@@ -1251,7 +1363,7 @@ app.post('/api/ai/generate/stream', async (req, res) => {
       phase: `Connecting to ${providerTitle} (${config.model})...`,
     });
 
-    const userPrompt = buildGenerateUserPrompt(prompt, enableAppAi);
+    const userPrompt = buildGenerateUserPrompt(prompt, effectiveEnableAppAi);
     let seenPaths: string[] = [];
     let lastEmitAt = 0;
 
@@ -1306,7 +1418,7 @@ app.post('/api/ai/generate/stream', async (req, res) => {
     res.end();
   } catch (err) {
     const status = getHttpStatusFromError(err);
-    const message = err instanceof Error ? err.message : 'Generation failed';
+    const message = sanitizeErrorMessage(err) || 'Generation failed';
     const incident = classifyModelError({
       status,
       message,
@@ -1320,12 +1432,17 @@ app.post('/api/ai/generate/stream', async (req, res) => {
 });
 
 // Standard non-streaming website generation endpoint (compat fallback)
-app.post('/api/ai/generate', async (req, res) => {
-  const { prompt, providerConfig, enableAppAi = true } = req.body as {
+app.post('/api/ai/generate', aiRateLimiter, async (req, res) => {
+  const { prompt, providerConfig, enableAppAi } = req.body as {
     prompt: string;
     providerConfig?: AiProviderConfig;
     enableAppAi?: boolean;
   };
+  const effectiveEnableAppAi = shouldEnableAppAi(
+    prompt || '',
+    'on_request',
+    typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
+  );
   const config = normalizeProviderConfigToStudio(
     providerConfig || {
       provider: 'custom',
@@ -1341,7 +1458,7 @@ app.post('/api/ai/generate', async (req, res) => {
       return;
     }
 
-    const userPrompt = buildGenerateUserPrompt(prompt, enableAppAi);
+    const userPrompt = buildGenerateUserPrompt(prompt, effectiveEnableAppAi);
     const raw = await callByokCompletionRaw({
       config,
       messages: [
@@ -1358,7 +1475,7 @@ app.post('/api/ai/generate', async (req, res) => {
     res.json(finalized);
   } catch (err) {
     const status = getHttpStatusFromError(err);
-    const message = err instanceof Error ? err.message : 'Generation failed';
+    const message = sanitizeErrorMessage(err) || 'Generation failed';
     const incident = classifyModelError({
       status,
       message,
@@ -1371,13 +1488,19 @@ app.post('/api/ai/generate', async (req, res) => {
 });
 
 // Streaming website refinement (SSE)
-app.post('/api/ai/refine/stream', async (req, res) => {
-  const { instruction, files, selectedElement, providerConfig } = req.body as {
+app.post('/api/ai/refine/stream', aiRateLimiter, async (req, res) => {
+  const { instruction, files, selectedElement, providerConfig, enableAppAi } = req.body as {
     instruction: string;
     files: ProjectFile[];
     selectedElement?: { tagName: string; textContent: string; className: string };
     providerConfig?: AiProviderConfig;
+    enableAppAi?: boolean;
   };
+  const effectiveEnableAppAi = shouldEnableAppAi(
+    instruction || '',
+    'on_request',
+    typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
+  );
   const config = normalizeProviderConfigToStudio(
     providerConfig || {
       provider: 'custom',
@@ -1411,7 +1534,7 @@ app.post('/api/ai/refine/stream', async (req, res) => {
       phase: `Analyzing codebase with ${providerTitle} (${config.model})...`,
     });
 
-    const userPrompt = buildRefineUserPrompt(instruction, files, selectedElement);
+    const userPrompt = buildRefineUserPrompt(instruction, files, selectedElement, effectiveEnableAppAi);
     let seenPaths: string[] = [];
     let lastEmitAt = 0;
 
@@ -1464,7 +1587,7 @@ app.post('/api/ai/refine/stream', async (req, res) => {
     res.end();
   } catch (err) {
     const status = getHttpStatusFromError(err);
-    const message = err instanceof Error ? err.message : 'Refinement failed';
+    const message = sanitizeErrorMessage(err) || 'Refinement failed';
     const incident = classifyModelError({
       status,
       message,
@@ -1478,13 +1601,19 @@ app.post('/api/ai/refine/stream', async (req, res) => {
 });
 
 // Standard non-streaming refine endpoint
-app.post('/api/ai/refine', async (req, res) => {
-  const { instruction, files, selectedElement, providerConfig } = req.body as {
+app.post('/api/ai/refine', aiRateLimiter, async (req, res) => {
+  const { instruction, files, selectedElement, providerConfig, enableAppAi } = req.body as {
     instruction: string;
     files: ProjectFile[];
     selectedElement?: { tagName: string; textContent: string; className: string };
     providerConfig?: AiProviderConfig;
+    enableAppAi?: boolean;
   };
+  const effectiveEnableAppAi = shouldEnableAppAi(
+    instruction || '',
+    'on_request',
+    typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
+  );
   const config = normalizeProviderConfigToStudio(
     providerConfig || {
       provider: 'custom',
@@ -1500,7 +1629,7 @@ app.post('/api/ai/refine', async (req, res) => {
       return;
     }
 
-    const userPrompt = buildRefineUserPrompt(instruction, files, selectedElement);
+    const userPrompt = buildRefineUserPrompt(instruction, files, selectedElement, effectiveEnableAppAi);
     const raw = await callByokCompletionRaw({
       config,
       messages: [
@@ -1525,7 +1654,7 @@ app.post('/api/ai/refine', async (req, res) => {
     res.json(parsed);
   } catch (err) {
     const status = getHttpStatusFromError(err);
-    const message = err instanceof Error ? err.message : 'Refinement failed';
+    const message = sanitizeErrorMessage(err) || 'Refinement failed';
     const incident = classifyModelError({
       status,
       message,
@@ -1538,7 +1667,7 @@ app.post('/api/ai/refine', async (req, res) => {
 });
 
 // Pure BYOK Voice Studio conversational turn (zero hardcoded Gemini Live keys)
-app.post('/api/ai/voice-turn', async (req, res) => {
+app.post('/api/ai/voice-turn', aiRateLimiter, async (req, res) => {
   const { messages, mode, projectName, providerConfig } = req.body as {
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
     mode?: 'create' | 'refine';
@@ -1577,7 +1706,7 @@ app.post('/api/ai/voice-turn', async (req, res) => {
     res.json({ text: text.trim(), provider: config.name || config.provider, model: config.model });
   } catch (err) {
     const status = getHttpStatusFromError(err);
-    const message = err instanceof Error ? err.message : 'Voice request failed';
+    const message = sanitizeErrorMessage(err) || 'Voice request failed';
     const incident = classifyModelError({
       status,
       message,
@@ -1590,23 +1719,29 @@ app.post('/api/ai/voice-turn', async (req, res) => {
 });
 
 // Live BYOK AI runtime endpoint called directly by generated apps (Preview & Published /p/:slug)
-app.post('/api/app-ai', async (req, res) => {
-  const { prompt, messages, systemInstruction, jsonMode, providerConfig } = req.body as {
+app.post('/api/app-ai', aiRateLimiter, async (req, res) => {
+  const { prompt, messages, systemInstruction, jsonMode, sessionToken, providerConfig } = req.body as {
     prompt?: string;
     messages?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
     systemInstruction?: string;
     jsonMode?: boolean;
+    sessionToken?: string;
     providerConfig?: AiProviderConfig;
   };
-  const config = normalizeProviderConfigToStudio(
-    providerConfig || {
-      provider: 'custom',
-      name: 'BYOK Provider',
-      baseUrl: '',
-      model: '',
-      apiKey: '',
-    },
-  );
+  const headerToken =
+    typeof req.headers['x-mist-session'] === 'string' ? req.headers['x-mist-session'] : undefined;
+  const sessionResolved = resolvePreviewAiSession(sessionToken || headerToken);
+  const config = sessionResolved
+    ? normalizeProviderConfigToStudio(sessionResolved)
+    : normalizeProviderConfigToStudio(
+        providerConfig || {
+          provider: 'custom',
+          name: 'BYOK Provider',
+          baseUrl: '',
+          model: '',
+          apiKey: '',
+        },
+      );
 
   try {
     const trimmedPrompt = (prompt || '').trim();
@@ -1642,7 +1777,7 @@ app.post('/api/app-ai', async (req, res) => {
     });
   } catch (err) {
     const status = getHttpStatusFromError(err);
-    const message = err instanceof Error ? err.message : 'App AI runtime failed';
+    const message = sanitizeErrorMessage(err) || 'App AI runtime failed';
     const incident = classifyModelError({
       status,
       message,
@@ -1657,6 +1792,7 @@ app.post('/api/app-ai', async (req, res) => {
 // --- 5. Deployments Persistence & Live Hosting Route (/p/:slug) ---
 interface StoredDeployment {
   slug: string;
+  ownerUid?: string;
   projectId: string;
   title: string;
   htmlBundle: string;
@@ -1690,13 +1826,20 @@ app.get('/api/deployments', (_req, res) => {
   res.json({ deployments: list });
 });
 
-app.post('/api/deployments', async (req, res) => {
+app.post('/api/deployments', deployRateLimiter, async (req, res) => {
   try {
-    const { slug, projectId, title, files } = req.body as {
+    const authUser = await verifyFirebaseAuthHeader(req.headers.authorization);
+    if (!authUser.emailVerified) {
+      res.status(403).json({ error: 'A verified Google account is required to publish sites.' });
+      return;
+    }
+
+    const { slug, projectId, title, files, enableAppAi } = req.body as {
       slug: string;
       projectId: string;
       title: string;
       files: ProjectFile[];
+      enableAppAi?: boolean;
     };
     const cleanSlug = (slug || '')
       .toLowerCase()
@@ -1707,15 +1850,23 @@ app.post('/api/deployments', async (req, res) => {
       return;
     }
 
+    const store = readDeploymentsStore();
+    const existing = store[cleanSlug];
+    if (existing?.ownerUid && existing.ownerUid !== authUser.uid) {
+      res.status(403).json({ error: 'This deployment URL is owned by another user.' });
+      return;
+    }
+
     const { html } = await bundleProjectToHtml({
       files,
       title: title || cleanSlug,
       includeInspector: false,
+      enableAppAi: Boolean(enableAppAi),
     });
 
-    const store = readDeploymentsStore();
     const record: StoredDeployment = {
       slug: cleanSlug,
+      ownerUid: authUser.uid,
       projectId: projectId || cleanSlug,
       title: title || cleanSlug,
       htmlBundle: html,
@@ -1732,18 +1883,38 @@ app.post('/api/deployments', async (req, res) => {
       htmlBundle: html,
     });
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Deployment failed' });
+    const status = err instanceof SecurityValidationError ? err.status : 500;
+    res.status(status).json({ error: sanitizeErrorMessage(err) || 'Deployment failed' });
   }
 });
 
-app.delete('/api/deployments/:slug', (req, res) => {
-  const cleanSlug = (req.params.slug || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-');
-  const store = readDeploymentsStore();
-  if (store[cleanSlug]) {
+app.delete('/api/deployments/:slug', deployRateLimiter, async (req, res) => {
+  try {
+    const authUser = await verifyFirebaseAuthHeader(req.headers.authorization);
+    if (!authUser.emailVerified) {
+      res.status(403).json({ error: 'A verified Google account is required to manage deployments.' });
+      return;
+    }
+
+    const cleanSlug = (req.params.slug || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+    const store = readDeploymentsStore();
+    const existing = store[cleanSlug];
+    if (!existing) {
+      res.json({ ok: true, slug: cleanSlug });
+      return;
+    }
+    if (existing.ownerUid && existing.ownerUid !== authUser.uid) {
+      res.status(403).json({ error: 'Only the deployment owner can unpublish this site.' });
+      return;
+    }
+
     delete store[cleanSlug];
     writeDeploymentsStore(store);
+    res.json({ ok: true, slug: cleanSlug });
+  } catch (err) {
+    const status = err instanceof SecurityValidationError ? err.status : 500;
+    res.status(status).json({ error: sanitizeErrorMessage(err) || 'Delete deployment failed' });
   }
-  res.json({ ok: true, slug: cleanSlug });
 });
 
 app.get('/p/:slug', (req, res) => {
@@ -1759,6 +1930,10 @@ app.get('/p/:slug', (req, res) => {
       );
     return;
   }
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data: blob: https:; connect-src 'self'; object-src 'none'; base-uri 'none';",
+  );
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(record.htmlBundle);
 });

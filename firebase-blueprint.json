@@ -28,7 +28,8 @@
         "photoURL": {
           "type": "string",
           "description": "Profile avatar URL",
-          "maxLength": 512
+          "maxLength": 512,
+          "pattern": "^https://.*"
         },
         "preferredProvider": {
           "type": "string",
@@ -57,7 +58,12 @@
         },
         "enableAppAi": {
           "type": "boolean",
-          "description": "Whether generated apps integrate live /api/app-ai runtime features by default"
+          "description": "Legacy boolean for always-on App AI runtime"
+        },
+        "appAiMode": {
+          "type": "string",
+          "enum": ["on_request", "always", "off"],
+          "description": "Controls when generated websites include live /api/app-ai features"
         },
         "createdAt": {
           "type": "string",
@@ -105,6 +111,9 @@
         "templateId": {
           "type": "string",
           "maxLength": 64
+        },
+        "appAiEnabled": {
+          "type": "boolean"
         },
         "publishedSlug": {
           "type": "string",

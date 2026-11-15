@@ -8,7 +8,9 @@ import {
   getDefaultModelForProvider,
   getModelDisplayLabel,
   normalizeProviderConfigToStudio,
+  promptRequestsAi,
   PROVIDER_CATALOG,
+  shouldEnableAppAi,
 } from './models';
 
 test('DEFAULT_BYOK_CONFIG configures OpenRouter BYOK without hardcoded keys or fictional models', () => {
@@ -47,15 +49,17 @@ test('All presets label models with Free or Paid billing and use real models onl
   }
 });
 
-test('normalizeProviderConfigToStudio maps legacy providers cleanly into BYOK custom config', () => {
+test('normalizeProviderConfigToStudio maps legacy providers cleanly and preserves sessionOnlyKey', () => {
   const normalizedOr = normalizeProviderConfigToStudio({
     provider: 'openrouter',
     model: 'openai/gpt-4.1',
     apiKey: 'sk-or-test',
+    sessionOnlyKey: true,
   });
   assert.equal(normalizedOr.provider, 'custom');
   assert.equal(normalizedOr.name, 'OpenRouter');
   assert.equal(normalizedOr.baseUrl, 'https://openrouter.ai/api/v1');
+  assert.equal(normalizedOr.sessionOnlyKey, true);
   assert.equal(detectGatewayFromBaseUrl(normalizedOr.baseUrl), 'openrouter');
 
   const normalizedGroq = normalizeProviderConfigToStudio({
@@ -66,6 +70,7 @@ test('normalizeProviderConfigToStudio maps legacy providers cleanly into BYOK cu
   assert.equal(normalizedGroq.provider, 'custom');
   assert.equal(normalizedGroq.name, 'Groq');
   assert.equal(normalizedGroq.baseUrl, 'https://api.groq.com/openai/v1');
+  assert.equal(normalizedGroq.sessionOnlyKey, false);
   assert.equal(detectGatewayFromBaseUrl(normalizedGroq.baseUrl), 'groq');
 
   const normalizedLegacyGemini = normalizeProviderConfigToStudio({
@@ -86,7 +91,7 @@ test('normalizeProviderConfigToStudio maps legacy providers cleanly into BYOK cu
 test('getModelDisplayLabel, getDefaultModelForProvider & findModelEntry resolve cleanly', () => {
   assert.equal(
     getDefaultModelForProvider('custom'),
-    'nvidia/llama-3.3-nemotron-super-49b-v1:free',
+    'openrouter/free',
   );
   assert.equal(PROVIDER_CATALOG.custom.requiresUserKey, true);
   assert.equal(
@@ -100,3 +105,20 @@ test('getModelDisplayLabel, getDefaultModelForProvider & findModelEntry resolve 
   const meta = findModelEntry('custom', 'gemini-2.5-flash', 'https://generativelanguage.googleapis.com/v1beta/openai');
   assert.equal(meta?.billing, 'free');
 });
+
+test('promptRequestsAi and shouldEnableAppAi enable App AI strictly when requested unless overridden', () => {
+  assert.equal(promptRequestsAi('Subway Surfers 2D runner with trains and coins'), false);
+  assert.equal(promptRequestsAi('Minimalist coffee roastery landing page with detail view'), false);
+  assert.equal(promptRequestsAi('Interactive Three.js 3D product studio with OrbitControls'), false);
+
+  assert.equal(promptRequestsAi('Build an AI writing workspace with an assistant'), true);
+  assert.equal(promptRequestsAi('Create a customer portal with an embedded chatbot'), true);
+  assert.equal(promptRequestsAi('Add live LLM summarization using /api/app-ai'), true);
+
+  assert.equal(shouldEnableAppAi('Subway Surfers 2D game', 'on_request'), false);
+  assert.equal(shouldEnableAppAi('Build a fitness app with an AI coach', 'on_request'), true);
+  assert.equal(shouldEnableAppAi('Subway Surfers 2D game', 'always'), true);
+  assert.equal(shouldEnableAppAi('Build a site with an AI chatbot', 'off'), false);
+  assert.equal(shouldEnableAppAi('Change button color', 'on_request', true), true);
+});
+

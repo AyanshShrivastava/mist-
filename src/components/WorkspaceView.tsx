@@ -154,7 +154,64 @@ export default function WorkspaceView({
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [refineElapsed, setRefineElapsed] = useState(0);
 
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  const hasAppAi = Boolean(
+    project.appAiEnabled ||
+      project.files.some((f) => /\/api\/app-ai|window\.mistAI/.test(f.content)),
+  );
+
+  // Mint an ephemeral session token ONLY when the project uses App AI and a BYOK key exists.
+  // Never pass raw BYOK API keys into iframe postMessage or iframe state.
+  useEffect(() => {
+    const cleanKey = (providerConfig.apiKey || '').trim();
+    if (!hasAppAi || !cleanKey) {
+      setSessionToken(null);
+      return;
+    }
+
+    let cancelled = false;
+    let mintedToken: string | null = null;
+
+    void fetch('/api/ai/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providerConfig }),
+    })
+      .then(async (resp) => {
+        if (!resp.ok) return null;
+        return (await resp.json()) as { token?: string };
+      })
+      .then((data) => {
+        if (cancelled) {
+          if (data?.token) {
+            void fetch(`/api/ai/session/${encodeURIComponent(data.token)}`, {
+              method: 'DELETE',
+              keepalive: true,
+            }).catch(() => {});
+          }
+          return;
+        }
+        if (data?.token) {
+          mintedToken = data.token;
+          setSessionToken(data.token);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSessionToken(null);
+      });
+
+    return () => {
+      cancelled = true;
+      if (mintedToken) {
+        void fetch(`/api/ai/session/${encodeURIComponent(mintedToken)}`, {
+          method: 'DELETE',
+          keepalive: true,
+        }).catch(() => {});
+      }
+    };
+  }, [hasAppAi, providerConfig]);
 
   useEffect(() => {
     if (!isRefining || !streamProgress) {
@@ -197,7 +254,13 @@ export default function WorkspaceView({
         '*',
       );
       win.postMessage(
-        { type: 'MIST_SET_BYOK', payload: providerConfig },
+        {
+          type: 'MIST_SET_BYOK_SESSION',
+          payload: {
+            token: hasAppAi ? sessionToken : null,
+            appAiEnabled: hasAppAi,
+          },
+        },
         '*',
       );
     }
@@ -205,7 +268,7 @@ export default function WorkspaceView({
 
   useEffect(() => {
     syncBridgeToIframe();
-  });
+  }, [viewMode, mobilePane, sessionToken, hasAppAi]);
 
   const handleIframeLoad = () => {
     syncBridgeToIframe();
@@ -822,6 +885,7 @@ export default function WorkspaceView({
                     ref={iframeRef}
                     title="Mist Live Website Preview"
                     srcDoc={bundledHtml}
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
                     onLoad={handleIframeLoad}
                     className="h-full w-full border-0 bg-white"
                   />
@@ -892,6 +956,7 @@ export default function WorkspaceView({
                       ref={iframeRef}
                       title="Mist Live Website Preview"
                       srcDoc={bundledHtml}
+                      sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
                       onLoad={handleIframeLoad}
                       className="h-full w-full border-0 bg-white"
                     />

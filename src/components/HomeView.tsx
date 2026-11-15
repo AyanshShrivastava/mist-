@@ -29,6 +29,7 @@ import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
   AiStreamProgress,
+  AppAiMode,
   DeploymentRecord,
   MistProject,
 } from '../types/mist';
@@ -36,8 +37,11 @@ import type { ModelHealthIncident } from '../utils/aiErrors';
 import {
   CUSTOM_GATEWAY_PRESETS,
   detectGatewayFromBaseUrl,
+  fetchLiveModelCatalog,
   findModelEntry,
+  shouldEnableAppAi,
   type CustomGatewayId,
+  type ModelCatalogItem,
 } from '../data/models';
 import MistLogo, { MistMark } from './MistLogo';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
@@ -52,7 +56,8 @@ interface HomeViewProps {
   streamProgress: AiStreamProgress | null;
   generationError: string | null;
   darkMode: boolean;
-  enableAppAi: boolean;
+  appAiMode: AppAiMode;
+  onChangeAppAiMode: (mode: AppAiMode) => void;
   onToggleDarkMode: () => void;
   onSaveProvider: (next: AiProviderConfig) => void;
   onGenerate: (prompt: string) => void;
@@ -103,7 +108,8 @@ export default function HomeView({
   streamProgress,
   generationError,
   darkMode,
-  enableAppAi,
+  appAiMode,
+  onChangeAppAiMode,
   onToggleDarkMode,
   onSaveProvider,
   onGenerate,
@@ -123,7 +129,71 @@ export default function HomeView({
   const [quickModelOpen, setQuickModelOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [liveModels, setLiveModels] = useState<ModelCatalogItem[] | null>(null);
+  const [isLiveCatalog, setIsLiveCatalog] = useState(false);
+  const [isLoadingCatalog, setIsLoadingCatalog] = useState(false);
+  const [catalogNote, setCatalogNote] = useState<string | undefined>(undefined);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const loadQuickCatalog = async (forceRefresh = false) => {
+    const cleanUrl = (providerConfig.baseUrl || '').trim();
+    if (!cleanUrl) {
+      setLiveModels(null);
+      setIsLiveCatalog(false);
+      setCatalogNote('Enter a custom endpoint URL in Models & Keys to fetch models.');
+      return;
+    }
+    setIsLoadingCatalog(true);
+    try {
+      const res = await fetchLiveModelCatalog({
+        baseUrl: cleanUrl,
+        apiKey: providerConfig.apiKey,
+        forceRefresh,
+      });
+      setLiveModels(res.models);
+      setIsLiveCatalog(res.source === 'live');
+      setCatalogNote(res.note);
+    } catch (err) {
+      setIsLiveCatalog(false);
+      setCatalogNote(err instanceof Error ? err.message : 'Showing preset catalog.');
+    } finally {
+      setIsLoadingCatalog(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!quickModelOpen) return;
+    let active = true;
+    const cleanUrl = (providerConfig.baseUrl || '').trim();
+    if (!cleanUrl) {
+      setLiveModels(null);
+      setIsLiveCatalog(false);
+      return;
+    }
+    setIsLoadingCatalog(true);
+    void fetchLiveModelCatalog({
+      baseUrl: cleanUrl,
+      apiKey: providerConfig.apiKey,
+      forceRefresh: false,
+    })
+      .then((res) => {
+        if (!active) return;
+        setLiveModels(res.models);
+        setIsLiveCatalog(res.source === 'live');
+        setCatalogNote(res.note);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setIsLiveCatalog(false);
+        setCatalogNote(err instanceof Error ? err.message : 'Showing preset catalog.');
+      })
+      .finally(() => {
+        if (active) setIsLoadingCatalog(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [quickModelOpen, providerConfig.baseUrl, providerConfig.apiKey]);
 
   useEffect(() => {
     if (!isGenerating || !streamProgress) {
@@ -171,10 +241,12 @@ export default function HomeView({
     providerConfig.provider,
     providerConfig.model,
     providerConfig.baseUrl,
+    liveModels || undefined,
   );
   const providerDisplayName = providerConfig.name?.trim() || activeGateway.name;
   const hasApiKey = Boolean(providerConfig.apiKey?.trim());
   const providerLabel = `${providerDisplayName} · ${currentModelMeta?.label || providerConfig.model}`;
+  const appAiActiveForPrompt = shouldEnableAppAi(promptInput, appAiMode);
 
   return (
     <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] flex flex-col">
@@ -554,11 +626,30 @@ export default function HomeView({
                   <span>Voice Chat</span>
                 </motion.button>
 
-                {enableAppAi && (
-                  <span className="hidden xl:inline text-[11px] text-zinc-500 dark:text-zinc-400 whitespace-nowrap">
-                    · App AI enabled
-                  </span>
-                )}
+                <label className="col-span-2 sm:col-span-1 inline-flex min-h-[38px] sm:min-h-[34px] items-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-2.5 text-[11px] font-medium text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+                  <Terminal
+                    className={`h-3.5 w-3.5 shrink-0 ${
+                      appAiActiveForPrompt ? 'text-blue-600 dark:text-blue-400' : 'text-zinc-400'
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <select
+                    aria-label="Generated App AI behavior"
+                    value={appAiMode}
+                    onChange={(e) => onChangeAppAiMode(e.target.value as AppAiMode)}
+                    className="bg-transparent text-[11px] font-medium text-zinc-700 dark:text-zinc-200 focus:outline-none cursor-pointer"
+                  >
+                    <option value="on_request" className="bg-white dark:bg-zinc-900">
+                      App AI: On Request
+                    </option>
+                    <option value="off" className="bg-white dark:bg-zinc-900">
+                      App AI: Off
+                    </option>
+                    <option value="always" className="bg-white dark:bg-zinc-900">
+                      App AI: Always
+                    </option>
+                  </select>
+                </label>
               </div>
 
               <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between sm:justify-end gap-2 sm:gap-3 shrink-0">
@@ -642,8 +733,14 @@ export default function HomeView({
                     <ModelSelectorDropdown
                       provider="custom"
                       value={providerConfig.model}
-                      modelsOverride={activeGateway.models}
+                      modelsOverride={
+                        liveModels && liveModels.length > 0 ? liveModels : activeGateway.models
+                      }
                       gatewayLabel={providerDisplayName}
+                      isLoadingCatalog={isLoadingCatalog}
+                      isLiveCatalog={isLiveCatalog}
+                      catalogNote={catalogNote}
+                      onRefreshCatalog={() => void loadQuickCatalog(true)}
                       compact
                       onChange={(nextModel) =>
                         onSaveProvider({

@@ -1,4 +1,4 @@
-import type { AiProviderConfig, AiProviderId, ModelBilling } from '../types/mist';
+import type { AiProviderConfig, AiProviderId, AppAiMode, ModelBilling } from '../types/mist';
 
 export interface ModelCatalogItem {
   id: string;
@@ -7,6 +7,10 @@ export interface ModelCatalogItem {
   tier: 'Default' | 'Fast' | 'Reasoning' | 'Pro' | 'Coding';
   billing: ModelBilling;
   billingLabel: string;
+  contextLength?: number;
+  pricingSummary?: string;
+  isLiveFetched?: boolean;
+  modality?: string;
 }
 
 export type CustomGatewayId = 'openrouter' | 'groq' | 'gemini_byok' | 'nvidia' | 'openai' | 'custom_url';
@@ -28,6 +32,7 @@ export const DEFAULT_BYOK_CONFIG: AiProviderConfig = {
   baseUrl: 'https://openrouter.ai/api/v1',
   model: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
   apiKey: '',
+  sessionOnlyKey: false,
 };
 
 export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
@@ -41,9 +46,19 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
     steps: [
       'Open openrouter.ai/keys and sign in to your OpenRouter account.',
       'Click Create Key and paste your sk-or-... BYOK key below.',
-      'Pick any Free (:free) model like NVIDIA Nemotron or DeepSeek V3 without credits, or use Paid models if your OpenRouter account has credits.',
+      'Browse the live OpenRouter catalog (automatically refreshed) — pick openrouter/free or any :free model without credits, or use Paid models if your account has credits.',
     ],
     models: [
+      {
+        id: 'openrouter/free',
+        label: 'OpenRouter Free Auto-Router',
+        summary: 'Free — automatically routes to an available healthy free model',
+        tier: 'Default',
+        billing: 'free',
+        billingLabel: 'Free',
+        contextLength: 200000,
+        pricingSummary: '$0 / Free',
+      },
       {
         id: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
         label: 'NVIDIA Llama 3.3 Nemotron Super 49B',
@@ -51,6 +66,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Default',
         billing: 'free',
         billingLabel: 'Free',
+        contextLength: 131072,
+        pricingSummary: '$0 / Free',
       },
       {
         id: 'nvidia/nemotron-nano-9b-v2:free',
@@ -59,6 +76,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Fast',
         billing: 'free',
         billingLabel: 'Free',
+        contextLength: 131072,
+        pricingSummary: '$0 / Free',
       },
       {
         id: 'deepseek/deepseek-chat-v3-0324:free',
@@ -67,6 +86,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Coding',
         billing: 'free',
         billingLabel: 'Free',
+        contextLength: 163840,
+        pricingSummary: '$0 / Free',
       },
       {
         id: 'deepseek/deepseek-r1-0528:free',
@@ -75,6 +96,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Reasoning',
         billing: 'free',
         billingLabel: 'Free',
+        contextLength: 163840,
+        pricingSummary: '$0 / Free',
       },
       {
         id: 'qwen/qwen3-coder:free',
@@ -83,6 +106,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Coding',
         billing: 'free',
         billingLabel: 'Free',
+        contextLength: 262144,
+        pricingSummary: '$0 / Free',
       },
       {
         id: 'qwen/qwen3-235b-a22b:free',
@@ -91,6 +116,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Pro',
         billing: 'free',
         billingLabel: 'Free',
+        contextLength: 131072,
+        pricingSummary: '$0 / Free',
       },
       {
         id: 'meta-llama/llama-4-maverick:free',
@@ -99,6 +126,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Pro',
         billing: 'free',
         billingLabel: 'Free',
+        contextLength: 131072,
+        pricingSummary: '$0 / Free',
       },
       {
         id: 'google/gemma-3-27b-it:free',
@@ -107,6 +136,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Fast',
         billing: 'free',
         billingLabel: 'Free',
+        contextLength: 96000,
+        pricingSummary: '$0 / Free',
       },
       {
         id: 'anthropic/claude-sonnet-4',
@@ -115,6 +146,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Pro',
         billing: 'paid',
         billingLabel: 'Paid',
+        contextLength: 200000,
+        pricingSummary: '$3.00/1M in · $15.00/1M out',
       },
       {
         id: 'openai/gpt-4.1',
@@ -123,6 +156,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Coding',
         billing: 'paid',
         billingLabel: 'Paid',
+        contextLength: 1047576,
+        pricingSummary: '$2.00/1M in · $8.00/1M out',
       },
       {
         id: 'openai/gpt-4o',
@@ -131,6 +166,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Pro',
         billing: 'paid',
         billingLabel: 'Paid',
+        contextLength: 128000,
+        pricingSummary: '$2.50/1M in · $10.00/1M out',
       },
       {
         id: 'google/gemini-2.5-pro',
@@ -139,6 +176,8 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Pro',
         billing: 'paid',
         billingLabel: 'Paid',
+        contextLength: 1048576,
+        pricingSummary: '$1.25/1M in · $10.00/1M out',
       },
     ],
   },
@@ -152,7 +191,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
     steps: [
       'Sign in at console.groq.com/keys with your Groq account.',
       'Click Create API Key and paste the key starting with gsk_ below.',
-      'Choose a Free Tier or Paid model and click Test Connection.',
+      'Groq includes rate-limited Free Tier quota on production models (and higher limits or extra models on Developer Paid accounts).',
     ],
     models: [
       {
@@ -162,6 +201,25 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Default',
         billing: 'free',
         billingLabel: 'Free Tier',
+        contextLength: 131072,
+      },
+      {
+        id: 'openai/gpt-oss-120b',
+        label: 'GPT-OSS 120B (Groq)',
+        summary: 'Free Tier / Paid — 120B open-weight flagship with structured JSON support',
+        tier: 'Pro',
+        billing: 'free',
+        billingLabel: 'Free Tier',
+        contextLength: 131072,
+      },
+      {
+        id: 'openai/gpt-oss-20b',
+        label: 'GPT-OSS 20B (Groq)',
+        summary: 'Free Tier / Paid — fast 20B open-weight coder',
+        tier: 'Fast',
+        billing: 'free',
+        billingLabel: 'Free Tier',
+        contextLength: 131072,
       },
       {
         id: 'meta-llama/llama-4-maverick-17b-128e-instruct',
@@ -170,6 +228,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Pro',
         billing: 'free',
         billingLabel: 'Free Tier',
+        contextLength: 131072,
       },
       {
         id: 'meta-llama/llama-4-scout-17b-16e-instruct',
@@ -178,6 +237,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Fast',
         billing: 'free',
         billingLabel: 'Free Tier',
+        contextLength: 131072,
       },
       {
         id: 'qwen/qwen3-32b',
@@ -186,6 +246,16 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Coding',
         billing: 'free',
         billingLabel: 'Free Tier',
+        contextLength: 131072,
+      },
+      {
+        id: 'groq/compound',
+        label: 'Groq Compound',
+        summary: 'Free Tier / Paid — compound reasoning system',
+        tier: 'Reasoning',
+        billing: 'free',
+        billingLabel: 'Free Tier',
+        contextLength: 131072,
       },
       {
         id: 'moonshotai/kimi-k2-instruct',
@@ -194,6 +264,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Coding',
         billing: 'paid',
         billingLabel: 'Paid',
+        contextLength: 131072,
       },
       {
         id: 'deepseek-r1-distill-llama-70b',
@@ -202,6 +273,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Reasoning',
         billing: 'free',
         billingLabel: 'Free Tier',
+        contextLength: 131072,
       },
       {
         id: 'llama-3.1-8b-instant',
@@ -210,6 +282,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Fast',
         billing: 'free',
         billingLabel: 'Free Tier',
+        contextLength: 131072,
       },
     ],
   },
@@ -233,6 +306,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Default',
         billing: 'free',
         billingLabel: 'Free Tier',
+        contextLength: 1048576,
       },
       {
         id: 'gemini-2.5-flash-lite',
@@ -241,6 +315,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Fast',
         billing: 'free',
         billingLabel: 'Free Tier',
+        contextLength: 1048576,
       },
       {
         id: 'gemini-2.5-pro',
@@ -249,6 +324,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Pro',
         billing: 'paid',
         billingLabel: 'Paid',
+        contextLength: 1048576,
       },
     ],
   },
@@ -306,6 +382,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Coding',
         billing: 'paid',
         billingLabel: 'Paid',
+        contextLength: 1047576,
       },
       {
         id: 'gpt-4o-mini',
@@ -314,6 +391,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Fast',
         billing: 'paid',
         billingLabel: 'Paid',
+        contextLength: 128000,
       },
       {
         id: 'o3-mini',
@@ -322,6 +400,7 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
         tier: 'Reasoning',
         billing: 'paid',
         billingLabel: 'Paid',
+        contextLength: 200000,
       },
     ],
   },
@@ -333,11 +412,11 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
     models: [
       {
         id: 'Qwen/Qwen2.5-Coder-32B-Instruct',
-        label: 'Qwen2.5-Coder-32B-Instruct (Self-Hosted)',
-        summary: 'Self-hosted vLLM / Ollama / LM Studio',
+        label: 'Qwen2.5-Coder-32B-Instruct',
+        summary: 'OpenAI-compatible custom endpoint',
         tier: 'Coding',
         billing: 'free',
-        billingLabel: 'Self-Hosted',
+        billingLabel: 'Custom',
       },
       {
         id: 'gpt-4o-mini',
@@ -398,6 +477,7 @@ export function detectGatewayFromBaseUrl(baseUrl?: string): CustomGatewayId {
 
 export function normalizeProviderConfigToStudio(config: AiProviderConfig): AiProviderConfig {
   const rawProvider = config?.provider;
+  const sessionOnlyKey = Boolean(config?.sessionOnlyKey);
   if (rawProvider === 'openrouter') {
     return {
       provider: 'custom',
@@ -405,6 +485,7 @@ export function normalizeProviderConfigToStudio(config: AiProviderConfig): AiPro
       model: config.model || CUSTOM_GATEWAY_PRESETS[0].models[0].id,
       apiKey: config.apiKey || '',
       baseUrl: config.baseUrl || 'https://openrouter.ai/api/v1',
+      sessionOnlyKey,
     };
   }
   if (rawProvider === 'groq') {
@@ -414,6 +495,7 @@ export function normalizeProviderConfigToStudio(config: AiProviderConfig): AiPro
       model: config.model || CUSTOM_GATEWAY_PRESETS[1].models[0].id,
       apiKey: config.apiKey || '',
       baseUrl: config.baseUrl || 'https://api.groq.com/openai/v1',
+      sessionOnlyKey,
     };
   }
   if (rawProvider === 'gemini') {
@@ -427,6 +509,7 @@ export function normalizeProviderConfigToStudio(config: AiProviderConfig): AiPro
       model: legacyBroken ? 'gemini-2.5-flash' : config.model,
       apiKey: config.apiKey || '',
       baseUrl: config.baseUrl || 'https://generativelanguage.googleapis.com/v1beta/openai',
+      sessionOnlyKey,
     };
   }
 
@@ -438,6 +521,7 @@ export function normalizeProviderConfigToStudio(config: AiProviderConfig): AiPro
     model: config?.model || DEFAULT_BYOK_CONFIG.model,
     apiKey: config?.apiKey || '',
     baseUrl: config?.baseUrl ?? DEFAULT_BYOK_CONFIG.baseUrl,
+    sessionOnlyKey,
   };
 }
 
@@ -445,7 +529,15 @@ export function getDefaultModelForProvider(provider: AiProviderId): string {
   return PROVIDER_CATALOG[provider]?.models[0]?.id || DEFAULT_BYOK_CONFIG.model;
 }
 
-export function getModelDisplayLabel(provider: AiProviderId, modelId: string): string {
+export function getModelDisplayLabel(
+  provider: AiProviderId,
+  modelId: string,
+  liveModels?: ModelCatalogItem[],
+): string {
+  if (liveModels) {
+    const inLive = liveModels.find((m) => m.id === modelId);
+    if (inLive) return inLive.label;
+  }
   const inPrimary = PROVIDER_CATALOG[provider]?.models.find((m) => m.id === modelId);
   if (inPrimary) return inPrimary.label;
   for (const preset of CUSTOM_GATEWAY_PRESETS) {
@@ -459,7 +551,12 @@ export function findModelEntry(
   provider: AiProviderId,
   modelId: string,
   baseUrl?: string,
+  liveModels?: ModelCatalogItem[],
 ): ModelCatalogItem | undefined {
+  if (liveModels) {
+    const liveMatch = liveModels.find((item) => item.id === modelId);
+    if (liveMatch) return liveMatch;
+  }
   const gw = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === detectGatewayFromBaseUrl(baseUrl));
   if (gw) {
     const m = gw.models.find((item) => item.id === modelId);
@@ -470,4 +567,83 @@ export function findModelEntry(
     if (m) return m;
   }
   return PROVIDER_CATALOG[provider]?.models.find((m) => m.id === modelId);
+}
+
+/**
+ * Detects whether a user's website prompt explicitly asks for live AI functionality inside the generated app.
+ * Uses strict word-boundary patterns to avoid false positives on words like "train", "paint", or "detail".
+ */
+export function promptRequestsAi(prompt: string): boolean {
+  const cleaned = (prompt || '').trim();
+  if (!cleaned) return false;
+  return (
+    /\b(?:ai|llm|chatbot|chat-bot|ai-powered|ai-enabled|copilot|co-pilot)\b/i.test(cleaned) ||
+    /\/api\/app-ai|mistai/i.test(cleaned) ||
+    /\b(?:with|add|include|using|powered by)\s+(?:an?\s+)?(?:smart\s+)?(?:assistant|summarizer|translator|tutor|coach|analyzer|writer|generator)\b/i.test(
+      cleaned,
+    ) ||
+    /\b(?:ai\s+(?:chat|writer|assistant|editor|tutor|planner|search|quiz|analyzer|generator))\b/i.test(
+      cleaned,
+    )
+  );
+}
+
+export function shouldEnableAppAi(
+  prompt: string,
+  mode: AppAiMode = 'on_request',
+  explicitOverride?: boolean,
+): boolean {
+  if (typeof explicitOverride === 'boolean') return explicitOverride;
+  if (mode === 'off') return false;
+  if (mode === 'always') return true;
+  return promptRequestsAi(prompt);
+}
+
+export interface LiveCatalogResponse {
+  gateway: CustomGatewayId;
+  source: 'live' | 'preset';
+  fetchedAt: string;
+  models: ModelCatalogItem[];
+  note?: string;
+}
+
+const clientCatalogCache = new Map<string, { expiresAt: number; data: LiveCatalogResponse }>();
+
+export async function fetchLiveModelCatalog(params: {
+  baseUrl: string;
+  apiKey?: string;
+  forceRefresh?: boolean;
+}): Promise<LiveCatalogResponse> {
+  const cleanUrl = (params.baseUrl || '').trim().replace(/\/+$/, '');
+  const hasKey = Boolean(params.apiKey?.trim());
+  const cacheKey = `${cleanUrl}|${hasKey ? 'auth' : 'anon'}`;
+
+  if (!params.forceRefresh) {
+    const hit = clientCatalogCache.get(cacheKey);
+    if (hit && hit.expiresAt > Date.now()) {
+      return hit.data;
+    }
+  }
+
+  const resp = await fetch('/api/ai/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      baseUrl: cleanUrl,
+      apiKey: params.apiKey?.trim() || undefined,
+      forceRefresh: Boolean(params.forceRefresh),
+    }),
+  });
+
+  if (!resp.ok) {
+    const errPayload = (await resp.json().catch(() => ({}))) as { error?: string };
+    throw new Error(errPayload.error || `Failed to load model catalog (${resp.status}).`);
+  }
+
+  const data = (await resp.json()) as LiveCatalogResponse;
+  clientCatalogCache.set(cacheKey, {
+    expiresAt: Date.now() + 5 * 60 * 1000,
+    data,
+  });
+  return data;
 }

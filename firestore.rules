@@ -43,13 +43,14 @@ service cloud.firestore {
         && data.displayName is string
         && data.displayName.size() >= 1
         && data.displayName.size() <= 120
-        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512))
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512 && data.photoURL.matches('^https://.*')))
         && (!('preferredProvider' in data) || (data.preferredProvider in ['gemini', 'openrouter', 'groq', 'custom']))
         && (!('preferredModel' in data) || (data.preferredModel is string && data.preferredModel.size() <= 120))
         && (!('theme' in data) || (data.theme in ['dark', 'light']))
         && (!('defaultViewMode' in data) || (data.defaultViewMode in ['preview', 'visual', 'code', 'split']))
         && (!('defaultViewport' in data) || (data.defaultViewport in ['desktop', 'tablet', 'mobile']))
         && (!('enableAppAi' in data) || (data.enableAppAi is bool))
+        && (!('appAiMode' in data) || (data.appAiMode in ['on_request', 'always', 'off']))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -68,6 +69,7 @@ service cloud.firestore {
         && data.prompt is string
         && data.prompt.size() <= 4000
         && (!('templateId' in data) || (data.templateId is string && data.templateId.size() <= 64))
+        && (!('appAiEnabled' in data) || (data.appAiEnabled is bool))
         && (!('publishedSlug' in data) || (data.publishedSlug is string && data.publishedSlug.size() <= 80 && data.publishedSlug.matches('^[a-zA-Z0-9_\\-]*$')))
         && data.isPublished is bool
         && data.createdAt is timestamp
@@ -126,7 +128,7 @@ service cloud.firestore {
         && incoming().keys().hasOnly([
           'uid', 'email', 'displayName', 'photoURL', 'preferredProvider',
           'preferredModel', 'theme', 'defaultViewMode', 'defaultViewport',
-          'enableAppAi', 'createdAt', 'updatedAt'
+          'enableAppAi', 'appAiMode', 'createdAt', 'updatedAt'
         ])
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
@@ -140,7 +142,7 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'displayName', 'photoURL', 'preferredProvider',
           'preferredModel', 'theme', 'defaultViewMode', 'defaultViewport',
-          'enableAppAi', 'email', 'updatedAt'
+          'enableAppAi', 'appAiMode', 'email', 'updatedAt'
         ]);
       allow delete: if isValidId(userId) && isOwner(userId);
     }
@@ -156,7 +158,7 @@ service cloud.firestore {
         && isValidId(projectId)
         && isValidMistProject(incoming(), projectId)
         && incoming().keys().hasAll(['id', 'ownerId', 'name', 'prompt', 'isPublished', 'createdAt', 'updatedAt'])
-        && incoming().keys().hasOnly(['id', 'ownerId', 'name', 'description', 'prompt', 'templateId', 'publishedSlug', 'isPublished', 'createdAt', 'updatedAt'])
+        && incoming().keys().hasOnly(['id', 'ownerId', 'name', 'description', 'prompt', 'templateId', 'appAiEnabled', 'publishedSlug', 'isPublished', 'createdAt', 'updatedAt'])
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isVerifiedUser()
@@ -169,9 +171,9 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'updatedAt'])
-          || incoming().diff(existing()).affectedKeys().hasOnly(['prompt', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['prompt', 'appAiEnabled', 'updatedAt'])
           || incoming().diff(existing()).affectedKeys().hasOnly(['publishedSlug', 'isPublished', 'updatedAt'])
-          || incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'prompt', 'publishedSlug', 'isPublished', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'prompt', 'appAiEnabled', 'publishedSlug', 'isPublished', 'updatedAt'])
         );
       allow delete: if isValidId(projectId)
         && isVerifiedUser()

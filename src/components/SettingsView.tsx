@@ -23,6 +23,7 @@ import { motion } from 'motion/react';
 import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
+  AppAiMode,
   DeploymentRecord,
   MistProject,
   StudioSettings,
@@ -33,8 +34,10 @@ import type { ModelHealthIncident } from '../utils/aiErrors';
 import {
   CUSTOM_GATEWAY_PRESETS,
   detectGatewayFromBaseUrl,
+  fetchLiveModelCatalog,
   normalizeProviderConfigToStudio,
   type CustomGatewayId,
+  type ModelCatalogItem,
 } from '../data/models';
 import MistLogo from './MistLogo';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
@@ -79,9 +82,17 @@ export default function SettingsView({
     normalizedInit.baseUrl || CUSTOM_GATEWAY_PRESETS[0].baseUrl,
   );
   const [apiKey, setApiKey] = useState<string>(normalizedInit.apiKey || '');
+  const [sessionOnlyKey, setSessionOnlyKey] = useState<boolean>(
+    Boolean(normalizedInit.sessionOnlyKey),
+  );
   const [showKey, setShowKey] = useState(false);
   const [model, setModel] = useState<string>(normalizedInit.model);
   const [savedNotice, setSavedNotice] = useState(false);
+
+  const [liveModels, setLiveModels] = useState<ModelCatalogItem[] | null>(null);
+  const [isLiveCatalog, setIsLiveCatalog] = useState(false);
+  const [isLoadingCatalog, setIsLoadingCatalog] = useState(false);
+  const [catalogNote, setCatalogNote] = useState<string | null>(null);
 
   const [isTestingProvider, setIsTestingProvider] = useState(false);
   const [providerTestResult, setProviderTestResult] = useState<{
@@ -101,11 +112,46 @@ export default function SettingsView({
     setProviderName(norm.name || 'Custom Provider');
     setBaseUrl(norm.baseUrl || '');
     setApiKey(norm.apiKey || '');
+    setSessionOnlyKey(Boolean(norm.sessionOnlyKey));
     setModel(norm.model);
   }, [providerConfig]);
 
+  const loadCatalog = async (targetUrl: string, targetKey: string, forceRefresh = false) => {
+    const cleaned = targetUrl.trim();
+    if (!cleaned.startsWith('https://')) {
+      setLiveModels(null);
+      setIsLiveCatalog(false);
+      setCatalogNote(cleaned ? 'Enter an https:// URL to fetch live models.' : null);
+      return;
+    }
+    setIsLoadingCatalog(true);
+    try {
+      const res = await fetchLiveModelCatalog({
+        baseUrl: cleaned,
+        apiKey: targetKey,
+        forceRefresh,
+      });
+      setLiveModels(res.models);
+      setIsLiveCatalog(res.source === 'live');
+      setCatalogNote(res.note || null);
+    } catch (err) {
+      setIsLiveCatalog(false);
+      setCatalogNote(err instanceof Error ? err.message : 'Unable to refresh model catalog.');
+    } finally {
+      setIsLoadingCatalog(false);
+    }
+  };
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadCatalog(baseUrl, apiKey, false);
+    }, 260);
+    return () => window.clearTimeout(timer);
+  }, [baseUrl, apiKey]);
+
   const activeGateway =
     CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
+  const activeModelsList = liveModels && liveModels.length > 0 ? liveModels : activeGateway.models;
 
   const handleSelectGateway = (nextGwId: CustomGatewayId) => {
     setGatewayId(nextGwId);
@@ -116,6 +162,9 @@ export default function SettingsView({
     } else if (nextGwId === 'custom_url' && CUSTOM_GATEWAY_PRESETS.some((p) => p.baseUrl === baseUrl)) {
       setBaseUrl('');
     }
+    setLiveModels(null);
+    setIsLiveCatalog(false);
+    setCatalogNote(null);
     setModel(gw.models[0].id);
     setProviderTestResult(null);
   };
@@ -126,6 +175,7 @@ export default function SettingsView({
     baseUrl: baseUrl.trim(),
     apiKey: apiKey.trim(),
     model: model.trim() || activeGateway.models[0].id,
+    sessionOnlyKey,
   });
 
   const handleApplyProvider = (e: React.FormEvent) => {
@@ -426,34 +476,47 @@ export default function SettingsView({
                       placeholder={activeGateway.placeholder}
                       className="w-full rounded-xl border border-zinc-200 bg-white pl-3 pr-10 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
                     />
-                    <button
-                      type="button"
-                      aria-label={showKey ? 'Hide API key' : 'Show API key'}
-                      onClick={() => setShowKey((s) => !s)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
-                    >
-                      {showKey ? <EyeOff className="h-3.5 w-3.5" aria-hidden="true" /> : <Eye className="h-3.5 w-3.5" aria-hidden="true" />}
-                    </button>
+                      <button
+                        type="button"
+                        aria-label={showKey ? 'Hide API key' : 'Show API key'}
+                        onClick={() => setShowKey((s) => !s)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
+                      >
+                        {showKey ? <EyeOff className="h-3.5 w-3.5" aria-hidden="true" /> : <Eye className="h-3.5 w-3.5" aria-hidden="true" />}
+                      </button>
+                    </div>
+                    <label className="mt-2 flex items-center gap-2 text-[11px] text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={sessionOnlyKey}
+                        onChange={(e) => setSessionOnlyKey(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-900"
+                      />
+                      <span>Keep API key in memory only (clear automatically when tab closes)</span>
+                    </label>
                   </div>
-                </div>
 
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between gap-2">
-                    <span className="font-medium text-zinc-700 dark:text-zinc-300">
-                      Active Model ({activeGateway.models.length} presets · Free &amp; Paid tagged)
-                    </span>
-                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                      Expand arrow to filter Free / Paid
-                    </span>
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between gap-2">
+                      <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                        Active Model ({activeModelsList.length} {isLiveCatalog ? 'live' : 'presets'} · Free &amp; Paid tagged)
+                      </span>
+                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                        Expand arrow to filter Free / Paid
+                      </span>
+                    </div>
+                    <ModelSelectorDropdown
+                      provider="custom"
+                      value={model}
+                      onChange={setModel}
+                      modelsOverride={activeModelsList}
+                      gatewayLabel={providerName.trim() || activeGateway.name}
+                      isLoadingCatalog={isLoadingCatalog}
+                      isLiveCatalog={isLiveCatalog}
+                      catalogNote={catalogNote}
+                      onRefreshCatalog={() => void loadCatalog(baseUrl, apiKey, true)}
+                    />
                   </div>
-                  <ModelSelectorDropdown
-                    provider="custom"
-                    value={model}
-                    onChange={setModel}
-                    modelsOverride={activeGateway.models}
-                    gatewayLabel={providerName.trim() || activeGateway.name}
-                  />
-                </div>
 
                 {activeGateway.steps && (
                   <div className="rounded-xl border border-zinc-200/90 bg-zinc-50/90 p-3.5 space-y-2 dark:border-zinc-800 dark:bg-zinc-900/70">
@@ -529,7 +592,7 @@ export default function SettingsView({
               </form>
             </motion.section>
 
-            {/* Section 2: Generated App AI Integration */}
+            {/* Section 2: Generated App AI Integration (Requested-Only by Default) */}
             <motion.section
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
@@ -537,44 +600,65 @@ export default function SettingsView({
               aria-labelledby="settings-app-ai-heading"
               className="mist-surface-card rounded-2xl border border-zinc-200/90 p-5 sm:p-6 dark:border-zinc-800/90"
             >
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex items-start gap-3">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-sky-500 text-white shadow-sm">
-                    <Terminal className="h-4 w-4" aria-hidden="true" />
-                  </div>
-                  <div>
-                    <h2
-                      id="settings-app-ai-heading"
-                      className="font-display text-base font-semibold text-zinc-950 dark:text-white"
-                    >
-                      AI Features Inside Generated Apps
-                    </h2>
-                    <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                      Generated websites automatically receive a live <code className="font-mono text-zinc-800 dark:text-zinc-200">/api/app-ai</code> bridge routed through your BYOK provider in both Live Preview and deployed <code className="font-mono text-zinc-800 dark:text-zinc-200">/p/:slug</code> sites.
-                    </p>
-                  </div>
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-sky-500 text-white shadow-sm">
+                  <Terminal className="h-4 w-4" aria-hidden="true" />
                 </div>
+                <div>
+                  <h2
+                    id="settings-app-ai-heading"
+                    className="font-display text-base font-semibold text-zinc-950 dark:text-white"
+                  >
+                    AI Features Inside Generated Apps
+                  </h2>
+                  <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                    Control when Mist integrates live <code className="font-mono text-zinc-800 dark:text-zinc-200">/api/app-ai</code> features into generated apps. Preview iframes use scoped ephemeral tokens and never expose your raw API key.
+                  </p>
+                </div>
+              </div>
 
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={studioSettings.enableAppAi}
-                  aria-label="Enable live AI features in generated apps"
-                  onClick={() =>
-                    onUpdateSettings({ enableAppAi: !studioSettings.enableAppAi })
-                  }
-                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors cursor-pointer ${
-                    studioSettings.enableAppAi
-                      ? 'bg-blue-600'
-                      : 'bg-zinc-300 dark:bg-zinc-700'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      studioSettings.enableAppAi ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                {(
+                  [
+                    {
+                      id: 'on_request',
+                      title: 'On Request Only',
+                      desc: 'Recommended — adds AI only when prompted.',
+                    },
+                    {
+                      id: 'off',
+                      title: 'Always Off',
+                      desc: 'Pure static / Canvas / Three.js builds.',
+                    },
+                    {
+                      id: 'always',
+                      title: 'Always Included',
+                      desc: 'Wire live App AI into every build.',
+                    },
+                  ] as Array<{ id: AppAiMode; title: string; desc: string }>
+                ).map((opt) => {
+                  const active = studioSettings.appAiMode === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() =>
+                        onUpdateSettings({
+                          appAiMode: opt.id,
+                          enableAppAi: opt.id === 'always',
+                        })
+                      }
+                      className={`rounded-xl border p-3 text-left transition-all cursor-pointer ${
+                        active
+                          ? 'border-blue-600 bg-blue-500/10 text-zinc-950 dark:border-blue-500/70 dark:text-white'
+                          : 'border-zinc-200 bg-white/60 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-300 dark:hover:bg-zinc-900'
+                      }`}
+                    >
+                      <p className="font-semibold">{opt.title}</p>
+                      <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">{opt.desc}</p>
+                    </button>
+                  );
+                })}
               </div>
 
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-200/80 bg-zinc-50/90 p-3.5 text-xs dark:border-zinc-800 dark:bg-zinc-900/70">
@@ -583,7 +667,7 @@ export default function SettingsView({
                     Runtime Endpoint: <code className="font-mono text-blue-600 dark:text-blue-400">POST /api/app-ai</code>
                   </p>
                   <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                    Exposed inside bundled apps via <code className="font-mono">window.mistAI.complete()</code> &amp; <code className="font-mono">window.mistAI.chat()</code>.
+                    Exposed only when enabled via <code className="font-mono">window.mistAI.complete()</code> &amp; <code className="font-mono">window.mistAI.chat()</code>.
                   </p>
                 </div>
                 <button

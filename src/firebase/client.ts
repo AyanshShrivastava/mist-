@@ -21,7 +21,7 @@ import {
   type DocumentSnapshot,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import type { AiProviderId, ViewportSize, WorkspaceViewMode } from '../types/mist';
+import type { AiProviderId, AppAiMode, ViewportSize, WorkspaceViewMode } from '../types/mist';
 
 export interface UserProfilePreferences {
   preferredProvider?: AiProviderId;
@@ -30,6 +30,7 @@ export interface UserProfilePreferences {
   defaultViewMode?: WorkspaceViewMode;
   defaultViewport?: ViewportSize;
   enableAppAi?: boolean;
+  appAiMode?: AppAiMode;
 }
 
 const app = initializeApp(firebaseConfig);
@@ -206,6 +207,10 @@ export async function fetchUserProfilePreferences(
       defaultViewMode: data.defaultViewMode as WorkspaceViewMode | undefined,
       defaultViewport: data.defaultViewport as ViewportSize | undefined,
       enableAppAi: typeof data.enableAppAi === 'boolean' ? data.enableAppAi : undefined,
+      appAiMode:
+        data.appAiMode === 'on_request' || data.appAiMode === 'always' || data.appAiMode === 'off'
+          ? (data.appAiMode as AppAiMode)
+          : undefined,
     };
   } catch (error) {
     if (isOfflineFirestoreError(error)) return null;
@@ -239,6 +244,7 @@ export async function syncUserProfile(
       if (prefs?.defaultViewMode) prefFields.defaultViewMode = prefs.defaultViewMode;
       if (prefs?.defaultViewport) prefFields.defaultViewport = prefs.defaultViewport;
       if (typeof prefs?.enableAppAi === 'boolean') prefFields.enableAppAi = prefs.enableAppAi;
+      if (prefs?.appAiMode) prefFields.appAiMode = prefs.appAiMode;
 
       try {
         await user.getIdToken();
@@ -247,6 +253,13 @@ export async function syncUserProfile(
           // Client temporarily offline; skip blocking write until next online sync
           return;
         }
+
+        const safePhotoUrl =
+          user.photoURL &&
+          user.photoURL.startsWith('https://') &&
+          user.photoURL.length <= 512
+            ? user.photoURL
+            : null;
 
         if (!existingSnap.exists()) {
           const payload: Record<string, unknown> = {
@@ -257,8 +270,8 @@ export async function syncUserProfile(
             updatedAt: serverTimestamp(),
             ...prefFields,
           };
-          if (user.photoURL && user.photoURL.length <= 512) {
-            payload.photoURL = user.photoURL;
+          if (safePhotoUrl) {
+            payload.photoURL = safePhotoUrl;
           }
           await setDoc(ref, payload);
         } else {
@@ -268,8 +281,8 @@ export async function syncUserProfile(
             updatedAt: serverTimestamp(),
             ...prefFields,
           };
-          if (user.photoURL && user.photoURL.length <= 512) {
-            updatePayload.photoURL = user.photoURL;
+          if (safePhotoUrl) {
+            updatePayload.photoURL = safePhotoUrl;
           }
           await updateDoc(ref, updatePayload);
         }

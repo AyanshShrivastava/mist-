@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Check, ChevronDown, Search } from 'lucide-react';
+import { Check, ChevronDown, RefreshCw, Search } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import type { AiProviderId, ModelBilling } from '../types/mist';
 import { PROVIDER_CATALOG, type ModelCatalogItem } from '../data/models';
@@ -12,6 +12,10 @@ interface ModelSelectorDropdownProps {
   gatewayLabel?: string;
   allowCustomInput?: boolean;
   compact?: boolean;
+  isLoadingCatalog?: boolean;
+  isLiveCatalog?: boolean;
+  catalogNote?: string | null;
+  onRefreshCatalog?: () => void;
 }
 
 function BillingBadge({ billing, label }: { billing: ModelBilling; label: string }) {
@@ -28,6 +32,12 @@ function BillingBadge({ billing, label }: { billing: ModelBilling; label: string
   );
 }
 
+function formatCtxWindow(ctx?: number): string | null {
+  if (!ctx || !Number.isFinite(ctx)) return null;
+  if (ctx >= 1_000_000) return `${(ctx / 1_000_000).toFixed(1).replace(/\.0$/, '')}M ctx`;
+  return `${Math.round(ctx / 1000)}k ctx`;
+}
+
 export default function ModelSelectorDropdown({
   provider,
   value,
@@ -36,6 +46,10 @@ export default function ModelSelectorDropdown({
   gatewayLabel,
   allowCustomInput = true,
   compact = false,
+  isLoadingCatalog = false,
+  isLiveCatalog = false,
+  catalogNote,
+  onRefreshCatalog,
 }: ModelSelectorDropdownProps) {
   const [expanded, setExpanded] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
@@ -105,7 +119,7 @@ export default function ModelSelectorDropdown({
 
         <div className="flex items-center gap-2 shrink-0">
           <span className="hidden sm:inline text-[11px] font-medium text-zinc-500 dark:text-zinc-400 tabular-nums">
-            {modelsList.length} models
+            {isLoadingCatalog ? 'Refreshing...' : `${modelsList.length} ${isLiveCatalog ? 'live' : 'models'}`}
           </span>
           <motion.span
             animate={{ rotate: expanded ? 180 : 0 }}
@@ -137,44 +151,65 @@ export default function ModelSelectorDropdown({
                     type="search"
                     value={filterQuery}
                     onChange={(e) => setFilterQuery(e.target.value)}
-                    placeholder={`Search ${displayGroupName} models (e.g. nemotron, free)...`}
+                    placeholder={`Search ${modelsList.length} ${displayGroupName} models...`}
                     aria-label={`Filter ${displayGroupName} models`}
                     className="w-full min-h-[34px] rounded-lg border border-zinc-200 bg-white pl-8 pr-3 py-1.5 text-xs text-zinc-950 placeholder:text-zinc-400 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
                   />
                 </div>
 
-                <div
-                  role="group"
-                  aria-label="Filter by pricing"
-                  className="grid grid-cols-3 sm:flex items-center gap-1 rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-950"
-                >
-                  {(
-                    [
-                      { id: 'all', label: `All (${modelsList.length})` },
-                      { id: 'free', label: `Free (${freeCount})` },
-                      { id: 'paid', label: `Paid (${paidCount})` },
-                    ] as const
-                  ).map((f) => (
+                <div className="flex items-center gap-1.5">
+                  <div
+                    role="group"
+                    aria-label="Filter by pricing"
+                    className="grid grid-cols-3 sm:flex flex-1 sm:flex-initial items-center gap-1 rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-950"
+                  >
+                    {(
+                      [
+                        { id: 'all', label: `All (${modelsList.length})` },
+                        { id: 'free', label: `Free (${freeCount})` },
+                        { id: 'paid', label: `Paid (${paidCount})` },
+                      ] as const
+                    ).map((f) => (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => setBillingFilter(f.id)}
+                        className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap tabular-nums cursor-pointer ${
+                          billingFilter === f.id
+                            ? 'bg-white text-zinc-950 shadow-xs dark:bg-zinc-800 dark:text-white'
+                            : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white'
+                        }`}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {onRefreshCatalog && (
                     <button
-                      key={f.id}
                       type="button"
-                      onClick={() => setBillingFilter(f.id)}
-                      className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                        billingFilter === f.id
-                          ? 'bg-white text-zinc-950 shadow-xs dark:bg-zinc-800 dark:text-white'
-                          : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white'
-                      }`}
+                      onClick={onRefreshCatalog}
+                      disabled={isLoadingCatalog}
+                      aria-label="Refresh live model catalog"
+                      title="Refresh live model catalog"
+                      className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white transition-colors cursor-pointer"
                     >
-                      {f.label}
+                      <RefreshCw className={`h-3.5 w-3.5 ${isLoadingCatalog ? 'animate-spin' : ''}`} aria-hidden="true" />
                     </button>
-                  ))}
+                  )}
                 </div>
               </div>
+
+              {catalogNote && (
+                <p className="px-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {catalogNote}
+                </p>
+              )}
 
               <div
                 role="listbox"
                 aria-label={`${displayGroupName} models`}
-                className="max-h-60 overflow-y-auto divide-y divide-zinc-200/70 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800/80 dark:border-zinc-800 dark:bg-zinc-950 mist-scrollbar"
+                className="max-h-64 overflow-y-auto divide-y divide-zinc-200/70 rounded-lg border border-zinc-200 bg-white dark:divide-zinc-800/80 dark:border-zinc-800 dark:bg-zinc-950 mist-scrollbar"
               >
                 {filteredModels.length === 0 ? (
                   <p className="px-3 py-4 text-center text-[11px] text-zinc-500">
@@ -183,6 +218,7 @@ export default function ModelSelectorDropdown({
                 ) : (
                   filteredModels.map((item) => {
                     const selected = value === item.id;
+                    const ctxLabel = formatCtxWindow(item.contextLength);
                     return (
                       <button
                         key={item.id}
@@ -214,6 +250,11 @@ export default function ModelSelectorDropdown({
                             <span className="text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
                               {item.tier}
                             </span>
+                            {ctxLabel && (
+                              <span className="text-[10px] font-mono text-zinc-400 dark:text-zinc-500 tabular-nums">
+                                {ctxLabel}
+                              </span>
+                            )}
                           </div>
                           <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400 line-clamp-1">
                             {item.summary}

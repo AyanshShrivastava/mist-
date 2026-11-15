@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyModelError } from './aiErrors';
+import { classifyModelError, redactSecrets } from './aiErrors';
 
 test('classifyModelError classifies OpenRouter 402 credits/max_tokens failure as CREDITS_REQUIRED', () => {
   const incident = classifyModelError({
@@ -39,7 +39,21 @@ test('classifyModelError detects rate limit, outage, and auth errors accurately'
     status: 401,
     provider: 'custom',
     model: 'openai/gpt-4.1',
-    message: 'Invalid API key',
+    message: 'Invalid API key sk-or-v1-1234567890abcdef123456',
   });
   assert.equal(auth.code, 'AUTH_ERROR');
+  assert.ok(!auth.message.includes('sk-or-v1-1234567890abcdef123456'));
 });
+
+test('redactSecrets scrubs provider keys, Bearer tokens, session tokens, and query secrets', () => {
+  const raw =
+    'Authorization: Bearer sk-or-v1-secret1234567890 failed with gsk_abcdefghijklmnopqrstuvwxyz and AIzaSyDummySecretKey1234567890 and mist_sess_abcdef1234567890 at https://example.com?key=supersecret123';
+  const cleaned = redactSecrets(raw);
+  assert.ok(!cleaned.includes('sk-or-v1-secret1234567890'));
+  assert.ok(!cleaned.includes('gsk_abcdefghijklmnopqrstuvwxyz'));
+  assert.ok(!cleaned.includes('AIzaSyDummySecretKey1234567890'));
+  assert.ok(!cleaned.includes('mist_sess_abcdef1234567890'));
+  assert.ok(!cleaned.includes('supersecret123'));
+  assert.ok(cleaned.includes('[REDACTED]'));
+});
+

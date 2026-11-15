@@ -21,6 +21,7 @@ export interface MistProject {
   description: string;
   prompt: string;
   templateId?: string;
+  appAiEnabled?: boolean;
   files: ProjectFile[];
   chatHistory: ChatMessage[];
   publishedSlug?: string;
@@ -32,6 +33,7 @@ export interface MistProject {
 export type AiProviderId = 'custom' | 'openrouter' | 'groq' | 'gemini';
 export type PrimaryProviderId = 'custom';
 export type ModelBilling = 'free' | 'paid';
+export type AppAiMode = 'on_request' | 'always' | 'off';
 
 export interface AiProviderConfig {
   provider: AiProviderId;
@@ -39,6 +41,7 @@ export interface AiProviderConfig {
   model: string;
   apiKey?: string;
   baseUrl?: string;
+  sessionOnlyKey?: boolean;
 }
 
 export interface AiStreamProgress {
@@ -103,4 +106,5 @@ export interface StudioSettings {
   defaultViewMode: WorkspaceViewMode;
   defaultViewport: ViewportSize;
   enableAppAi: boolean;
+  appAiMode: AppAiMode;
 }

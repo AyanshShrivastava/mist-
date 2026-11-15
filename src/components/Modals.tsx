@@ -29,8 +29,10 @@ import { sanitizeSlug } from '../utils/projectOps';
 import {
   CUSTOM_GATEWAY_PRESETS,
   detectGatewayFromBaseUrl,
+  fetchLiveModelCatalog,
   normalizeProviderConfigToStudio,
   type CustomGatewayId,
+  type ModelCatalogItem,
 } from '../data/models';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
 import MistLogo from './MistLogo';
@@ -61,6 +63,7 @@ export function ProvidersModal({
     normalizedInit.baseUrl || CUSTOM_GATEWAY_PRESETS[0].baseUrl,
   );
   const [apiKey, setApiKey] = useState(normalizedInit.apiKey || '');
+  const [sessionOnlyKey, setSessionOnlyKey] = useState(Boolean(normalizedInit.sessionOnlyKey));
   const [showKey, setShowKey] = useState(false);
   const [model, setModel] = useState(normalizedInit.model);
   const [isTesting, setIsTesting] = useState(false);
@@ -70,6 +73,11 @@ export function ProvidersModal({
     incident?: ModelHealthIncident;
   } | null>(null);
 
+  const [liveModels, setLiveModels] = useState<ModelCatalogItem[] | null>(null);
+  const [isLiveCatalog, setIsLiveCatalog] = useState(false);
+  const [isLoadingCatalog, setIsLoadingCatalog] = useState(false);
+  const [catalogNote, setCatalogNote] = useState<string | null>(null);
+
   useEffect(() => {
     if (isOpen) {
       const norm = normalizeProviderConfigToStudio(config);
@@ -77,14 +85,50 @@ export function ProvidersModal({
       setProviderName(norm.name || 'Custom Provider');
       setBaseUrl(norm.baseUrl || '');
       setApiKey(norm.apiKey || '');
+      setSessionOnlyKey(Boolean(norm.sessionOnlyKey));
       setModel(norm.model);
       setShowKey(false);
       setTestResult(null);
     }
   }, [isOpen, config]);
 
+  const loadCatalog = async (targetUrl: string, targetKey: string, forceRefresh = false) => {
+    const cleaned = targetUrl.trim();
+    if (!cleaned.startsWith('https://')) {
+      setLiveModels(null);
+      setIsLiveCatalog(false);
+      setCatalogNote(cleaned ? 'Enter an https:// URL to fetch live models.' : null);
+      return;
+    }
+    setIsLoadingCatalog(true);
+    try {
+      const res = await fetchLiveModelCatalog({
+        baseUrl: cleaned,
+        apiKey: targetKey,
+        forceRefresh,
+      });
+      setLiveModels(res.models);
+      setIsLiveCatalog(res.source === 'live');
+      setCatalogNote(res.note || null);
+    } catch (err) {
+      setIsLiveCatalog(false);
+      setCatalogNote(err instanceof Error ? err.message : 'Could not fetch live catalog.');
+    } finally {
+      setIsLoadingCatalog(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const timer = window.setTimeout(() => {
+      void loadCatalog(baseUrl, apiKey, false);
+    }, 260);
+    return () => window.clearTimeout(timer);
+  }, [isOpen, baseUrl, apiKey]);
+
   const activeGateway =
     CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
+  const activeModelsList = liveModels && liveModels.length > 0 ? liveModels : activeGateway.models;
 
   const handleSelectGateway = (nextGwId: CustomGatewayId) => {
     setGatewayId(nextGwId);
@@ -95,6 +139,9 @@ export function ProvidersModal({
     } else if (nextGwId === 'custom_url' && CUSTOM_GATEWAY_PRESETS.some((p) => p.baseUrl === baseUrl)) {
       setBaseUrl('');
     }
+    setLiveModels(null);
+    setIsLiveCatalog(false);
+    setCatalogNote(null);
     setModel(gw.models[0].id);
     setTestResult(null);
   };
@@ -105,6 +152,7 @@ export function ProvidersModal({
     baseUrl: baseUrl.trim(),
     apiKey: apiKey.trim(),
     model: model.trim() || activeGateway.models[0].id,
+    sessionOnlyKey,
   });
 
   const handleTestConnection = async () => {
@@ -185,7 +233,7 @@ export function ProvidersModal({
                     BYOK Models &amp; API Keys
                   </h2>
                   <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                    Connect your own Name, Base URL, API Key &amp; Model
+                    Connect your own Name, Base URL, API Key &amp; Live Model Catalog
                   </p>
                 </div>
               </div>
@@ -265,7 +313,7 @@ export function ProvidersModal({
                   <label htmlFor="mist-custom-url" className="block font-medium text-zinc-700 dark:text-zinc-300">
                     <span className="inline-flex items-center gap-1.5">
                       <Link2 className="h-3.5 w-3.5 text-indigo-500" aria-hidden="true" />
-                      <span>Base URL</span>
+                      <span>HTTPS Base URL</span>
                     </span>
                   </label>
                   <input
@@ -309,23 +357,34 @@ export function ProvidersModal({
                     {showKey ? <EyeOff className="h-3.5 w-3.5" aria-hidden="true" /> : <Eye className="h-3.5 w-3.5" aria-hidden="true" />}
                   </button>
                 </div>
-                <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                  100% BYOK: stored locally in your browser and sent directly to your configured Base URL.
-                </p>
+
+                <label className="mt-2 flex items-center gap-2 text-[11px] text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={sessionOnlyKey}
+                    onChange={(e) => setSessionOnlyKey(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-900"
+                  />
+                  <span>Keep API key in memory only (clear automatically when tab closes)</span>
+                </label>
               </div>
 
               <div>
                 <div className="mb-1.5 flex items-center justify-between">
                   <p className="font-medium text-zinc-700 dark:text-zinc-300">
-                    Model ({activeGateway.models.length} presets · Free &amp; Paid labeled)
+                    Model ({activeModelsList.length} {isLiveCatalog ? 'live' : 'presets'} · Free &amp; Paid tagged)
                   </p>
                 </div>
                 <ModelSelectorDropdown
                   provider="custom"
                   value={model}
                   onChange={setModel}
-                  modelsOverride={activeGateway.models}
+                  modelsOverride={activeModelsList}
                   gatewayLabel={providerName.trim() || activeGateway.name}
+                  isLoadingCatalog={isLoadingCatalog}
+                  isLiveCatalog={isLiveCatalog}
+                  catalogNote={catalogNote}
+                  onRefreshCatalog={() => void loadCatalog(baseUrl, apiKey, true)}
                 />
               </div>
 
