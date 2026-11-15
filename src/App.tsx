@@ -304,7 +304,7 @@ export default function App() {
         setProjects((prev) => [newProject, ...prev]);
         setActiveProjectId(newProject.id);
         if (currentUser) {
-          void saveProjectToFirestore(newProject).catch(() => {});
+          void saveProjectToFirestore(newProject, { isNew: true }).catch(() => {});
         }
       } catch (err) {
         setGenerationError(err instanceof Error ? err.message : 'Failed to generate website.');
@@ -366,7 +366,7 @@ export default function App() {
     setProjects((prev) => [copy, ...prev]);
     setActiveProjectId(copy.id);
     if (user) {
-      void saveProjectToFirestore(copy).catch(() => {});
+      void saveProjectToFirestore(copy, { isNew: true }).catch(() => {});
     }
   };
 

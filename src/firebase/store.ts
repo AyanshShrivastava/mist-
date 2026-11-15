@@ -1,9 +1,6 @@
 import {
   collection,
-  deleteDoc,
   doc,
-  getDoc,
-  getDocFromServer,
   getDocs,
   query,
   serverTimestamp,
@@ -13,9 +10,19 @@ import {
   writeBatch,
   type Timestamp,
 } from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType } from './client';
+import {
+  auth,
+  db,
+  ensureFirestoreOnline,
+  getDocServerOrCache,
+  handleFirestoreError,
+  isOfflineFirestoreError,
+  OperationType,
+} from './client';
 import type { MistProject, ProjectFile } from '../types/mist';
 import { createSafeId } from '../utils/projectOps';
+
+const knownCloudProjects = new Set<string>();
 
 function toIsoString(val: unknown): string {
   if (val && typeof val === 'object' && 'toDate' in val && typeof (val as Timestamp).toDate === 'function') {
@@ -29,11 +36,21 @@ export async function listUserProjectsFromFirestore(uid: string): Promise<MistPr
   const projectsPath = 'projects';
   try {
     const q = query(collection(db, projectsPath), where('ownerId', '==', uid));
-    const snap = await getDocs(q);
+    let snap;
+    try {
+      snap = await getDocs(q);
+    } catch (err) {
+      if (!isOfflineFirestoreError(err)) throw err;
+      await ensureFirestoreOnline();
+      snap = await getDocs(q);
+    }
 
     const results: MistProject[] = [];
     for (const projectDoc of snap.docs) {
       const data = projectDoc.data();
+      const projectId = String(data.id || projectDoc.id);
+      knownCloudProjects.add(projectId);
+
       const filesPath = `projects/${projectDoc.id}/files`;
       let files: ProjectFile[] = [];
       try {
@@ -49,11 +66,13 @@ export async function listUserProjectsFromFirestore(uid: string): Promise<MistPr
           };
         });
       } catch (fileErr) {
-        handleFirestoreError(fileErr, OperationType.LIST, filesPath);
+        if (!isOfflineFirestoreError(fileErr)) {
+          handleFirestoreError(fileErr, OperationType.LIST, filesPath);
+        }
       }
 
       results.push({
-        id: String(data.id || projectDoc.id),
+        id: projectId,
         name: String(data.name || 'Untitled Website'),
         description: String(data.description || ''),
         prompt: String(data.prompt || ''),
@@ -76,13 +95,19 @@ export async function listUserProjectsFromFirestore(uid: string): Promise<MistPr
 
     return results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   } catch (error) {
+    if (isOfflineFirestoreError(error)) {
+      return [];
+    }
     handleFirestoreError(error, OperationType.LIST, projectsPath);
   }
 }
 
 const projectSaveQueue = new Map<string, Promise<void>>();
 
-export async function saveProjectToFirestore(project: MistProject): Promise<void> {
+export async function saveProjectToFirestore(
+  project: MistProject,
+  options?: { isNew?: boolean },
+): Promise<void> {
   const prev = projectSaveQueue.get(project.id) || Promise.resolve();
   const next = prev
     .catch(() => {})
@@ -94,18 +119,25 @@ export async function saveProjectToFirestore(project: MistProject): Promise<void
       const projectRef = doc(db, 'projects', project.id);
 
       try {
-        let existing;
-        try {
-          existing = await getDocFromServer(projectRef);
-        } catch {
-          existing = await getDoc(projectRef);
-        }
-
         const safeName = (project.name || 'Untitled Website').slice(0, 120);
         const safeDescription = (project.description || '').slice(0, 500);
         const safePrompt = (project.prompt || '').slice(0, 4000);
 
-        if (!existing.exists()) {
+        let shouldCreate = Boolean(options?.isNew && !knownCloudProjects.has(project.id));
+
+        if (!shouldCreate && !knownCloudProjects.has(project.id)) {
+          const existing = await getDocServerOrCache(projectRef);
+          if (!existing) {
+            // Client temporarily offline; skip uncached getDoc failure and keep localStorage copy
+            return;
+          }
+          shouldCreate = !existing.exists();
+          if (existing.exists()) {
+            knownCloudProjects.add(project.id);
+          }
+        }
+
+        if (shouldCreate) {
           const payload: Record<string, unknown> = {
             id: project.id,
             ownerId: user.uid,
@@ -123,24 +155,48 @@ export async function saveProjectToFirestore(project: MistProject): Promise<void
             payload.publishedSlug = project.publishedSlug.slice(0, 80);
           }
           await setDoc(projectRef, payload);
-        } else {
-          const updatePayload: Record<string, unknown> = {
-            name: safeName,
-            description: safeDescription,
-            prompt: safePrompt,
-            isPublished: Boolean(project.isPublished),
-            updatedAt: serverTimestamp(),
-          };
-          if (project.publishedSlug !== undefined) {
-            updatePayload.publishedSlug = project.publishedSlug.slice(0, 80);
+          knownCloudProjects.add(project.id);
+
+          const batch = writeBatch(db);
+          for (const file of project.files) {
+            const fileRef = doc(db, 'projects', project.id, 'files', file.id);
+            batch.set(fileRef, {
+              id: file.id,
+              projectId: project.id,
+              ownerId: user.uid,
+              path: file.path.slice(0, 256),
+              language: file.language,
+              content: file.content.slice(0, 200000),
+              updatedAt: serverTimestamp(),
+            });
           }
-          await updateDoc(projectRef, updatePayload);
+          await batch.commit();
+          return;
         }
 
-        const existingFilesSnap = await getDocs(
-          query(collection(db, 'projects', project.id, 'files'), where('ownerId', '==', user.uid)),
-        );
-        const existingFileIds = new Set(existingFilesSnap.docs.map((d) => d.id));
+        const updatePayload: Record<string, unknown> = {
+          name: safeName,
+          description: safeDescription,
+          prompt: safePrompt,
+          isPublished: Boolean(project.isPublished),
+          updatedAt: serverTimestamp(),
+        };
+        if (project.publishedSlug !== undefined) {
+          updatePayload.publishedSlug = project.publishedSlug.slice(0, 80);
+        }
+        await updateDoc(projectRef, updatePayload);
+
+        let existingFileIds = new Set<string>();
+        try {
+          const existingFilesSnap = await getDocs(
+            query(collection(db, 'projects', project.id, 'files'), where('ownerId', '==', user.uid)),
+          );
+          existingFileIds = new Set(existingFilesSnap.docs.map((d) => d.id));
+        } catch (filesErr) {
+          if (!isOfflineFirestoreError(filesErr)) {
+            throw filesErr;
+          }
+        }
         const currentFileIds = new Set(project.files.map((f) => f.id));
 
         const batch = writeBatch(db);
@@ -163,6 +219,9 @@ export async function saveProjectToFirestore(project: MistProject): Promise<void
         }
         await batch.commit();
       } catch (error) {
+        if (isOfflineFirestoreError(error)) {
+          return;
+        }
         handleFirestoreError(error, OperationType.WRITE, projectPath);
       }
     });
@@ -181,6 +240,7 @@ export async function deleteProjectFromFirestore(projectId: string): Promise<voi
   const user = auth.currentUser;
   if (!user) return;
 
+  knownCloudProjects.delete(projectId);
   const projectPath = `projects/${projectId}`;
   try {
     const filesSnap = await getDocs(
@@ -193,6 +253,9 @@ export async function deleteProjectFromFirestore(projectId: string): Promise<voi
     batch.delete(doc(db, 'projects', projectId));
     await batch.commit();
   } catch (error) {
+    if (isOfflineFirestoreError(error)) {
+      return;
+    }
     handleFirestoreError(error, OperationType.DELETE, projectPath);
   }
 }
@@ -209,11 +272,9 @@ export async function saveDeploymentToFirestore(params: {
   const deployPath = `deployments/${params.slug}`;
   const ref = doc(db, 'deployments', params.slug);
   try {
-    let existing;
-    try {
-      existing = await getDocFromServer(ref);
-    } catch {
-      existing = await getDoc(ref);
+    const existing = await getDocServerOrCache(ref);
+    if (!existing) {
+      return;
     }
     if (!existing.exists()) {
       await setDoc(ref, {
@@ -233,6 +294,9 @@ export async function saveDeploymentToFirestore(params: {
       });
     }
   } catch (error) {
+    if (isOfflineFirestoreError(error)) {
+      return;
+    }
     handleFirestoreError(error, OperationType.WRITE, deployPath);
   }
 }

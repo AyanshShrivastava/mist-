@@ -9,17 +9,30 @@ import {
 } from 'firebase/auth';
 import {
   doc,
+  enableNetwork,
   getDoc,
   getDocFromServer,
   getFirestore,
+  initializeFirestore,
   serverTimestamp,
   setDoc,
   updateDoc,
+  type DocumentReference,
+  type DocumentSnapshot,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import type { AiProviderId } from '../types/mist';
 
 const app = initializeApp(firebaseConfig);
+try {
+  initializeFirestore(
+    app,
+    { experimentalAutoDetectLongPolling: true },
+    firebaseConfig.firestoreDatabaseId,
+  );
+} catch {
+  // Already initialized in this runtime (e.g. HMR)
+}
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 const googleProvider = new GoogleAuthProvider();
@@ -48,6 +61,61 @@ export interface FirestoreErrorInfo {
       email?: string | null;
     }[];
   };
+}
+
+export function isOfflineFirestoreError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const code = 'code' in error ? String((error as { code: unknown }).code) : '';
+  const message =
+    error instanceof Error
+      ? error.message
+      : 'message' in error
+        ? String((error as { message: unknown }).message)
+        : '';
+  const lower = message.toLowerCase();
+  return (
+    code === 'unavailable' ||
+    lower.includes('the client is offline') ||
+    lower.includes('network error') ||
+    lower.includes('could not reach cloud firestore backend')
+  );
+}
+
+export async function ensureFirestoreOnline(): Promise<void> {
+  try {
+    await enableNetwork(db);
+  } catch {
+    // Ignore network toggle errors
+  }
+}
+
+export async function getDocServerOrCache(
+  ref: DocumentReference,
+): Promise<DocumentSnapshot | null> {
+  try {
+    return await getDocFromServer(ref);
+  } catch (err) {
+    if (!isOfflineFirestoreError(err)) {
+      throw err;
+    }
+    await ensureFirestoreOnline();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    try {
+      return await getDocFromServer(ref);
+    } catch (retryErr) {
+      if (!isOfflineFirestoreError(retryErr)) {
+        throw retryErr;
+      }
+      try {
+        return await getDoc(ref);
+      } catch (cacheErr) {
+        if (isOfflineFirestoreError(cacheErr)) {
+          return null;
+        }
+        throw cacheErr;
+      }
+    }
+  }
 }
 
 export function handleFirestoreError(
@@ -124,13 +192,11 @@ export async function syncUserProfile(
       if (!email) return;
 
       try {
-        // Ensure auth token claims are fresh and check server state to avoid cache race
         await user.getIdToken();
-        let existingSnap;
-        try {
-          existingSnap = await getDocFromServer(ref);
-        } catch {
-          existingSnap = await getDoc(ref);
+        const existingSnap = await getDocServerOrCache(ref);
+        if (!existingSnap) {
+          // Client temporarily offline; skip blocking write until next online sync
+          return;
         }
 
         if (!existingSnap.exists()) {
@@ -163,6 +229,9 @@ export async function syncUserProfile(
           await updateDoc(ref, updatePayload);
         }
       } catch (error) {
+        if (isOfflineFirestoreError(error)) {
+          return;
+        }
         handleFirestoreError(error, OperationType.WRITE, userPath);
       }
     });
