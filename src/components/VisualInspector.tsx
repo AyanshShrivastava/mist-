@@ -3,8 +3,8 @@ import {
   AlignCenter,
   AlignLeft,
   AlignRight,
+  Cpu,
   MousePointerClick,
-  Sparkles,
   Trash2,
 } from 'lucide-react';
 import type { SelectedVisualElement, VisualElementPatch, VisualElementStyles } from '../types/mist';
@@ -327,7 +327,7 @@ export default function VisualInspector({
             onClick={() => onAskAiAboutElement(selectedElement)}
             className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-800 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
           >
-            <Sparkles className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+            <Cpu className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
             <span>Refine with AI</span>
           </button>
           <button

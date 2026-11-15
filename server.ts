@@ -10,6 +10,7 @@ import { WebSocketServer } from 'ws';
 import dotenv from 'dotenv';
 import type { AiProviderConfig, AiProviderId, ProjectFile } from './src/types/mist';
 import { classifyModelError, type ModelHealthIncident } from './src/utils/aiErrors';
+import { normalizeProjectFilePath, resolveAppEntryPath } from './src/utils/projectOps';
 
 dotenv.config();
 
@@ -312,20 +313,68 @@ async function bundleProjectToHtml(params: {
   await ensureVendorRuntime();
 
   const fileMap = new Map<string, ProjectFile>();
-  for (const f of params.files) {
-    fileMap.set(f.path.replace(/^\/+/, ''), f);
+  const lowerFileMap = new Map<string, string>();
+  const normalizedFiles: ProjectFile[] = params.files.map((f) => {
+    const cleanPath = normalizeProjectFilePath(f.path);
+    return { ...f, path: cleanPath };
+  });
+
+  for (const f of normalizedFiles) {
+    fileMap.set(f.path, f);
+    lowerFileMap.set(f.path.toLowerCase(), f.path);
   }
 
-  const hasApp = fileMap.has('src/App.tsx');
+  const appEntry = resolveAppEntryPath(normalizedFiles);
   const entryPath = fileMap.has('src/main.tsx') ? 'src/main.tsx' : '__mist_entry.tsx';
 
-  const syntheticEntry = `
+  const syntheticEntry = appEntry
+    ? `
     import React from 'react';
     import { createRoot } from 'react-dom/client';
-    ${hasApp ? "import App from './src/App';" : 'const App = () => React.createElement("div", { className: "p-12 text-center font-sans" }, "Add src/App.tsx to render your website.");'}
+    import * as AppModule from './${appEntry}';
+
+    const ResolvedApp =
+      AppModule.default ||
+      AppModule.App ||
+      Object.values(AppModule).find((val) => typeof val === 'function') ||
+      (() => React.createElement('div', { className: 'p-8 text-center font-sans text-zinc-700' }, 'Export a React component from ${appEntry} to render this website.'));
+
+    class MistErrorBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { error: null };
+      }
+      static getDerivedStateFromError(error) {
+        return { error };
+      }
+      render() {
+        if (this.state.error) {
+          return React.createElement(
+            'div',
+            { className: 'p-6 m-4 rounded-xl border border-red-200 bg-red-50 text-red-900 font-sans text-sm' },
+            React.createElement('strong', null, 'Preview Render Error'),
+            React.createElement('pre', { className: 'mt-2 text-xs font-mono whitespace-pre-wrap' }, String(this.state.error?.message || this.state.error))
+          );
+        }
+        return this.props.children;
+      }
+    }
+
     const rootEl = document.getElementById('root');
     if (rootEl) {
-      createRoot(rootEl).render(React.createElement(App));
+      createRoot(rootEl).render(
+        React.createElement(MistErrorBoundary, null, React.createElement(ResolvedApp))
+      );
+    }
+  `
+    : `
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    const rootEl = document.getElementById('root');
+    if (rootEl) {
+      createRoot(rootEl).render(
+        React.createElement('div', { className: 'p-12 text-center font-sans text-zinc-600' }, 'Add src/App.tsx to render your website.')
+      );
     }
   `;
 
@@ -362,9 +411,9 @@ async function bundleProjectToHtml(params: {
           : '';
         const baseResolved = args.path.startsWith('.')
           ? path.posix.normalize(path.posix.join(importerDir, args.path))
-          : args.path.replace(/^@\//, '');
+          : args.path.replace(/^(@\/|\/)/, '');
 
-        const candidates = [
+        const rawCandidates = [
           baseResolved,
           `${baseResolved}.tsx`,
           `${baseResolved}.ts`,
@@ -373,9 +422,23 @@ async function bundleProjectToHtml(params: {
           `${baseResolved}/index.tsx`,
           `${baseResolved}/index.ts`,
         ];
-        for (const c of candidates) {
+        if (!baseResolved.startsWith('src/')) {
+          rawCandidates.push(
+            `src/${baseResolved}`,
+            `src/${baseResolved}.tsx`,
+            `src/${baseResolved}.ts`,
+            `src/${baseResolved}.jsx`,
+            `src/${baseResolved}.js`,
+            `src/${baseResolved}/index.tsx`,
+          );
+        }
+        for (const c of rawCandidates) {
           if (fileMap.has(c)) {
             return { path: c, namespace: 'mist-fs' };
+          }
+          const matched = lowerFileMap.get(c.toLowerCase());
+          if (matched) {
+            return { path: matched, namespace: 'mist-fs' };
           }
         }
         return { path: args.path, namespace: 'mist-missing' };
@@ -474,6 +537,34 @@ async function bundleProjectToHtml(params: {
     .join('\n');
 
   const safeTitle = params.title.replace(/[<>]/g, '');
+  const MIST_APP_AI_RUNTIME_SCRIPT = `
+(function() {
+  window.mistAI = {
+    complete: async function(prompt, options) {
+      var opts = options || {};
+      var res = await fetch('/api/app-ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: prompt,
+          messages: opts.messages,
+          systemInstruction: opts.systemInstruction,
+          jsonMode: Boolean(opts.jsonMode)
+        })
+      });
+      var data = await res.json();
+      if (!res.ok) {
+        throw new Error((data && (data.error || (data.incident && data.incident.message))) || 'AI request failed');
+      }
+      return data.text;
+    },
+    chat: async function(messages, systemInstruction) {
+      return window.mistAI.complete('', { messages: messages, systemInstruction: systemInstruction });
+    }
+  };
+})();
+`;
+
   const html = `<!doctype html>
 <html lang="en">
   <head>
@@ -483,6 +574,7 @@ async function bundleProjectToHtml(params: {
     <style>${compiledTwCss}</style>
     <style>${customCss}</style>
     <script src="/vendor/preview-runtime.js"></script>
+    <script>${MIST_APP_AI_RUNTIME_SCRIPT}</script>
   </head>
   <body>
     <div id="root"></div>
@@ -518,12 +610,21 @@ app.post('/api/bundle', async (req, res) => {
 
 // --- 4. AI Generation, Refinement, Provider Testing, & Model Health Status ---
 const SYSTEM_GENERATOR_PROMPT = `You are Mist, a senior product designer and React + TypeScript + Tailwind CSS frontend engineer.
-Generate clean, cohesive, responsive, accessible websites with deliberate typography, strong contrast, and crisp layouts.
+Generate clean, cohesive, responsive, accessible websites with deliberate typography, strong contrast, mobile responsiveness, and crisp layouts.
 Rules:
 - Use React 19, TypeScript (.tsx), and Tailwind CSS utility classes.
 - Allowed imports: 'react', 'lucide-react', and local relative imports like './components/Navbar'. Do NOT import unrequested third-party libraries.
 - Never use broken external URLs like unsplash.com or placeholder.com; for imagery use crisp SVG/CSS illustrations or local Mist studio assets if needed.
+- Never use Sparkles, Star, or Wand icons from lucide-react; prefer crisp functional icons (Send, MessageSquare, Cpu, ArrowRight, Terminal, Layers, Check).
 - Ensure src/App.tsx is the default-exported root component and src/index.css starts with @import "tailwindcss";.
+- Real AI Feature Integration: Whenever the user's idea calls for AI functionality (assistant, chat widget, content generator, analyzer, summarizer, planner, quiz builder, smart search, etc.), implement it with a REAL live HTTP call to POST /api/app-ai:
+  const res = await fetch('/api/app-ai', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, messages, systemInstruction })
+  });
+  const data = await res.json(); // returns { text, model, provider } or { error }
+  Include real loading state, disabled submit guard while pending, and inline error state. NEVER fake AI replies with setTimeout stubs or canned static arrays.
 - Use clean, natural copy without fake telemetry tickers or placeholder lorem ipsum.`;
 
 function extractJsonObject(raw: string): Record<string, unknown> {
@@ -564,15 +665,16 @@ function getHttpStatusFromError(err: unknown): number {
   return 500;
 }
 
-async function callOpenAiCompatibleProvider(params: {
+async function callOpenAiCompatibleRaw(params: {
   config: AiProviderConfig;
-  systemInstruction: string;
-  userPrompt: string;
-}): Promise<Record<string, unknown>> {
-  const { config, systemInstruction, userPrompt } = params;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  jsonMode?: boolean;
+  temperature?: number;
+}): Promise<string> {
+  const { config, messages, jsonMode = true, temperature = 0.4 } = params;
   const apiKey = config.apiKey?.trim();
   if (!apiKey) {
-    throw new ProviderHttpError(401, `Please add your ${config.provider} API key in Providers settings.`);
+    throw new ProviderHttpError(401, `Please add your ${config.provider} API key in Settings.`);
   }
 
   let endpoint = 'https://openrouter.ai/api/v1/chat/completions';
@@ -595,18 +697,19 @@ async function callOpenAiCompatibleProvider(params: {
     headers['X-Title'] = 'Mist Website Builder';
   }
 
+  const body: Record<string, unknown> = {
+    model: config.model,
+    messages,
+    temperature,
+  };
+  if (jsonMode) {
+    body.response_format = { type: 'json_object' };
+  }
+
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      model: config.model,
-      messages: [
-        { role: 'system', content: systemInstruction },
-        { role: 'user', content: userPrompt },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.4,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
@@ -621,6 +724,23 @@ async function callOpenAiCompatibleProvider(params: {
   if (!content) {
     throw new ProviderHttpError(502, `${config.provider} returned an empty response.`);
   }
+  return content;
+}
+
+async function callOpenAiCompatibleProvider(params: {
+  config: AiProviderConfig;
+  systemInstruction: string;
+  userPrompt: string;
+}): Promise<Record<string, unknown>> {
+  const content = await callOpenAiCompatibleRaw({
+    config: params.config,
+    messages: [
+      { role: 'system', content: params.systemInstruction },
+      { role: 'user', content: params.userPrompt },
+    ],
+    jsonMode: true,
+    temperature: 0.4,
+  });
   return extractJsonObject(content);
 }
 
@@ -669,9 +789,10 @@ app.post('/api/ai/test-provider', async (req, res) => {
 });
 
 app.post('/api/ai/generate', async (req, res) => {
-  const { prompt, providerConfig } = req.body as {
+  const { prompt, providerConfig, enableAppAi = true } = req.body as {
     prompt: string;
     providerConfig?: AiProviderConfig;
+    enableAppAi?: boolean;
   };
   const config: AiProviderConfig = providerConfig || {
     provider: 'gemini',
@@ -684,8 +805,17 @@ app.post('/api/ai/generate', async (req, res) => {
       return;
     }
 
+    const aiCapabilityDirective = enableAppAi
+      ? '\n- Interactive App AI Runtime is enabled: whenever the site benefits from live AI (chatbots, content generators, smart search, summarizers, analyzers), wire real fetch(\'/api/app-ai\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify({ prompt, systemInstruction }) }) calls directly in the generated UI.'
+      : '';
+
     const userPrompt = `Build a complete, multi-file React + TypeScript + Tailwind CSS website for this request:
-"${prompt.trim()}"
+"${prompt.trim()}"${aiCapabilityDirective}
+
+CRITICAL OUTPUT RULES:
+- "src/App.tsx" MUST be the VERY FIRST file in the "files" array and MUST default-export App (export default function App()).
+- Keep mock/seed datasets concise (4-6 realistic items max) so every file, especially src/App.tsx and all imported components, completes without truncation.
+- Also include "src/index.css" starting with @import "tailwindcss";.
 
 Return JSON with this exact shape:
 {
@@ -693,8 +823,8 @@ Return JSON with this exact shape:
   "description": "One-sentence summary of the site",
   "summary": "Brief note describing what you built",
   "files": [
-    { "path": "src/components/Navbar.tsx", "language": "tsx", "content": "..." },
     { "path": "src/App.tsx", "language": "tsx", "content": "..." },
+    { "path": "src/components/Navbar.tsx", "language": "tsx", "content": "..." },
     { "path": "src/index.css", "language": "css", "content": "@import \\"tailwindcss\\";\\n" }
   ]
 }`;
@@ -715,6 +845,7 @@ Return JSON with this exact shape:
         contents: userPrompt,
         config: {
           systemInstruction: SYSTEM_GENERATOR_PROMPT,
+          maxOutputTokens: 32768,
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -746,6 +877,104 @@ Return JSON with this exact shape:
         systemInstruction: `${SYSTEM_GENERATOR_PROMPT}\nAlways respond strictly with valid JSON.`,
         userPrompt,
       });
+    }
+
+    let normalizedFiles: Array<{ path: string; language: string; content: string }> = Array.isArray(parsed.files)
+      ? (parsed.files as Array<{ path?: string; language?: string; content?: string }>).map((f) => {
+          const cleanPath = normalizeProjectFilePath(String(f.path || 'src/App.tsx'));
+          return {
+            path: cleanPath,
+            language: String(f.language || (cleanPath.endsWith('.css') ? 'css' : cleanPath.endsWith('.ts') ? 'ts' : 'tsx')),
+            content: String(f.content || ''),
+          };
+        })
+      : [];
+
+    const hasRootApp = normalizedFiles.some((f) => {
+      const lower = f.path.toLowerCase();
+      return lower === 'src/app.tsx' || lower === 'src/app.jsx' || lower === 'app.tsx' || lower === 'app.jsx';
+    });
+
+    if (!hasRootApp && normalizedFiles.length > 0) {
+      const existingSummary = normalizedFiles
+        .map((f) => `--- ${f.path} ---\n${f.content.slice(0, 1800)}`)
+        .join('\n\n');
+      const repairPrompt = `You generated files for "${prompt.trim()}" but omitted src/App.tsx.
+Write the complete root "src/App.tsx" (default-exported function App) that composes the generated components cleanly with full responsive UI and working state.
+
+Existing generated files:
+${existingSummary}
+
+Return JSON: { "content": "..." }`;
+
+      let synthesizedAppContent = '';
+      try {
+        if (config.provider === 'gemini' && process.env.GEMINI_API_KEY) {
+          const ai = new GoogleGenAI({
+            apiKey: process.env.GEMINI_API_KEY,
+            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+          });
+          const repairResp = await ai.models.generateContent({
+            model: config.model || 'gemini-4-hydrogen',
+            contents: repairPrompt,
+            config: {
+              systemInstruction: SYSTEM_GENERATOR_PROMPT,
+              maxOutputTokens: 8192,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  content: { type: Type.STRING },
+                },
+                required: ['content'],
+              },
+            },
+          });
+          const repairJson = extractJsonObject(repairResp.text || '{}');
+          if (typeof repairJson.content === 'string' && repairJson.content.trim()) {
+            synthesizedAppContent = repairJson.content;
+          }
+        } else if (config.provider !== 'gemini') {
+          const repairJson = await callOpenAiCompatibleProvider({
+            config,
+            systemInstruction: `${SYSTEM_GENERATOR_PROMPT}\nRespond strictly with valid JSON.`,
+            userPrompt: repairPrompt,
+          });
+          if (typeof repairJson.content === 'string' && repairJson.content.trim()) {
+            synthesizedAppContent = repairJson.content;
+          }
+        }
+      } catch {
+        // Fallback below guarantees valid src/App.tsx
+      }
+
+      if (!synthesizedAppContent) {
+        const firstComp = normalizedFiles.find((f) => f.path.endsWith('.tsx'));
+        if (firstComp) {
+          const rel = './' + firstComp.path.replace(/^src\//, '').replace(/\.tsx$/, '');
+          synthesizedAppContent = `import React from 'react';\nimport PrimaryView from '${rel}';\n\nexport default function App() {\n  return <PrimaryView />;\n}\n`;
+        }
+      }
+
+      if (synthesizedAppContent) {
+        normalizedFiles = [
+          { path: 'src/App.tsx', language: 'tsx', content: synthesizedAppContent },
+          ...normalizedFiles,
+        ];
+      }
+    }
+
+    if (!normalizedFiles.some((f) => f.path.toLowerCase() === 'src/index.css')) {
+      normalizedFiles.push({
+        path: 'src/index.css',
+        language: 'css',
+        content: '@import "tailwindcss";\n',
+      });
+    }
+
+    parsed.files = normalizedFiles;
+    if (!parsed.projectName && typeof parsed.title === 'string') {
+      parsed.projectName = parsed.title;
     }
 
     clearIncident(config.provider, config.model);
@@ -792,6 +1021,8 @@ app.post('/api/ai/refine', async (req, res) => {
 
     const userPrompt = `Refine the existing website according to this instruction:
 "${instruction.trim()}"${elementContext}
+
+If adding or updating AI features in the website, always integrate real calls to POST /api/app-ai ({ prompt, messages, systemInstruction }) returning { text } — never fake setTimeout stubs.
 
 Current files:
 ${fileBundleText}
@@ -851,11 +1082,107 @@ Return JSON containing ONLY the modified or newly created files (full file conte
       });
     }
 
+    if (Array.isArray(parsed.files)) {
+      parsed.files = (parsed.files as Array<{ path?: string; language?: string; content?: string }>).map(
+        (f) => ({
+          ...f,
+          path: normalizeProjectFilePath(String(f.path || 'src/App.tsx')),
+        }),
+      );
+    }
+
     clearIncident(config.provider, config.model);
     res.json(parsed);
   } catch (err) {
     const status = getHttpStatusFromError(err);
     const message = err instanceof Error ? err.message : 'Refinement failed';
+    const incident = classifyModelError({
+      status,
+      message,
+      provider: config.provider,
+      model: config.model,
+    });
+    recordIncident(incident);
+    res.status(status).json({ error: incident.message, incident });
+  }
+});
+
+// Live AI runtime endpoint called directly by generated apps (Preview & Published /p/:slug)
+app.post('/api/app-ai', async (req, res) => {
+  const { prompt, messages, systemInstruction, jsonMode, providerConfig } = req.body as {
+    prompt?: string;
+    messages?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+    systemInstruction?: string;
+    jsonMode?: boolean;
+    providerConfig?: AiProviderConfig;
+  };
+  const config: AiProviderConfig = providerConfig || {
+    provider: 'gemini',
+    model: 'gemini-4-hydrogen',
+  };
+
+  try {
+    const trimmedPrompt = (prompt || '').trim();
+    const hasMessages = Array.isArray(messages) && messages.length > 0;
+    if (!trimmedPrompt && !hasMessages) {
+      res.status(400).json({ error: 'Provide either prompt or messages.' });
+      return;
+    }
+
+    let text = '';
+    if (config.provider === 'gemini') {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new ProviderHttpError(503, 'Server GEMINI_API_KEY is not configured.');
+      }
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      const contents = hasMessages
+        ? messages!
+            .filter((m) => m.role !== 'system')
+            .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+            .join('\n\n')
+        : trimmedPrompt;
+      const response = await ai.models.generateContent({
+        model: config.model || 'gemini-4-hydrogen',
+        contents,
+        config: {
+          systemInstruction:
+            systemInstruction ||
+            'You are a concise, helpful backend AI powering an interactive web application built with Mist.',
+          ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
+        },
+      });
+      text = response.text || '';
+    } else {
+      const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+        {
+          role: 'system',
+          content:
+            systemInstruction ||
+            'You are a concise, helpful backend AI powering an interactive web application built with Mist.',
+        },
+        ...(hasMessages ? messages! : [{ role: 'user' as const, content: trimmedPrompt }]),
+      ];
+      text = await callOpenAiCompatibleRaw({
+        config,
+        messages: chatMessages,
+        jsonMode: Boolean(jsonMode),
+        temperature: 0.6,
+      });
+    }
+
+    clearIncident(config.provider, config.model);
+    res.json({
+      text,
+      provider: config.provider,
+      model: config.model,
+    });
+  } catch (err) {
+    const status = getHttpStatusFromError(err);
+    const message = err instanceof Error ? err.message : 'App AI runtime failed';
     const incident = classifyModelError({
       status,
       message,

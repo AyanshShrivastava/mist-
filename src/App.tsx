@@ -7,7 +7,7 @@ import type {
   MistProject,
   ProjectFile,
   SelectedVisualElement,
-  VisualElementPatch,
+  StudioSettings,
 } from './types/mist';
 import type { ModelHealthIncident } from './utils/aiErrors';
 import {
@@ -17,22 +17,27 @@ import {
   duplicateProjectData,
   inferLanguageFromPath,
   mergeProjectFiles,
+  normalizeProjectFilePath,
   sanitizeSlug,
 } from './utils/projectOps';
 import {
+  fetchUserProfilePreferences,
   signInWithGoogle,
   signOutUser,
   subscribeToAuth,
   syncUserProfile,
 } from './firebase/client';
 import {
+  clearKnownCloudProjects,
   deleteProjectFromFirestore,
   listUserProjectsFromFirestore,
   saveDeploymentToFirestore,
   saveProjectToFirestore,
+  syncLocalProjectsToFirestore,
 } from './firebase/store';
 import HomeView from './components/HomeView';
 import WorkspaceView from './components/WorkspaceView';
+import SettingsView from './components/SettingsView';
 import VoiceChatModal from './components/VoiceChatModal';
 import {
   AccountModal,
@@ -43,7 +48,15 @@ import {
 
 const STORAGE_PROJECTS_KEY = 'mist_projects_v1';
 const STORAGE_PROVIDER_KEY = 'mist_provider_v1';
+const STORAGE_SETTINGS_KEY = 'mist_settings_v1';
 const STORAGE_THEME_KEY = 'mist_theme_v1';
+
+const DEFAULT_STUDIO_SETTINGS: StudioSettings = {
+  theme: 'dark',
+  defaultViewMode: 'preview',
+  defaultViewport: 'desktop',
+  enableAppAi: true,
+};
 
 function loadLocalProjects(): MistProject[] {
   try {
@@ -66,6 +79,22 @@ function loadProviderConfig(): AiProviderConfig {
   return { provider: 'gemini', model: 'gemini-4-hydrogen' };
 }
 
+function loadStudioSettings(): StudioSettings {
+  try {
+    const raw = localStorage.getItem(STORAGE_SETTINGS_KEY);
+    if (raw) {
+      return { ...DEFAULT_STUDIO_SETTINGS, ...(JSON.parse(raw) as Partial<StudioSettings>) };
+    }
+    const legacyTheme = localStorage.getItem(STORAGE_THEME_KEY);
+    if (legacyTheme === 'light' || legacyTheme === 'dark') {
+      return { ...DEFAULT_STUDIO_SETTINGS, theme: legacyTheme };
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_STUDIO_SETTINGS;
+}
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -73,22 +102,21 @@ export default function App() {
   const pendingGeneratePromptRef = useRef<string | null>(null);
 
   const [projects, setProjects] = useState<MistProject[]>(() => loadLocalProjects());
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [activePage, setActivePage] = useState<'home' | 'settings'>('home');
   const [deployments, setDeployments] = useState<DeploymentRecord[]>([]);
   const [providerConfig, setProviderConfig] = useState<AiProviderConfig>(() => loadProviderConfig());
   const providerConfigRef = useRef(providerConfig);
   providerConfigRef.current = providerConfig;
 
-  const [modelIncident, setModelIncident] = useState<ModelHealthIncident | null>(null);
+  const [studioSettings, setStudioSettings] = useState<StudioSettings>(() => loadStudioSettings());
+  const studioSettingsRef = useRef(studioSettings);
+  studioSettingsRef.current = studioSettings;
 
-  // Default to Dark Studio unless user explicitly saved 'light'
-  const [darkMode, setDarkMode] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(STORAGE_THEME_KEY) !== 'light';
-    } catch {
-      return true;
-    }
-  });
+  const [modelIncident, setModelIncident] = useState<ModelHealthIncident | null>(null);
 
   // Live preview bundling state
   const [bundledHtml, setBundledHtml] = useState<string>('');
@@ -101,8 +129,10 @@ export default function App() {
   const [isRefining, setIsRefining] = useState(false);
   const [refineError, setRefineError] = useState<string | null>(null);
 
-  // Deploy & Modals state
+  // Deploy, Cloud Sync & Modals state
   const [isSavingCloud, setIsSavingCloud] = useState(false);
+  const [isSyncingAll, setIsSyncingAll] = useState(false);
+  const [lastSyncSummary, setLastSyncSummary] = useState<string | null>(null);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
   const [publishedUrl, setPublishedUrl] = useState<string | null>(null);
@@ -114,10 +144,11 @@ export default function App() {
   const [voiceChatOpen, setVoiceChatOpen] = useState(false);
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null;
+  const darkMode = studioSettings.theme === 'dark';
   const bundleTimerRef = useRef<number | null>(null);
   const cloudSaveTimerRef = useRef<number | null>(null);
 
-  // Sync dark mode class on <html>
+  // Sync dark mode class on <html> + persist studioSettings
   useEffect(() => {
     const root = document.documentElement;
     if (darkMode) {
@@ -126,13 +157,14 @@ export default function App() {
       root.classList.remove('dark');
     }
     try {
-      localStorage.setItem(STORAGE_THEME_KEY, darkMode ? 'dark' : 'light');
+      localStorage.setItem(STORAGE_THEME_KEY, studioSettings.theme);
+      localStorage.setItem(STORAGE_SETTINGS_KEY, JSON.stringify(studioSettings));
     } catch {
       // ignore
     }
-  }, [darkMode]);
+  }, [darkMode, studioSettings]);
 
-  // Persist local projects
+  // Persist local projects cache
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_PROJECTS_KEY, JSON.stringify(projects));
@@ -201,7 +233,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!activeProject) return;
+    if (!activeProject || activePage === 'settings') return;
     if (bundleTimerRef.current) window.clearTimeout(bundleTimerRef.current);
     bundleTimerRef.current = window.setTimeout(() => {
       void runBundle(activeProject);
@@ -209,7 +241,7 @@ export default function App() {
     return () => {
       if (bundleTimerRef.current) window.clearTimeout(bundleTimerRef.current);
     };
-  }, [activeProject, runBundle]);
+  }, [activeProject, activePage, runBundle]);
 
   // Persist project updates to state + debounced cloud sync
   const updateActiveProject = useCallback(
@@ -251,7 +283,11 @@ export default function App() {
         const resp = await fetch('/api/ai/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt, providerConfig: providerConfigRef.current }),
+          body: JSON.stringify({
+            prompt,
+            providerConfig: providerConfigRef.current,
+            enableAppAi: studioSettingsRef.current.enableAppAi,
+          }),
         });
         const data = (await resp.json()) as {
           projectName?: string;
@@ -276,12 +312,15 @@ export default function App() {
           isPublished: false,
           createdAt: now,
           updatedAt: now,
-          files: data.files.map((f) => ({
-            id: createSafeId('file'),
-            path: f.path.replace(/^\/+/, ''),
-            language: f.language || inferLanguageFromPath(f.path),
-            content: f.content,
-          })),
+          files: data.files.map((f) => {
+            const cleanPath = normalizeProjectFilePath(f.path);
+            return {
+              id: createSafeId('file'),
+              path: cleanPath,
+              language: f.language || inferLanguageFromPath(cleanPath),
+              content: f.content,
+            };
+          }),
           chatHistory: [
             {
               id: createSafeId('msg'),
@@ -302,6 +341,7 @@ export default function App() {
         };
 
         setProjects((prev) => [newProject, ...prev]);
+        setActivePage('home');
         setActiveProjectId(newProject.id);
         if (currentUser) {
           void saveProjectToFirestore(newProject, { isNew: true }).catch(() => {});
@@ -315,24 +355,69 @@ export default function App() {
     [],
   );
 
-  // Subscribe once to Auth state changes (never re-subscribe on provider changes)
+  // Subscribe once to Auth state changes; hydrate settings & sync ALL user projects in Firestore
   useEffect(() => {
     const unsub = subscribeToAuth(async (firebaseUser) => {
       setUser(firebaseUser);
       if (firebaseUser) {
         setAuthPromptReason(null);
         try {
-          await syncUserProfile(firebaseUser, providerConfigRef.current.provider);
+          const cloudPrefs = await fetchUserProfilePreferences(firebaseUser);
+          if (cloudPrefs) {
+            if (cloudPrefs.preferredProvider || cloudPrefs.preferredModel) {
+              setProviderConfig((prev) => {
+                const updated: AiProviderConfig = {
+                  ...prev,
+                  provider: cloudPrefs.preferredProvider || prev.provider,
+                  model: cloudPrefs.preferredModel || prev.model,
+                };
+                try {
+                  localStorage.setItem(STORAGE_PROVIDER_KEY, JSON.stringify(updated));
+                } catch {
+                  // ignore
+                }
+                return updated;
+              });
+            }
+            setStudioSettings((prev) => ({
+              theme: cloudPrefs.theme || prev.theme,
+              defaultViewMode: cloudPrefs.defaultViewMode || prev.defaultViewMode,
+              defaultViewport: cloudPrefs.defaultViewport || prev.defaultViewport,
+              enableAppAi:
+                typeof cloudPrefs.enableAppAi === 'boolean'
+                  ? cloudPrefs.enableAppAi
+                  : prev.enableAppAi,
+            }));
+          }
+
+          await syncUserProfile(firebaseUser, {
+            preferredProvider: cloudPrefs?.preferredProvider || providerConfigRef.current.provider,
+            preferredModel: cloudPrefs?.preferredModel || providerConfigRef.current.model,
+            theme: cloudPrefs?.theme || studioSettingsRef.current.theme,
+            defaultViewMode: cloudPrefs?.defaultViewMode || studioSettingsRef.current.defaultViewMode,
+            defaultViewport: cloudPrefs?.defaultViewport || studioSettingsRef.current.defaultViewport,
+            enableAppAi:
+              typeof cloudPrefs?.enableAppAi === 'boolean'
+                ? cloudPrefs.enableAppAi
+                : studioSettingsRef.current.enableAppAi,
+          });
+
           const cloudProjects = await listUserProjectsFromFirestore(firebaseUser.uid);
-          if (cloudProjects.length > 0) {
-            setProjects((local) => {
-              const merged = new Map<string, MistProject>();
-              for (const p of local) merged.set(p.id, p);
-              for (const cp of cloudProjects) merged.set(cp.id, cp);
-              return Array.from(merged.values()).sort((a, b) =>
-                b.updatedAt.localeCompare(a.updatedAt),
-              );
-            });
+          const cloudIds = new Set(cloudProjects.map((p) => p.id));
+          const localOnly = projectsRef.current.filter((p) => !cloudIds.has(p.id));
+
+          // Merge cloud + local projects and upload any unsynced projects to this user's Firestore account
+          setProjects((local) => {
+            const merged = new Map<string, MistProject>();
+            for (const p of local) merged.set(p.id, p);
+            for (const cp of cloudProjects) merged.set(cp.id, cp);
+            return Array.from(merged.values()).sort((a, b) =>
+              b.updatedAt.localeCompare(a.updatedAt),
+            );
+          });
+
+          if (localOnly.length > 0) {
+            await syncLocalProjectsToFirestore(localOnly, cloudIds);
           }
         } catch {
           // Errors logged in firebase/client.ts
@@ -521,7 +606,45 @@ export default function App() {
       // ignore
     }
     if (user) {
-      void syncUserProfile(user, next.provider).catch(() => {});
+      void syncUserProfile(user, {
+        preferredProvider: next.provider,
+        preferredModel: next.model,
+      }).catch(() => {});
+    }
+  };
+
+  const handleUpdateSettings = (partial: Partial<StudioSettings>) => {
+    setStudioSettings((prev) => {
+      const next = { ...prev, ...partial };
+      if (user) {
+        void syncUserProfile(user, {
+          theme: next.theme,
+          defaultViewMode: next.defaultViewMode,
+          defaultViewport: next.defaultViewport,
+          enableAppAi: next.enableAppAi,
+        }).catch(() => {});
+      }
+      return next;
+    });
+  };
+
+  const handleSyncAllToCloud = async () => {
+    if (!user) return;
+    setIsSyncingAll(true);
+    setLastSyncSummary(null);
+    try {
+      for (const project of projects) {
+        await saveProjectToFirestore(project);
+      }
+      setLastSyncSummary(
+        `Synced all ${projects.length} project${projects.length === 1 ? '' : 's'} to cloud.`,
+      );
+    } catch (err) {
+      setLastSyncSummary(
+        err instanceof Error ? err.message : 'Failed to sync one or more projects.',
+      );
+    } finally {
+      setIsSyncingAll(false);
     }
   };
 
@@ -541,6 +664,14 @@ export default function App() {
     setAuthError(null);
     try {
       await signOutUser();
+      clearKnownCloudProjects();
+      setProjects([]);
+      setActiveProjectId(null);
+      try {
+        localStorage.removeItem(STORAGE_PROJECTS_KEY);
+      } catch {
+        // ignore
+      }
       setAccountOpen(false);
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Sign-out failed.');
@@ -549,11 +680,32 @@ export default function App() {
 
   return (
     <>
-      {activeProject ? (
+      {activePage === 'settings' ? (
+        <SettingsView
+          user={user}
+          projects={projects}
+          deployments={deployments}
+          providerConfig={providerConfig}
+          studioSettings={studioSettings}
+          modelIncident={modelIncident}
+          isSyncingAll={isSyncingAll}
+          lastSyncSummary={lastSyncSummary}
+          onBack={() => setActivePage('home')}
+          onSaveProvider={handleSaveProvider}
+          onUpdateSettings={handleUpdateSettings}
+          onIncident={setModelIncident}
+          onSyncAllToCloud={handleSyncAllToCloud}
+          onSignIn={() => void handleGoogleSignIn()}
+          onSignOut={() => void handleSignOut()}
+        />
+      ) : activeProject ? (
         <WorkspaceView
+          key={activeProject.id}
           project={activeProject}
           user={user}
           providerConfig={providerConfig}
+          defaultViewMode={studioSettings.defaultViewMode}
+          defaultViewport={studioSettings.defaultViewport}
           modelIncident={modelIncident}
           bundledHtml={bundledHtml}
           bundleError={bundleError}
@@ -615,6 +767,7 @@ export default function App() {
             setDeployOpen(true);
           }}
           onOpenProviders={() => setProvidersOpen(true)}
+          onOpenSettings={() => setActivePage('settings')}
           onOpenAccount={() => {
             setAuthPromptReason(null);
             setAccountOpen(true);
@@ -630,13 +783,18 @@ export default function App() {
           isGenerating={isGenerating}
           generationError={generationError}
           darkMode={darkMode}
-          onToggleDarkMode={() => setDarkMode((d) => !d)}
+          enableAppAi={studioSettings.enableAppAi}
+          onToggleDarkMode={() =>
+            handleUpdateSettings({ theme: darkMode ? 'light' : 'dark' })
+          }
+          onSaveProvider={handleSaveProvider}
           onGenerate={handleGenerateWebsite}
           onOpenVoiceChat={() => setVoiceChatOpen(true)}
           onOpenProject={(project) => setActiveProjectId(project.id)}
           onDuplicateProject={handleDuplicateProject}
           onDeleteProject={handleDeleteProject}
           onOpenProviders={() => setProvidersOpen(true)}
+          onOpenSettings={() => setActivePage('settings')}
           onOpenDeployments={() => {
             void refreshDeployments();
             setDeploymentsListOpen(true);

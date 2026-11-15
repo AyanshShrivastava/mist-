@@ -380,15 +380,16 @@ export default function VoiceChatModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: 12 }}
+            initial={{ opacity: 0, scale: 0.96, y: 18 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: 8 }}
+            exit={{ opacity: 0, scale: 0.96, y: 14 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="flex w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+            className="flex w-full sm:max-w-xl max-h-[92dvh] flex-col overflow-hidden rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-3 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
           >
+            <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             {/* Header */}
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800/90">
               <div className="flex items-center gap-3 min-w-0">

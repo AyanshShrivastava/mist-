@@ -21,7 +21,16 @@ import {
   type DocumentSnapshot,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import type { AiProviderId } from '../types/mist';
+import type { AiProviderId, ViewportSize, WorkspaceViewMode } from '../types/mist';
+
+export interface UserProfilePreferences {
+  preferredProvider?: AiProviderId;
+  preferredModel?: string;
+  theme?: 'dark' | 'light';
+  defaultViewMode?: WorkspaceViewMode;
+  defaultViewport?: ViewportSize;
+  enableAppAi?: boolean;
+}
 
 const app = initializeApp(firebaseConfig);
 try {
@@ -172,9 +181,34 @@ export function subscribeToAuth(callback: (user: User | null) => void): () => vo
 
 const syncInFlight = new Map<string, Promise<void>>();
 
+export async function fetchUserProfilePreferences(
+  user: User,
+): Promise<UserProfilePreferences | null> {
+  const userPath = `users/${user.uid}`;
+  const ref = doc(db, 'users', user.uid);
+  try {
+    await user.getIdToken();
+    const snap = await getDocServerOrCache(ref);
+    if (!snap || !snap.exists()) return null;
+    const data = snap.data();
+    return {
+      preferredProvider: data.preferredProvider as AiProviderId | undefined,
+      preferredModel:
+        typeof data.preferredModel === 'string' ? data.preferredModel : undefined,
+      theme: data.theme === 'light' || data.theme === 'dark' ? data.theme : undefined,
+      defaultViewMode: data.defaultViewMode as WorkspaceViewMode | undefined,
+      defaultViewport: data.defaultViewport as ViewportSize | undefined,
+      enableAppAi: typeof data.enableAppAi === 'boolean' ? data.enableAppAi : undefined,
+    };
+  } catch (error) {
+    if (isOfflineFirestoreError(error)) return null;
+    handleFirestoreError(error, OperationType.GET, userPath);
+  }
+}
+
 export async function syncUserProfile(
   user: User,
-  preferredProvider?: AiProviderId,
+  prefs?: UserProfilePreferences,
 ): Promise<void> {
   const prev = syncInFlight.get(user.uid) || Promise.resolve();
   const next = prev
@@ -191,6 +225,14 @@ export async function syncUserProfile(
 
       if (!email) return;
 
+      const prefFields: Record<string, unknown> = {};
+      if (prefs?.preferredProvider) prefFields.preferredProvider = prefs.preferredProvider;
+      if (prefs?.preferredModel) prefFields.preferredModel = prefs.preferredModel.slice(0, 120);
+      if (prefs?.theme) prefFields.theme = prefs.theme;
+      if (prefs?.defaultViewMode) prefFields.defaultViewMode = prefs.defaultViewMode;
+      if (prefs?.defaultViewport) prefFields.defaultViewport = prefs.defaultViewport;
+      if (typeof prefs?.enableAppAi === 'boolean') prefFields.enableAppAi = prefs.enableAppAi;
+
       try {
         await user.getIdToken();
         const existingSnap = await getDocServerOrCache(ref);
@@ -206,12 +248,10 @@ export async function syncUserProfile(
             displayName,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
+            ...prefFields,
           };
           if (user.photoURL && user.photoURL.length <= 512) {
             payload.photoURL = user.photoURL;
-          }
-          if (preferredProvider) {
-            payload.preferredProvider = preferredProvider;
           }
           await setDoc(ref, payload);
         } else {
@@ -219,12 +259,10 @@ export async function syncUserProfile(
             email,
             displayName,
             updatedAt: serverTimestamp(),
+            ...prefFields,
           };
           if (user.photoURL && user.photoURL.length <= 512) {
             updatePayload.photoURL = user.photoURL;
-          }
-          if (preferredProvider) {
-            updatePayload.preferredProvider = preferredProvider;
           }
           await updateDoc(ref, updatePayload);
         }

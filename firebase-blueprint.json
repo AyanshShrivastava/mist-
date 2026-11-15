@@ -35,6 +35,30 @@
           "enum": ["gemini", "openrouter", "groq", "custom"],
           "description": "Default AI generation provider"
         },
+        "preferredModel": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Default AI model identifier"
+        },
+        "theme": {
+          "type": "string",
+          "enum": ["dark", "light"],
+          "description": "Studio color theme preference"
+        },
+        "defaultViewMode": {
+          "type": "string",
+          "enum": ["preview", "visual", "code", "split"],
+          "description": "Default workspace editor tab"
+        },
+        "defaultViewport": {
+          "type": "string",
+          "enum": ["desktop", "tablet", "mobile"],
+          "description": "Default workspace preview viewport"
+        },
+        "enableAppAi": {
+          "type": "boolean",
+          "description": "Whether generated apps integrate live /api/app-ai runtime features by default"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

@@ -78,3 +78,11 @@ export interface DeploymentRecord {
 
 export type WorkspaceViewMode = 'preview' | 'visual' | 'code' | 'split';
 export type ViewportSize = 'desktop' | 'tablet' | 'mobile';
+
+export interface StudioSettings {
+  theme: 'dark' | 'light';
+  defaultViewMode: WorkspaceViewMode;
+  defaultViewport: ViewportSize;
+  enableAppAi: boolean;
+}
+

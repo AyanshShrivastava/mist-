@@ -52,16 +52,89 @@ export function duplicateProjectData(project: MistProject): MistProject {
   };
 }
 
+export function normalizeProjectFilePath(rawPath: string): string {
+  const cleaned = rawPath
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^(\.\/|\/)+/, '')
+    .replace(/\/{2,}/g, '/');
+  if (cleaned.toLowerCase() === 'src/app.tsx') {
+    return 'src/App.tsx';
+  }
+  if (cleaned.toLowerCase() === 'src/main.tsx') {
+    return 'src/main.tsx';
+  }
+  if (cleaned.toLowerCase() === 'src/index.css') {
+    return 'src/index.css';
+  }
+  return cleaned;
+}
+
+export function resolveAppEntryPath(files: Array<Pick<ProjectFile, 'path' | 'content'>>): string | null {
+  const normalized = files.map((f) => ({
+    raw: f.path,
+    clean: normalizeProjectFilePath(f.path),
+    lower: normalizeProjectFilePath(f.path).toLowerCase(),
+    content: f.content || '',
+  }));
+
+  const preferredOrder = [
+    'src/app.tsx',
+    'src/app.jsx',
+    'app.tsx',
+    'app.jsx',
+    'src/pages/home.tsx',
+    'src/app/page.tsx',
+    'app/page.tsx',
+    'src/home.tsx',
+    'src/page.tsx',
+  ];
+
+  for (const target of preferredOrder) {
+    const match = normalized.find((f) => f.lower === target);
+    if (match) return match.clean;
+  }
+
+  // Fallback: prefer non-component .tsx/.jsx modules (excluding main.tsx) that export a component
+  const nonComponentMatch = normalized.find(
+    (f) =>
+      (f.lower.endsWith('.tsx') || f.lower.endsWith('.jsx')) &&
+      f.lower !== 'src/main.tsx' &&
+      f.lower !== 'main.tsx' &&
+      !f.lower.includes('/components/') &&
+      (/export\s+default\s+/.test(f.content) || /export\s+(?:function|const)\s+App\b/.test(f.content)),
+  );
+  if (nonComponentMatch) return nonComponentMatch.clean;
+
+  const componentMatch = normalized.find(
+    (f) =>
+      (f.lower.endsWith('.tsx') || f.lower.endsWith('.jsx')) &&
+      f.lower !== 'src/main.tsx' &&
+      f.lower !== 'main.tsx' &&
+      (/export\s+default\s+/.test(f.content) || /export\s+(?:function|const)\s+App\b/.test(f.content)),
+  );
+  if (componentMatch) return componentMatch.clean;
+
+  const anyTsx = normalized.find(
+    (f) =>
+      (f.lower.endsWith('.tsx') || f.lower.endsWith('.jsx')) &&
+      f.lower !== 'src/main.tsx' &&
+      f.lower !== 'main.tsx',
+  );
+  return anyTsx ? anyTsx.clean : null;
+}
+
 export function mergeProjectFiles(
   existingFiles: ProjectFile[],
   incomingFiles: Array<{ path: string; language?: FileLanguage; content: string }>,
 ): ProjectFile[] {
   const byPath = new Map<string, ProjectFile>();
   for (const file of existingFiles) {
-    byPath.set(file.path, { ...file });
+    const cleanExisting = normalizeProjectFilePath(file.path);
+    byPath.set(cleanExisting, { ...file, path: cleanExisting });
   }
   for (const item of incomingFiles) {
-    const cleanPath = item.path.replace(/^\/+/, '');
+    const cleanPath = normalizeProjectFilePath(item.path);
     const existing = byPath.get(cleanPath);
     if (existing) {
       byPath.set(cleanPath, {

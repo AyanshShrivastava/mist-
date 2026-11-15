@@ -22,6 +22,8 @@ import type {
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
 import { sanitizeSlug } from '../utils/projectOps';
+import { getDefaultModelForProvider, PROVIDER_CATALOG } from '../data/models';
+import ModelSelectorDropdown from './ModelSelectorDropdown';
 import MistLogo from './MistLogo';
 
 interface ProvidersModalProps {
@@ -32,18 +34,6 @@ interface ProvidersModalProps {
   onSave: (next: AiProviderConfig) => void;
   onIncident?: (incident: ModelHealthIncident | null) => void;
 }
-
-const PROVIDER_MODELS: Record<AiProviderId, string[]> = {
-  gemini: ['gemini-4-hydrogen', 'gemini-4-argon'],
-  openrouter: [
-    'anthropic/claude-sonnet-4',
-    'openai/gpt-4o',
-    'google/gemini-2.5-pro',
-    'deepseek/deepseek-chat',
-  ],
-  groq: ['llama-3.3-70b-versatile', 'qwen-qwq-32b', 'mixtral-8x7b-32768'],
-  custom: ['gpt-4o-mini'],
-};
 
 const BYOK_INSTRUCTIONS: Record<
   'groq' | 'openrouter',
@@ -110,13 +100,13 @@ export function ProvidersModal({
 
   const handleSelectProvider = (next: AiProviderId) => {
     setProvider(next);
-    setModel(PROVIDER_MODELS[next][0]);
+    setModel(getDefaultModelForProvider(next));
     setTestResult(null);
   };
 
   const buildDraftConfig = (): AiProviderConfig => ({
     provider,
-    model: model.trim() || PROVIDER_MODELS[provider][0],
+    model: model.trim() || getDefaultModelForProvider(provider),
     apiKey: provider === 'gemini' ? undefined : apiKey.trim(),
     baseUrl: provider === 'custom' ? baseUrl.trim() : undefined,
   });
@@ -182,15 +172,16 @@ export function ProvidersModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: 10 }}
+            initial={{ opacity: 0, scale: 0.96, y: 18 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: 8 }}
-            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950 mist-scrollbar"
+            exit={{ opacity: 0, scale: 0.96, y: 14 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            className="w-full sm:max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950 mist-scrollbar"
           >
+            <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
               <div className="flex items-center gap-2.5">
                 <KeyRound className="h-4 w-4 text-blue-500" aria-hidden="true" />
@@ -254,38 +245,19 @@ export function ProvidersModal({
               </div>
 
               <div>
-                <label htmlFor="mist-provider-model" className="block font-medium text-zinc-700 dark:text-zinc-300">
-                  Model Identifier
-                </label>
-                <input
-                  id="mist-provider-model"
-                  type="text"
-                  list="mist-model-suggestions"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="mt-1.5 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
-                />
-                <datalist id="mist-model-suggestions">
-                  {PROVIDER_MODELS[provider].map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {PROVIDER_MODELS[provider].map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      type="button"
-                      onClick={() => setModel(suggestion)}
-                      className={`rounded-md border px-2 py-0.5 font-mono text-[10px] transition-colors cursor-pointer ${
-                        model === suggestion
-                          ? 'border-blue-500/60 bg-blue-50 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300'
-                          : 'border-zinc-200 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-900'
-                      }`}
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="font-medium text-zinc-700 dark:text-zinc-300">
+                    Select Model ({PROVIDER_CATALOG[provider].models.length} presets)
+                  </p>
+                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    Click to expand all
+                  </span>
                 </div>
+                <ModelSelectorDropdown
+                  provider={provider}
+                  value={model}
+                  onChange={setModel}
+                />
               </div>
 
               {provider === 'gemini' ? (
@@ -468,15 +440,16 @@ export function DeployModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: 10 }}
+            initial={{ opacity: 0, scale: 0.96, y: 18 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: 8 }}
-            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+            exit={{ opacity: 0, scale: 0.96, y: 14 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            className="w-full sm:max-w-md max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
           >
+            <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
               <h2 id="deploy-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
                 Publish Website
@@ -594,15 +567,16 @@ export function DeploymentsModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: 10 }}
+            initial={{ opacity: 0, scale: 0.96, y: 18 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: 8 }}
-            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full max-w-lg rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+            exit={{ opacity: 0, scale: 0.96, y: 14 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            className="w-full sm:max-w-lg max-h-[85dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
           >
+            <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
               <h2 id="deployments-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
                 Published Websites
@@ -681,15 +655,16 @@ export function AccountModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: 10 }}
+            initial={{ opacity: 0, scale: 0.96, y: 18 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: 8 }}
-            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full max-w-sm rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+            exit={{ opacity: 0, scale: 0.96, y: 14 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            className="w-full sm:max-w-sm rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
           >
+            <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
               <div className="flex items-center gap-2">
                 <MistLogo size="sm" showWordmark={false} />

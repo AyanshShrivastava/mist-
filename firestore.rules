@@ -45,6 +45,11 @@ service cloud.firestore {
         && data.displayName.size() <= 120
         && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512))
         && (!('preferredProvider' in data) || (data.preferredProvider in ['gemini', 'openrouter', 'groq', 'custom']))
+        && (!('preferredModel' in data) || (data.preferredModel is string && data.preferredModel.size() <= 120))
+        && (!('theme' in data) || (data.theme in ['dark', 'light']))
+        && (!('defaultViewMode' in data) || (data.defaultViewMode in ['preview', 'visual', 'code', 'split']))
+        && (!('defaultViewport' in data) || (data.defaultViewport in ['desktop', 'tablet', 'mobile']))
+        && (!('enableAppAi' in data) || (data.enableAppAi is bool))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -118,7 +123,11 @@ service cloud.firestore {
         && isOwner(userId)
         && isValidUserProfile(incoming(), userId)
         && incoming().keys().hasAll(['uid', 'email', 'displayName', 'createdAt', 'updatedAt'])
-        && incoming().keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'preferredProvider', 'createdAt', 'updatedAt'])
+        && incoming().keys().hasOnly([
+          'uid', 'email', 'displayName', 'photoURL', 'preferredProvider',
+          'preferredModel', 'theme', 'defaultViewMode', 'defaultViewport',
+          'enableAppAi', 'createdAt', 'updatedAt'
+        ])
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isVerifiedUser()
@@ -128,7 +137,11 @@ service cloud.firestore {
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'preferredProvider', 'email', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'photoURL', 'preferredProvider',
+          'preferredModel', 'theme', 'defaultViewMode', 'defaultViewport',
+          'enableAppAi', 'email', 'updatedAt'
+        ]);
       allow delete: if isValidId(userId) && isOwner(userId);
     }
 

@@ -24,6 +24,14 @@ import { createSafeId } from '../utils/projectOps';
 
 const knownCloudProjects = new Set<string>();
 
+export function clearKnownCloudProjects(): void {
+  knownCloudProjects.clear();
+}
+
+export function isProjectSyncedToCloud(projectId: string): boolean {
+  return knownCloudProjects.has(projectId);
+}
+
 function toIsoString(val: unknown): string {
   if (val && typeof val === 'object' && 'toDate' in val && typeof (val as Timestamp).toDate === 'function') {
     return (val as Timestamp).toDate().toISOString();
@@ -299,4 +307,26 @@ export async function saveDeploymentToFirestore(params: {
     }
     handleFirestoreError(error, OperationType.WRITE, deployPath);
   }
+}
+
+/**
+ * Ensures every project belonging to the currently signed-in user is saved in Firestore.
+ * Skips any project already verified in cloud unless forceAll is passed.
+ */
+export async function syncLocalProjectsToFirestore(
+  projects: MistProject[],
+  cloudIds?: Set<string>,
+): Promise<number> {
+  const user = auth.currentUser;
+  if (!user || projects.length === 0) return 0;
+
+  let syncedCount = 0;
+  for (const project of projects) {
+    const alreadyInCloud = cloudIds ? cloudIds.has(project.id) : knownCloudProjects.has(project.id);
+    if (!alreadyInCloud) {
+      await saveProjectToFirestore(project, { isNew: true });
+      syncedCount++;
+    }
+  }
+  return syncedCount;
 }

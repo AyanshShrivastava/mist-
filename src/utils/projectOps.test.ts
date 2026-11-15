@@ -6,6 +6,8 @@ import {
   buildExportManifest,
   duplicateProjectData,
   mergeProjectFiles,
+  normalizeProjectFilePath,
+  resolveAppEntryPath,
   sanitizeSlug,
 } from './projectOps';
 import type { MistProject } from '../types/mist';
@@ -94,12 +96,31 @@ test('applyDeterministicRefinement shrinks navbar height on "make the navbar sma
 
 test('mergeProjectFiles updates existing paths and adds new files cleanly', () => {
   const merged = mergeProjectFiles(sampleProject.files, [
-    { path: 'src/index.css', content: '@import "tailwindcss";\nbody { margin: 0; }' },
+    { path: './src/index.css', content: '@import "tailwindcss";\nbody { margin: 0; }' },
     { path: 'src/components/Footer.tsx', content: 'export default function Footer() { return <footer />; }' },
   ]);
   assert.equal(merged.length, 4);
   assert.ok(merged.find((f) => f.path === 'src/components/Footer.tsx'));
   assert.ok(merged.find((f) => f.path === 'src/index.css')?.content.includes('body { margin: 0; }'));
+});
+
+test('normalizeProjectFilePath & resolveAppEntryPath handle lowercase and alternative entry files', () => {
+  assert.equal(normalizeProjectFilePath('./src/app.tsx'), 'src/App.tsx');
+  assert.equal(normalizeProjectFilePath('/src/main.tsx'), 'src/main.tsx');
+  assert.equal(
+    resolveAppEntryPath([{ path: 'src/app.tsx', content: 'export default function App() { return <div />; }' }]),
+    'src/App.tsx',
+  );
+  assert.equal(
+    resolveAppEntryPath([{ path: 'App.tsx', content: 'export default function App() { return <div />; }' }]),
+    'App.tsx',
+  );
+  assert.equal(
+    resolveAppEntryPath([
+      { path: 'src/components/Landing.tsx', content: 'export default function Landing() { return <main />; }' },
+    ]),
+    'src/components/Landing.tsx',
+  );
 });
 
 test('buildExportManifest generates complete Vite + React + TS project files', () => {
