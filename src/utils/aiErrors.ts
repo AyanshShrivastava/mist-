@@ -2,6 +2,7 @@ import type { AiProviderId } from '../types/mist';
 
 export type ModelErrorCode =
   | 'RATE_LIMIT'
+  | 'CREDITS_REQUIRED'
   | 'SERVER_OUTAGE'
   | 'AUTH_ERROR'
   | 'MODEL_UNAVAILABLE'
@@ -29,6 +30,29 @@ export function classifyModelError(params: {
 
   const retryMatch = message.match(/retry[^\d]*(\d+)\s*s/i);
   const retryAfterSeconds = retryMatch ? Number(retryMatch[1]) : undefined;
+
+  if (
+    status === 402 ||
+    lower.includes('openrouter_credits') ||
+    lower.includes('requires more credits') ||
+    lower.includes('can only afford') ||
+    lower.includes('insufficient_quota') ||
+    lower.includes('credit balance') ||
+    lower.includes('upgrade to a paid account')
+  ) {
+    const affordMatch = message.match(/can only afford\s+(\d+)(?:\s*tokens?)?/i);
+    const affordNote = affordMatch
+      ? ` Account credits only allow ~${affordMatch[1]} tokens on this paid route.`
+      : '';
+    return {
+      provider,
+      model,
+      code: 'CREDITS_REQUIRED',
+      title: `${model} requires paid credits`,
+      message: `${model} is a paid model and lacks sufficient credits.${affordNote} Switch to a Free model (e.g. Gemini 4 Hydrogen or a :free preset) or add provider credits.`,
+      updatedAt: now,
+    };
+  }
 
   if (
     status === 429 ||
@@ -84,7 +108,7 @@ export function classifyModelError(params: {
       model,
       code: 'AUTH_ERROR',
       title: `API key rejected for ${provider}`,
-      message: `Check your ${provider} API key in Providers settings and try again.`,
+      message: `Check your ${provider} API key in Settings or Providers and try again.`,
       updatedAt: now,
     };
   }

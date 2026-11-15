@@ -153,17 +153,24 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-async function validateFirestoreConnection() {
+export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
+export const FIRESTORE_DATABASE_ID = firebaseConfig.firestoreDatabaseId;
+
+export async function checkFirestoreServerConnection(): Promise<'online' | 'offline'> {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
+    return 'online';
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
+    if (isOfflineFirestoreError(error)) {
       console.error('Please check your Firebase configuration.');
+      return 'offline';
     }
+    // Non-offline response (such as permission-denied on test/connection) means server is reachable
+    return 'online';
   }
 }
 
-void validateFirestoreConnection();
+void checkFirestoreServerConnection();
 
 export async function signInWithGoogle(): Promise<User> {
   const result = await signInWithPopup(auth, googleProvider);

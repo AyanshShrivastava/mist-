@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   ArrowLeft,
   Check,
+  Cloud,
+  CloudOff,
   Code2,
   Columns2,
   Copy,
@@ -34,12 +36,14 @@ import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
   MistProject,
+  ProjectSyncRecord,
   SelectedVisualElement,
   ViewportSize,
   VisualElementPatch,
   WorkspaceViewMode,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
+import { detectGatewayFromBaseUrl, findModelEntry } from '../data/models';
 import CodeEditor from './CodeEditor';
 import VisualInspector from './VisualInspector';
 import MistLogo from './MistLogo';
@@ -48,6 +52,7 @@ interface WorkspaceViewProps {
   project: MistProject;
   user: User | null;
   providerConfig: AiProviderConfig;
+  syncRecord?: ProjectSyncRecord;
   defaultViewMode?: WorkspaceViewMode;
   defaultViewport?: ViewportSize;
   modelIncident: ModelHealthIncident | null;
@@ -82,8 +87,9 @@ const REFINEMENT_SUGGESTIONS = [
 
 export default function WorkspaceView({
   project,
-  user: _user,
+  user,
   providerConfig,
+  syncRecord,
   defaultViewMode = 'preview',
   defaultViewport = 'desktop',
   modelIncident,
@@ -112,6 +118,31 @@ export default function WorkspaceView({
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>(defaultViewMode);
   const [viewport, setViewport] = useState<ViewportSize>(defaultViewport);
   const [leftTab, setLeftTab] = useState<'ai' | 'files'>('ai');
+
+  const currentModelMeta = findModelEntry(
+    providerConfig.provider,
+    providerConfig.model,
+    providerConfig.baseUrl,
+  );
+  const shortProviderLabel =
+    providerConfig.provider === 'gemini'
+      ? 'Gemini'
+      : detectGatewayFromBaseUrl(providerConfig.baseUrl) === 'openrouter'
+        ? 'OpenRouter'
+        : detectGatewayFromBaseUrl(providerConfig.baseUrl) === 'groq'
+          ? 'Groq'
+          : detectGatewayFromBaseUrl(providerConfig.baseUrl) === 'nvidia'
+            ? 'NVIDIA'
+            : 'Custom';
+  const syncStateLabel = !user
+    ? 'Local only'
+    : isSavingCloud || syncRecord?.state === 'syncing'
+      ? 'Syncing...'
+      : syncRecord?.state === 'error'
+        ? 'Sync error'
+        : syncRecord?.state === 'synced'
+          ? 'Synced'
+          : 'Pending sync';
   const [activeFilePath, setActiveFilePath] = useState<string>(
     project.files.find((f) => f.path === 'src/App.tsx')?.path || project.files[0]?.path || 'src/App.tsx',
   );
@@ -268,8 +299,8 @@ export default function WorkspaceView({
       </header>
 
       {/* Default Desktop Studio Top Bar (>= md) */}
-      <header className="hidden md:flex h-14 shrink-0 items-center justify-between gap-4 border-b border-zinc-200 bg-white px-4 dark:border-zinc-800 dark:bg-[#0F0F12]">
-        <div className="flex min-w-0 items-center gap-3">
+      <header className="hidden md:flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-4 dark:border-zinc-800 dark:bg-[#0F0F12]">
+        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
           <button
             type="button"
             onClick={onBackHome}
@@ -281,7 +312,7 @@ export default function WorkspaceView({
             <span className="font-display font-bold text-black dark:text-white">Mist</span>
           </button>
 
-          <span className="text-zinc-300 dark:text-zinc-700">/</span>
+          <span className="text-zinc-300 dark:text-zinc-700 shrink-0">/</span>
 
           <input
             type="text"
@@ -292,17 +323,40 @@ export default function WorkspaceView({
               setTitleSavedToast(true);
               setTimeout(() => setTitleSavedToast(false), 1200);
             }}
-            className="w-24 sm:w-48 truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 font-display text-xs sm:text-sm font-semibold text-zinc-950 hover:border-zinc-200 focus:border-blue-500 focus:bg-white focus:outline-none dark:text-white dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
+            className="min-w-[72px] max-w-[168px] flex-1 truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 font-display text-xs sm:text-sm font-semibold text-zinc-950 hover:border-zinc-200 focus:border-blue-500 focus:bg-white focus:outline-none dark:text-white dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
           />
 
-          {isSavingCloud && (
-            <span className="hidden xl:inline text-[11px] text-zinc-400 whitespace-nowrap">
-              Syncing...
-            </span>
-          )}
-          {titleSavedToast && !isSavingCloud && (
-            <span className="hidden xl:inline text-[11px] text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+          {titleSavedToast ? (
+            <span className="hidden xl:inline text-[11px] text-emerald-600 dark:text-emerald-400 whitespace-nowrap shrink-0">
               Saved
+            </span>
+          ) : (
+            <span
+              title={
+                user
+                  ? `Firestore sync status: ${syncStateLabel}${syncRecord?.lastSyncedAt ? ` (${new Date(syncRecord.lastSyncedAt).toLocaleTimeString()})` : ''}`
+                  : 'Sign in with Google to sync this project to Firestore'
+              }
+              className={`hidden xl:inline-flex items-center gap-1 text-[11px] whitespace-nowrap shrink-0 ${
+                !user
+                  ? 'text-zinc-400'
+                  : isSavingCloud || syncRecord?.state === 'syncing'
+                    ? 'text-blue-500'
+                    : syncRecord?.state === 'error'
+                      ? 'text-red-500'
+                      : syncRecord?.state === 'synced'
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-amber-600 dark:text-amber-400'
+              }`}
+            >
+              {!user ? (
+                <CloudOff className="h-3 w-3 shrink-0" aria-hidden="true" />
+              ) : isSavingCloud || syncRecord?.state === 'syncing' ? (
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+              ) : (
+                <Cloud className="h-3 w-3 shrink-0" aria-hidden="true" />
+              )}
+              <span>{syncStateLabel}</span>
             </span>
           )}
         </div>
@@ -311,7 +365,7 @@ export default function WorkspaceView({
         <div
           role="tablist"
           aria-label="Workspace view mode"
-          className="flex items-center gap-0.5 sm:gap-1 rounded-lg bg-zinc-100 p-0.5 sm:p-1 dark:bg-zinc-900"
+          className="flex shrink-0 items-center gap-0.5 sm:gap-1 rounded-lg bg-zinc-100 p-0.5 sm:p-1 dark:bg-zinc-900"
         >
           {(
             [
@@ -388,7 +442,18 @@ export default function WorkspaceView({
             className="hidden md:inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Cpu className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-            <span className="capitalize">{providerConfig.provider}</span>
+            <span>{shortProviderLabel}</span>
+            {currentModelMeta && (
+              <span
+                className={`rounded px-1 py-0.2 text-[10px] font-semibold ${
+                  currentModelMeta.billing === 'free'
+                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                }`}
+              >
+                {currentModelMeta.billing === 'free' ? 'Free' : 'Paid'}
+              </span>
+            )}
           </button>
 
           <button
@@ -933,10 +998,23 @@ export default function WorkspaceView({
                       setMobileMoreOpen(false);
                       onOpenProviders();
                     }}
-                    className="flex min-h-[46px] items-center gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer"
+                    className="flex min-h-[46px] items-center justify-between gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer"
                   >
-                    <Cpu className="h-4 w-4 text-blue-500" aria-hidden="true" />
-                    <span className="capitalize">{providerConfig.provider} Model</span>
+                    <span className="inline-flex items-center gap-2 min-w-0">
+                      <Cpu className="h-4 w-4 text-blue-500 shrink-0" aria-hidden="true" />
+                      <span className="truncate">{shortProviderLabel}</span>
+                    </span>
+                    {currentModelMeta && (
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                          currentModelMeta.billing === 'free'
+                            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                            : 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                        }`}
+                      >
+                        {currentModelMeta.billing === 'free' ? 'Free' : 'Paid'}
+                      </span>
+                    )}
                   </button>
                   <button
                     type="button"

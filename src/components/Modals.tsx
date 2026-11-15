@@ -22,7 +22,15 @@ import type {
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
 import { sanitizeSlug } from '../utils/projectOps';
-import { getDefaultModelForProvider, PROVIDER_CATALOG } from '../data/models';
+import {
+  CUSTOM_GATEWAY_PRESETS,
+  detectGatewayFromBaseUrl,
+  getDefaultModelForProvider,
+  normalizeProviderConfigToStudio,
+  PRIMARY_STUDIO_PROVIDERS,
+  PROVIDER_CATALOG,
+  type CustomGatewayId,
+} from '../data/models';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
 import MistLogo from './MistLogo';
 
@@ -35,40 +43,6 @@ interface ProvidersModalProps {
   onIncident?: (incident: ModelHealthIncident | null) => void;
 }
 
-const BYOK_INSTRUCTIONS: Record<
-  'groq' | 'openrouter',
-  {
-    title: string;
-    portalLabel: string;
-    portalUrl: string;
-    placeholder: string;
-    steps: string[];
-  }
-> = {
-  groq: {
-    title: 'How to get a Groq API key',
-    portalLabel: 'console.groq.com/keys',
-    portalUrl: 'https://console.groq.com/keys',
-    placeholder: 'gsk_...',
-    steps: [
-      'Open console.groq.com/keys and sign in with your Groq account.',
-      'Select Create API Key, give it a label such as Mist Studio, and copy the key starting with gsk_.',
-      'Paste the key below, choose a fast model like llama-3.3-70b-versatile, and run Test Connection.',
-    ],
-  },
-  openrouter: {
-    title: 'How to get an OpenRouter API key',
-    portalLabel: 'openrouter.ai/keys',
-    portalUrl: 'https://openrouter.ai/keys',
-    placeholder: 'sk-or-v1-...',
-    steps: [
-      'Visit openrouter.ai/keys and sign in to your OpenRouter dashboard.',
-      'Click Create Key, optionally set a spending limit, and copy the key starting with sk-or-.',
-      'Paste the key below, pick any Claude, OpenAI, Gemini, or DeepSeek route, and click Test Connection.',
-    ],
-  },
-};
-
 export function ProvidersModal({
   isOpen,
   config,
@@ -77,10 +51,18 @@ export function ProvidersModal({
   onSave,
   onIncident,
 }: ProvidersModalProps) {
-  const [provider, setProvider] = useState<AiProviderId>(config.provider);
-  const [model, setModel] = useState(config.model);
-  const [apiKey, setApiKey] = useState(config.apiKey || '');
-  const [baseUrl, setBaseUrl] = useState(config.baseUrl || '');
+  const normalizedInit = normalizeProviderConfigToStudio(config);
+  const [provider, setProvider] = useState<'gemini' | 'custom'>(
+    normalizedInit.provider === 'gemini' ? 'gemini' : 'custom',
+  );
+  const [gatewayId, setGatewayId] = useState<CustomGatewayId>(
+    detectGatewayFromBaseUrl(normalizedInit.baseUrl),
+  );
+  const [model, setModel] = useState(normalizedInit.model);
+  const [apiKey, setApiKey] = useState(normalizedInit.apiKey || '');
+  const [baseUrl, setBaseUrl] = useState(
+    normalizedInit.baseUrl || CUSTOM_GATEWAY_PRESETS[0].baseUrl,
+  );
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
     ok: boolean;
@@ -90,23 +72,48 @@ export function ProvidersModal({
 
   useEffect(() => {
     if (isOpen) {
-      setProvider(config.provider);
-      setModel(config.model);
-      setApiKey(config.apiKey || '');
-      setBaseUrl(config.baseUrl || '');
+      const norm = normalizeProviderConfigToStudio(config);
+      setProvider(norm.provider === 'gemini' ? 'gemini' : 'custom');
+      setGatewayId(detectGatewayFromBaseUrl(norm.baseUrl));
+      setModel(norm.model);
+      setApiKey(norm.apiKey || '');
+      setBaseUrl(norm.baseUrl || CUSTOM_GATEWAY_PRESETS[0].baseUrl);
       setTestResult(null);
     }
   }, [isOpen, config]);
 
-  const handleSelectProvider = (next: AiProviderId) => {
+  const activeGateway =
+    CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
+
+  const handleSelectProvider = (next: 'gemini' | 'custom') => {
     setProvider(next);
-    setModel(getDefaultModelForProvider(next));
+    if (next === 'gemini') {
+      setModel(getDefaultModelForProvider('gemini'));
+    } else {
+      const gw = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
+      if (!baseUrl.trim() && gw.baseUrl) setBaseUrl(gw.baseUrl);
+      if (!gw.models.some((m) => m.id === model)) {
+        setModel(gw.models[0].id);
+      }
+    }
+    setTestResult(null);
+  };
+
+  const handleSelectGateway = (nextGwId: CustomGatewayId) => {
+    setGatewayId(nextGwId);
+    const gw = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === nextGwId)!;
+    if (gw.baseUrl) {
+      setBaseUrl(gw.baseUrl);
+    }
+    setModel(gw.models[0].id);
     setTestResult(null);
   };
 
   const buildDraftConfig = (): AiProviderConfig => ({
     provider,
-    model: model.trim() || getDefaultModelForProvider(provider),
+    model:
+      model.trim() ||
+      (provider === 'gemini' ? getDefaultModelForProvider('gemini') : activeGateway.models[0].id),
     apiKey: provider === 'gemini' ? undefined : apiKey.trim(),
     baseUrl: provider === 'custom' ? baseUrl.trim() : undefined,
   });
@@ -158,9 +165,6 @@ export function ProvidersModal({
     onClose();
   };
 
-  const guide =
-    provider === 'groq' || provider === 'openrouter' ? BYOK_INSTRUCTIONS[provider] : null;
-
   return (
     <AnimatePresence>
       {isOpen && (
@@ -186,7 +190,7 @@ export function ProvidersModal({
               <div className="flex items-center gap-2.5">
                 <KeyRound className="h-4 w-4 text-blue-500" aria-hidden="true" />
                 <h2 id="providers-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
-                  AI Models &amp; API Keys
+                  AI Models &amp; Custom Endpoints
                 </h2>
               </div>
               <button
@@ -204,7 +208,9 @@ export function ProvidersModal({
                 <div
                   role="alert"
                   className={`flex items-start gap-2.5 rounded-xl border p-3 ${
-                    modelIncident.code === 'RATE_LIMIT' || modelIncident.code === 'SERVER_OUTAGE'
+                    modelIncident.code === 'RATE_LIMIT' ||
+                    modelIncident.code === 'SERVER_OUTAGE' ||
+                    modelIncident.code === 'CREDITS_REQUIRED'
                       ? 'border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-800/70 dark:bg-amber-950/40 dark:text-amber-200'
                       : 'border-red-300 bg-red-50 text-red-900 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-200'
                   }`}
@@ -218,98 +224,117 @@ export function ProvidersModal({
               )}
 
               <div>
-                <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-2">Select Provider</p>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {(
-                    [
-                      { id: 'gemini', label: 'Gemini' },
-                      { id: 'groq', label: 'Groq' },
-                      { id: 'openrouter', label: 'OpenRouter' },
-                      { id: 'custom', label: 'Custom' },
-                    ] as const
-                  ).map((item) => (
+                <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-2">Provider Mode</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {PRIMARY_STUDIO_PROVIDERS.map((pid) => (
                     <button
-                      key={item.id}
+                      key={pid}
                       type="button"
-                      onClick={() => handleSelectProvider(item.id)}
-                      className={`rounded-lg border px-3 py-2 font-medium transition-all cursor-pointer ${
-                        provider === item.id
+                      onClick={() => handleSelectProvider(pid)}
+                      className={`min-h-[42px] rounded-xl border px-3 py-2 font-medium transition-all cursor-pointer ${
+                        provider === pid
                           ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500/70 dark:bg-blue-500/15 dark:text-blue-300'
                           : 'border-zinc-200 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900'
                       }`}
                     >
-                      {item.label}
+                      {PROVIDER_CATALOG[pid].name}
                     </button>
                   ))}
                 </div>
               </div>
 
+              {provider === 'custom' && (
+                <div>
+                  <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Custom Endpoint Preset
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                    {CUSTOM_GATEWAY_PRESETS.map((gw) => (
+                      <button
+                        key={gw.id}
+                        type="button"
+                        onClick={() => handleSelectGateway(gw.id)}
+                        className={`min-h-[36px] rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                          gatewayId === gw.id
+                            ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500/70 dark:bg-blue-500/15 dark:text-blue-300'
+                            : 'border-zinc-200 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900'
+                        }`}
+                      >
+                        {gw.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div>
                 <div className="mb-2 flex items-center justify-between">
                   <p className="font-medium text-zinc-700 dark:text-zinc-300">
-                    Select Model ({PROVIDER_CATALOG[provider].models.length} presets)
+                    Select Model ({provider === 'gemini' ? PROVIDER_CATALOG.gemini.models.length : activeGateway.models.length} models · Free &amp; Paid labeled)
                   </p>
-                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                    Click to expand all
-                  </span>
                 </div>
                 <ModelSelectorDropdown
                   provider={provider}
                   value={model}
                   onChange={setModel}
+                  modelsOverride={provider === 'custom' ? activeGateway.models : undefined}
+                  gatewayLabel={provider === 'custom' ? activeGateway.name : 'Gemini'}
                 />
               </div>
 
               {provider === 'gemini' ? (
-                <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-400">
-                  Mist uses built-in Gemini models on the server automatically for generation, refinement, and Voice Studio — no manual key setup required.
+                <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 text-[11px] leading-relaxed text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-400">
+                  <strong className="text-zinc-900 dark:text-zinc-200">Free</strong> Gemini models (like Gemini 4 Hydrogen, 3.1 Flash Lite, and 3.8 Live Voice) run on Mist&apos;s server key automatically. <strong className="text-zinc-900 dark:text-zinc-200">Paid</strong> Gemini models require a billing-enabled Gemini API key.
                 </div>
               ) : (
                 <>
-                  {guide && (
+                  {activeGateway.steps && (
                     <div className="rounded-xl border border-zinc-200 bg-zinc-50/90 p-3.5 space-y-2 dark:border-zinc-800 dark:bg-zinc-900/70">
                       <div className="flex items-center justify-between gap-2">
                         <p className="font-semibold text-zinc-900 dark:text-zinc-100">
-                          {guide.title}
+                          {activeGateway.name} API Key Setup
                         </p>
-                        <a
-                          href={guide.portalUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 font-mono text-[11px] text-blue-600 hover:underline dark:text-blue-400"
-                        >
-                          <span>{guide.portalLabel}</span>
-                          <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                        </a>
+                        {activeGateway.portalUrl && (
+                          <a
+                            href={activeGateway.portalUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 font-mono text-[11px] text-blue-600 hover:underline dark:text-blue-400"
+                          >
+                            <span>{activeGateway.portalLabel}</span>
+                            <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                          </a>
+                        )}
                       </div>
                       <ol className="list-decimal pl-4 space-y-1 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
-                        {guide.steps.map((step, i) => (
+                        {activeGateway.steps.map((step, i) => (
                           <li key={i}>{step}</li>
                         ))}
                       </ol>
                     </div>
                   )}
 
-                  {provider === 'custom' && (
-                    <div>
-                      <label htmlFor="mist-custom-url" className="block font-medium text-zinc-700 dark:text-zinc-300">
-                        OpenAI-Compatible Base URL
-                      </label>
-                      <input
-                        id="mist-custom-url"
-                        type="url"
-                        required
-                        value={baseUrl}
-                        onChange={(e) => setBaseUrl(e.target.value)}
-                        placeholder="https://api.together.xyz/v1"
-                        className="mt-1.5 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
-                      />
-                    </div>
-                  )}
+                  <div>
+                    <label htmlFor="mist-custom-url" className="block font-medium text-zinc-700 dark:text-zinc-300">
+                      OpenAI-Compatible Base URL
+                    </label>
+                    <input
+                      id="mist-custom-url"
+                      type="url"
+                      required
+                      value={baseUrl}
+                      onChange={(e) => {
+                        setBaseUrl(e.target.value);
+                        setGatewayId(detectGatewayFromBaseUrl(e.target.value));
+                      }}
+                      placeholder="https://openrouter.ai/api/v1"
+                      className="mt-1.5 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
+                    />
+                  </div>
 
                   <div>
                     <label htmlFor="mist-byok-key" className="block font-medium text-zinc-700 dark:text-zinc-300">
-                      {provider === 'openrouter' ? 'OpenRouter' : provider === 'groq' ? 'Groq' : 'Provider'} API Key
+                      {activeGateway.name} API Key
                     </label>
                     <input
                       id="mist-byok-key"
@@ -317,11 +342,11 @@ export function ProvidersModal({
                       required
                       value={apiKey}
                       onChange={(e) => setApiKey(e.target.value)}
-                      placeholder={guide?.placeholder || 'sk-...'}
+                      placeholder={activeGateway.placeholder}
                       className="mt-1.5 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
                     />
                     <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                      Saved locally in your browser and sent only when generating or testing your model.
+                      Stored locally in your browser and sent only when testing or generating with your custom endpoint.
                     </p>
                   </div>
                 </>
@@ -355,7 +380,7 @@ export function ProvidersModal({
                   type="button"
                   disabled={isTesting || (provider !== 'gemini' && !apiKey.trim())}
                   onClick={() => void handleTestConnection()}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3.5 py-2 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900 transition-colors cursor-pointer"
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-zinc-200 px-3.5 py-2 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900 transition-colors cursor-pointer"
                 >
                   {isTesting && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
                   <span>{isTesting ? 'Checking...' : 'Test Connection'}</span>
@@ -365,13 +390,13 @@ export function ProvidersModal({
                   <button
                     type="button"
                     onClick={onClose}
-                    className="rounded-lg border border-zinc-200 px-4 py-2 font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900 cursor-pointer"
+                    className="min-h-[40px] rounded-lg border border-zinc-200 px-4 py-2 font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900 cursor-pointer"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 transition-colors cursor-pointer"
+                    className="min-h-[40px] rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 transition-colors cursor-pointer"
                   >
                     Save Provider
                   </button>

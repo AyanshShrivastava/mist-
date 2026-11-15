@@ -670,11 +670,12 @@ async function callOpenAiCompatibleRaw(params: {
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   jsonMode?: boolean;
   temperature?: number;
+  maxTokens?: number;
 }): Promise<string> {
-  const { config, messages, jsonMode = true, temperature = 0.4 } = params;
+  const { config, messages, jsonMode = true, temperature = 0.4, maxTokens = 4096 } = params;
   const apiKey = config.apiKey?.trim();
   if (!apiKey) {
-    throw new ProviderHttpError(401, `Please add your ${config.provider} API key in Settings.`);
+    throw new ProviderHttpError(401, `Please add your API key for ${config.provider} in Settings or Models.`);
   }
 
   let endpoint = 'https://openrouter.ai/api/v1/chat/completions';
@@ -683,7 +684,7 @@ async function callOpenAiCompatibleRaw(params: {
   } else if (config.provider === 'custom') {
     const base = (config.baseUrl || '').trim().replace(/\/+$/, '');
     if (!base) {
-      throw new ProviderHttpError(400, 'Custom provider requires a Base URL.');
+      throw new ProviderHttpError(400, 'Custom provider requires a Base URL (or select an endpoint preset).');
     }
     endpoint = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
   }
@@ -692,29 +693,43 @@ async function callOpenAiCompatibleRaw(params: {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${apiKey}`,
   };
-  if (config.provider === 'openrouter') {
+  if (config.provider === 'openrouter' || endpoint.includes('openrouter.ai')) {
     headers['HTTP-Referer'] = process.env.APP_URL || 'http://localhost:3000';
     headers['X-Title'] = 'Mist Website Builder';
   }
 
-  const body: Record<string, unknown> = {
-    model: config.model,
-    messages,
-    temperature,
+  const runRequest = async (limitTokens: number) => {
+    const body: Record<string, unknown> = {
+      model: config.model,
+      messages,
+      temperature,
+      max_tokens: limitTokens,
+    };
+    if (jsonMode) {
+      body.response_format = { type: 'json_object' };
+    }
+    return fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
   };
-  if (jsonMode) {
-    body.response_format = { type: 'json_object' };
-  }
 
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
+  let resp = await runRequest(maxTokens);
+  if (!resp.ok && resp.status === 402) {
+    const errText = await resp.text();
+    const affordMatch = errText.match(/can only afford\s+(\d+)/i);
+    const affordable = affordMatch ? Number(affordMatch[1]) : 0;
+    if (affordable >= 1024 && maxTokens > affordable - 128) {
+      resp = await runRequest(Math.max(1024, affordable - 128));
+    } else {
+      throw new ProviderHttpError(402, `${config.provider} error (402): ${errText.slice(0, 350)}`);
+    }
+  }
 
   if (!resp.ok) {
     const errText = await resp.text();
-    throw new ProviderHttpError(resp.status, `${config.provider} error (${resp.status}): ${errText.slice(0, 300)}`);
+    throw new ProviderHttpError(resp.status, `${config.provider} error (${resp.status}): ${errText.slice(0, 350)}`);
   }
 
   const data = (await resp.json()) as {
@@ -731,6 +746,7 @@ async function callOpenAiCompatibleProvider(params: {
   config: AiProviderConfig;
   systemInstruction: string;
   userPrompt: string;
+  maxTokens?: number;
 }): Promise<Record<string, unknown>> {
   const content = await callOpenAiCompatibleRaw({
     config: params.config,
@@ -740,6 +756,7 @@ async function callOpenAiCompatibleProvider(params: {
     ],
     jsonMode: true,
     temperature: 0.4,
+    maxTokens: params.maxTokens,
   });
   return extractJsonObject(content);
 }
@@ -775,6 +792,7 @@ app.post('/api/ai/test-provider', async (req, res) => {
         config,
         systemInstruction: 'Return JSON {"ok": true}',
         userPrompt: 'Return {"ok": true}',
+        maxTokens: 64,
       });
     }
     clearIncident(provider, model);

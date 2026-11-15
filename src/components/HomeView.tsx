@@ -2,7 +2,10 @@ import React, { useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
+  CheckCircle2,
   ChevronDown,
+  Cloud,
+  CloudOff,
   Copy,
   Cpu,
   FolderOpen,
@@ -11,6 +14,7 @@ import {
   Menu,
   Mic,
   Moon,
+  RefreshCw,
   Search,
   Settings,
   Sun,
@@ -22,12 +26,20 @@ import { AnimatePresence, motion } from 'motion/react';
 import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
-  AiProviderId,
   DeploymentRecord,
   MistProject,
+  ProjectSyncRecord,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
-import { getDefaultModelForProvider, PROVIDER_CATALOG } from '../data/models';
+import {
+  CUSTOM_GATEWAY_PRESETS,
+  detectGatewayFromBaseUrl,
+  findModelEntry,
+  getDefaultModelForProvider,
+  PRIMARY_STUDIO_PROVIDERS,
+  PROVIDER_CATALOG,
+  type CustomGatewayId,
+} from '../data/models';
 import MistLogo, { MistMark } from './MistLogo';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
 
@@ -37,6 +49,9 @@ interface HomeViewProps {
   deployments: DeploymentRecord[];
   providerConfig: AiProviderConfig;
   modelIncident: ModelHealthIncident | null;
+  syncRecords: Record<string, ProjectSyncRecord>;
+  firestoreConnection: 'checking' | 'online' | 'offline';
+  isSyncingAll?: boolean;
   isGenerating: boolean;
   generationError: string | null;
   darkMode: boolean;
@@ -48,6 +63,7 @@ interface HomeViewProps {
   onOpenProject: (project: MistProject) => void;
   onDuplicateProject: (project: MistProject) => void;
   onDeleteProject: (projectId: string) => void;
+  onSyncAllToCloud?: () => void;
   onOpenProviders: () => void;
   onOpenSettings: () => void;
   onOpenDeployments: () => void;
@@ -83,6 +99,9 @@ export default function HomeView({
   deployments,
   providerConfig,
   modelIncident,
+  syncRecords,
+  firestoreConnection,
+  isSyncingAll = false,
   isGenerating,
   generationError,
   darkMode,
@@ -94,6 +113,7 @@ export default function HomeView({
   onOpenProject,
   onDuplicateProject,
   onDeleteProject,
+  onSyncAllToCloud,
   onOpenProviders,
   onOpenSettings,
   onOpenDeployments,
@@ -133,16 +153,32 @@ export default function HomeView({
     onGenerate(promptInput.trim());
   };
 
-  const providerLabel =
-    providerConfig.provider === 'gemini'
-      ? `Gemini · ${providerConfig.model}`
-      : `${
-          providerConfig.provider === 'openrouter'
-            ? 'OpenRouter'
+  const isGeminiMode = providerConfig.provider === 'gemini';
+  const activeGatewayId: CustomGatewayId = isGeminiMode
+    ? 'openrouter'
+    : detectGatewayFromBaseUrl(
+        providerConfig.baseUrl ||
+          (providerConfig.provider === 'openrouter'
+            ? 'https://openrouter.ai/api/v1'
             : providerConfig.provider === 'groq'
-              ? 'Groq'
-              : 'Custom'
-        } · ${providerConfig.model}`;
+              ? 'https://api.groq.com/openai/v1'
+              : ''),
+      );
+  const activeGateway =
+    CUSTOM_GATEWAY_PRESETS.find((g) => g.id === activeGatewayId) || CUSTOM_GATEWAY_PRESETS[0];
+  const currentModelMeta = findModelEntry(
+    providerConfig.provider,
+    providerConfig.model,
+    providerConfig.baseUrl,
+  );
+  const providerLabel = isGeminiMode
+    ? `Gemini · ${currentModelMeta?.label || providerConfig.model}`
+    : `${activeGateway.name} · ${currentModelMeta?.label || providerConfig.model}`;
+
+  const syncedCount = user
+    ? projects.filter((p) => syncRecords[p.id]?.state === 'synced').length
+    : 0;
+  const allProjectsSynced = Boolean(user && projects.length > 0 && syncedCount === projects.length);
 
   const activeIncidentMatchesCurrent =
     modelIncident &&
@@ -403,7 +439,18 @@ export default function HomeView({
                 >
                   <span className="inline-flex items-center gap-1.5 min-w-0">
                     <Cpu className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" aria-hidden="true" />
-                    <span className="max-w-[110px] sm:max-w-[195px] truncate">{providerLabel}</span>
+                    <span className="max-w-[96px] sm:max-w-[180px] truncate">{providerLabel}</span>
+                    {currentModelMeta && (
+                      <span
+                        className={`hidden sm:inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                          currentModelMeta.billing === 'free'
+                            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                            : 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                        }`}
+                      >
+                        {currentModelMeta.billingLabel}
+                      </span>
+                    )}
                   </span>
                   <motion.span
                     animate={{ rotate: quickModelOpen ? 180 : 0 }}
@@ -460,7 +507,7 @@ export default function HomeView({
               </div>
             </div>
 
-            {/* Expandable Quick Model Switcher Drawer inside Composer */}
+            {/* Expandable Quick Model Switcher Drawer inside Composer (Gemini + Custom only) */}
             <AnimatePresence initial={false}>
               {quickModelOpen && (
                 <motion.div
@@ -473,26 +520,40 @@ export default function HomeView({
                   <div className="mt-4 space-y-3 rounded-xl border border-zinc-200 bg-white/95 p-3.5 text-xs dark:border-zinc-800 dark:bg-zinc-950/95">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        {(['gemini', 'groq', 'openrouter', 'custom'] as AiProviderId[]).map((pid) => (
-                          <button
-                            key={pid}
-                            type="button"
-                            onClick={() =>
-                              onSaveProvider({
-                                ...providerConfig,
-                                provider: pid,
-                                model: getDefaultModelForProvider(pid),
-                              })
-                            }
-                            className={`min-h-[34px] rounded-lg border px-2.5 py-1 text-xs font-medium capitalize transition-colors cursor-pointer ${
-                              providerConfig.provider === pid
-                                ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500/70 dark:bg-blue-500/15 dark:text-blue-300'
-                                : 'border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900'
-                            }`}
-                          >
-                            {PROVIDER_CATALOG[pid].name}
-                          </button>
-                        ))}
+                        {PRIMARY_STUDIO_PROVIDERS.map((pid) => {
+                          const selected =
+                            pid === 'gemini' ? isGeminiMode : !isGeminiMode;
+                          return (
+                            <button
+                              key={pid}
+                              type="button"
+                              onClick={() => {
+                                if (pid === 'gemini') {
+                                  onSaveProvider({
+                                    ...providerConfig,
+                                    provider: 'gemini',
+                                    model: getDefaultModelForProvider('gemini'),
+                                  });
+                                } else {
+                                  const gw = CUSTOM_GATEWAY_PRESETS[0];
+                                  onSaveProvider({
+                                    ...providerConfig,
+                                    provider: 'custom',
+                                    baseUrl: providerConfig.baseUrl || gw.baseUrl,
+                                    model: gw.models[0].id,
+                                  });
+                                }
+                              }}
+                              className={`min-h-[34px] rounded-lg border px-3 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                                selected
+                                  ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500/70 dark:bg-blue-500/15 dark:text-blue-300'
+                                  : 'border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900'
+                              }`}
+                            >
+                              {PROVIDER_CATALOG[pid].name}
+                            </button>
+                          );
+                        })}
                       </div>
 
                       <button
@@ -500,17 +561,49 @@ export default function HomeView({
                         onClick={onOpenProviders}
                         className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400 cursor-pointer"
                       >
-                        API Keys &amp; Setup Guide &rarr;
+                        API Keys &amp; Endpoint Setup &rarr;
                       </button>
                     </div>
 
+                    {!isGeminiMode && (
+                      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                        <span className="text-[11px] text-zinc-500 dark:text-zinc-400 mr-1">
+                          Preset:
+                        </span>
+                        {CUSTOM_GATEWAY_PRESETS.map((gw) => (
+                          <button
+                            key={gw.id}
+                            type="button"
+                            onClick={() =>
+                              onSaveProvider({
+                                ...providerConfig,
+                                provider: 'custom',
+                                baseUrl: gw.baseUrl || providerConfig.baseUrl || '',
+                                model: gw.models[0].id,
+                              })
+                            }
+                            className={`min-h-[28px] rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                              activeGatewayId === gw.id
+                                ? 'border-blue-500/70 bg-blue-500/10 text-blue-700 dark:text-blue-300'
+                                : 'border-zinc-200 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-900'
+                            }`}
+                          >
+                            {gw.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
                     <ModelSelectorDropdown
-                      provider={providerConfig.provider}
+                      provider={isGeminiMode ? 'gemini' : 'custom'}
                       value={providerConfig.model}
+                      modelsOverride={!isGeminiMode ? activeGateway.models : undefined}
+                      gatewayLabel={!isGeminiMode ? activeGateway.name : 'Gemini'}
                       compact
                       onChange={(nextModel) =>
                         onSaveProvider({
                           ...providerConfig,
+                          provider: isGeminiMode ? 'gemini' : 'custom',
                           model: nextModel,
                         })
                       }
@@ -560,12 +653,53 @@ export default function HomeView({
           <div className="mx-auto max-w-7xl px-4 sm:px-6">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
               <div>
-                <h2 className="font-display text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
-                  Your Websites
-                </h2>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h2 className="font-display text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
+                    Your Websites
+                  </h2>
+                  {user && (
+                    <span
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-0.5 text-[11px] font-medium ${
+                        firestoreConnection === 'offline'
+                          ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800/70 dark:bg-amber-950/40 dark:text-amber-300'
+                          : allProjectsSynced || projects.length === 0
+                            ? 'border-emerald-300/80 bg-emerald-50 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300'
+                            : 'border-blue-300/80 bg-blue-50 text-blue-700 dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300'
+                      }`}
+                    >
+                      {firestoreConnection === 'offline' ? (
+                        <CloudOff className="h-3 w-3" aria-hidden="true" />
+                      ) : allProjectsSynced || projects.length === 0 ? (
+                        <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                      ) : (
+                        <Cloud className="h-3 w-3" aria-hidden="true" />
+                      )}
+                      <span>
+                        {firestoreConnection === 'offline'
+                          ? 'Firestore offline (saved locally)'
+                          : projects.length === 0
+                            ? 'Firestore connected'
+                            : allProjectsSynced
+                              ? `All ${projects.length} synced to Firestore`
+                              : `${syncedCount}/${projects.length} synced to Firestore`}
+                      </span>
+                    </span>
+                  )}
+                  {user && projects.length > 0 && !allProjectsSynced && onSyncAllToCloud && (
+                    <button
+                      type="button"
+                      disabled={isSyncingAll}
+                      onClick={onSyncAllToCloud}
+                      className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-0.5 text-[11px] font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800 cursor-pointer"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${isSyncingAll ? 'animate-spin' : ''}`} aria-hidden="true" />
+                      <span>{isSyncingAll ? 'Syncing...' : 'Sync all'}</span>
+                    </button>
+                  )}
+                </div>
                 <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
                   {user
-                    ? `All projects saved to cloud workspace for ${user.email}`
+                    ? `All projects saved to Firestore for ${user.email}`
                     : 'Sign in with Google to save every website you create across sessions and devices.'}
                 </p>
               </div>
@@ -649,7 +783,28 @@ export default function HomeView({
               </div>
             ) : (
               <div className="divide-y divide-zinc-200 rounded-2xl border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900/75 overflow-hidden">
-                {filteredProjects.map((project, index) => (
+                {filteredProjects.map((project, index) => {
+                  const sync = syncRecords[project.id];
+                  const syncLabel = !user
+                    ? 'Local only (Sign in to sync)'
+                    : sync?.state === 'syncing'
+                      ? 'Syncing...'
+                      : sync?.state === 'error'
+                        ? 'Sync error'
+                        : sync?.state === 'synced'
+                          ? 'Synced in Firestore'
+                          : 'Pending Firestore sync';
+                  const syncTone = !user
+                    ? 'text-zinc-500 dark:text-zinc-400'
+                    : sync?.state === 'syncing'
+                      ? 'text-blue-600 dark:text-blue-400'
+                      : sync?.state === 'error'
+                        ? 'text-red-600 dark:text-red-400'
+                        : sync?.state === 'synced'
+                          ? 'text-emerald-700 dark:text-emerald-400'
+                          : 'text-amber-700 dark:text-amber-300';
+
+                  return (
                   <motion.div
                     key={project.id}
                     initial={{ opacity: 0, y: 8 }}
@@ -669,6 +824,19 @@ export default function HomeView({
                         <span className="text-xs text-zinc-400">·</span>
                         <span className="text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
                           {project.files.length} files
+                        </span>
+                        <span className="text-xs text-zinc-400">·</span>
+                        <span className={`inline-flex items-center gap-1 text-[11px] font-medium ${syncTone}`}>
+                          {!user ? (
+                            <CloudOff className="h-3 w-3" aria-hidden="true" />
+                          ) : sync?.state === 'syncing' ? (
+                            <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                          ) : sync?.state === 'synced' ? (
+                            <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                          ) : (
+                            <Cloud className="h-3 w-3" aria-hidden="true" />
+                          )}
+                          <span>{syncLabel}</span>
                         </span>
                         {project.isPublished && project.publishedSlug && (
                           <>
@@ -716,7 +884,8 @@ export default function HomeView({
                       </button>
                     </div>
                   </motion.div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

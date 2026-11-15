@@ -2,6 +2,7 @@ import {
   collection,
   doc,
   getDocs,
+  getDocsFromServer,
   query,
   serverTimestamp,
   setDoc,
@@ -19,13 +20,43 @@ import {
   isOfflineFirestoreError,
   OperationType,
 } from './client';
-import type { MistProject, ProjectFile } from '../types/mist';
+import type { MistProject, ProjectFile, ProjectSyncRecord } from '../types/mist';
 import { createSafeId } from '../utils/projectOps';
 
 const knownCloudProjects = new Set<string>();
+const syncRecords = new Map<string, ProjectSyncRecord>();
+const syncListeners = new Set<() => void>();
+
+function notifySyncListeners() {
+  for (const listener of syncListeners) {
+    listener();
+  }
+}
+
+export function subscribeToSyncStatus(listener: () => void): () => void {
+  syncListeners.add(listener);
+  return () => {
+    syncListeners.delete(listener);
+  };
+}
+
+export function getSyncRecordsSnapshot(): Record<string, ProjectSyncRecord> {
+  const out: Record<string, ProjectSyncRecord> = {};
+  for (const [id, rec] of syncRecords.entries()) {
+    out[id] = rec;
+  }
+  return out;
+}
+
+function setProjectSyncRecord(record: ProjectSyncRecord) {
+  syncRecords.set(record.projectId, record);
+  notifySyncListeners();
+}
 
 export function clearKnownCloudProjects(): void {
   knownCloudProjects.clear();
+  syncRecords.clear();
+  notifySyncListeners();
 }
 
 export function isProjectSyncedToCloud(projectId: string): boolean {
@@ -46,13 +77,14 @@ export async function listUserProjectsFromFirestore(uid: string): Promise<MistPr
     const q = query(collection(db, projectsPath), where('ownerId', '==', uid));
     let snap;
     try {
-      snap = await getDocs(q);
+      snap = await getDocsFromServer(q);
     } catch (err) {
       if (!isOfflineFirestoreError(err)) throw err;
       await ensureFirestoreOnline();
       snap = await getDocs(q);
     }
 
+    const now = new Date().toISOString();
     const results: MistProject[] = [];
     for (const projectDoc of snap.docs) {
       const data = projectDoc.data();
@@ -78,6 +110,13 @@ export async function listUserProjectsFromFirestore(uid: string): Promise<MistPr
           handleFirestoreError(fileErr, OperationType.LIST, filesPath);
         }
       }
+
+      setProjectSyncRecord({
+        projectId,
+        state: 'synced',
+        cloudFileCount: files.length,
+        lastSyncedAt: now,
+      });
 
       results.push({
         id: projectId,
@@ -110,6 +149,68 @@ export async function listUserProjectsFromFirestore(uid: string): Promise<MistPr
   }
 }
 
+export async function verifyUserProjectsInFirestore(
+  uid: string,
+  localProjects: MistProject[],
+): Promise<{
+  verifiedAt: string;
+  cloudProjectCount: number;
+  allSynced: boolean;
+}> {
+  const verifiedAt = new Date().toISOString();
+  const q = query(collection(db, 'projects'), where('ownerId', '==', uid));
+  let snap;
+  try {
+    snap = await getDocsFromServer(q);
+  } catch (err) {
+    if (isOfflineFirestoreError(err)) {
+      await ensureFirestoreOnline();
+      snap = await getDocsFromServer(q);
+    } else {
+      handleFirestoreError(err, OperationType.LIST, 'projects');
+    }
+  }
+
+  const cloudCounts = new Map<string, number>();
+  for (const projectDoc of snap.docs) {
+    const pid = String(projectDoc.data().id || projectDoc.id);
+    knownCloudProjects.add(pid);
+    const filesSnap = await getDocsFromServer(
+      query(collection(db, 'projects', pid, 'files'), where('ownerId', '==', uid)),
+    );
+    cloudCounts.set(pid, filesSnap.size);
+  }
+
+  let allSynced = true;
+  for (const p of localProjects) {
+    const cloudCount = cloudCounts.get(p.id);
+    if (cloudCount === undefined) {
+      allSynced = false;
+      knownCloudProjects.delete(p.id);
+      setProjectSyncRecord({
+        projectId: p.id,
+        state: 'local',
+        cloudFileCount: 0,
+      });
+    } else {
+      const filesMatch = cloudCount === p.files.length;
+      if (!filesMatch) allSynced = false;
+      setProjectSyncRecord({
+        projectId: p.id,
+        state: filesMatch ? 'synced' : 'local',
+        cloudFileCount: cloudCount,
+        lastSyncedAt: verifiedAt,
+      });
+    }
+  }
+
+  return {
+    verifiedAt,
+    cloudProjectCount: cloudCounts.size,
+    allSynced,
+  };
+}
+
 const projectSaveQueue = new Map<string, Promise<void>>();
 
 export async function saveProjectToFirestore(
@@ -122,6 +223,13 @@ export async function saveProjectToFirestore(
     .then(async () => {
       const user = auth.currentUser;
       if (!user) return;
+
+      setProjectSyncRecord({
+        projectId: project.id,
+        state: 'syncing',
+        cloudFileCount: syncRecords.get(project.id)?.cloudFileCount,
+        lastSyncedAt: syncRecords.get(project.id)?.lastSyncedAt,
+      });
 
       const projectPath = `projects/${project.id}`;
       const projectRef = doc(db, 'projects', project.id);
@@ -136,7 +244,11 @@ export async function saveProjectToFirestore(
         if (!shouldCreate && !knownCloudProjects.has(project.id)) {
           const existing = await getDocServerOrCache(projectRef);
           if (!existing) {
-            // Client temporarily offline; skip uncached getDoc failure and keep localStorage copy
+            setProjectSyncRecord({
+              projectId: project.id,
+              state: 'local',
+              error: 'Firestore unreachable (offline)',
+            });
             return;
           }
           shouldCreate = !existing.exists();
@@ -179,6 +291,12 @@ export async function saveProjectToFirestore(
             });
           }
           await batch.commit();
+          setProjectSyncRecord({
+            projectId: project.id,
+            state: 'synced',
+            cloudFileCount: project.files.length,
+            lastSyncedAt: new Date().toISOString(),
+          });
           return;
         }
 
@@ -226,10 +344,26 @@ export async function saveProjectToFirestore(
           });
         }
         await batch.commit();
+        setProjectSyncRecord({
+          projectId: project.id,
+          state: 'synced',
+          cloudFileCount: project.files.length,
+          lastSyncedAt: new Date().toISOString(),
+        });
       } catch (error) {
         if (isOfflineFirestoreError(error)) {
+          setProjectSyncRecord({
+            projectId: project.id,
+            state: 'local',
+            error: 'Offline — queued locally',
+          });
           return;
         }
+        setProjectSyncRecord({
+          projectId: project.id,
+          state: 'error',
+          error: error instanceof Error ? error.message : 'Sync failed',
+        });
         handleFirestoreError(error, OperationType.WRITE, projectPath);
       }
     });
@@ -249,6 +383,9 @@ export async function deleteProjectFromFirestore(projectId: string): Promise<voi
   if (!user) return;
 
   knownCloudProjects.delete(projectId);
+  syncRecords.delete(projectId);
+  notifySyncListeners();
+
   const projectPath = `projects/${projectId}`;
   try {
     const filesSnap = await getDocs(
@@ -309,10 +446,6 @@ export async function saveDeploymentToFirestore(params: {
   }
 }
 
-/**
- * Ensures every project belonging to the currently signed-in user is saved in Firestore.
- * Skips any project already verified in cloud unless forceAll is passed.
- */
 export async function syncLocalProjectsToFirestore(
   projects: MistProject[],
   cloudIds?: Set<string>,

@@ -30,12 +30,22 @@ export interface MistProject {
 }
 
 export type AiProviderId = 'gemini' | 'openrouter' | 'groq' | 'custom';
+export type PrimaryProviderId = 'gemini' | 'custom';
+export type ModelBilling = 'free' | 'paid';
 
 export interface AiProviderConfig {
   provider: AiProviderId;
   model: string;
   apiKey?: string;
   baseUrl?: string;
+}
+
+export interface ProjectSyncRecord {
+  projectId: string;
+  state: 'synced' | 'syncing' | 'local' | 'error';
+  cloudFileCount?: number;
+  lastSyncedAt?: string;
+  error?: string;
 }
 
 export interface VisualElementStyles {
@@ -85,4 +95,3 @@ export interface StudioSettings {
   defaultViewport: ViewportSize;
   enableAppAi: boolean;
 }
-

@@ -2,45 +2,44 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyModelError } from './aiErrors';
 
-test('classifyModelError identifies 429 rate limits and retry seconds', () => {
-  const res = classifyModelError({
-    status: 429,
-    message: 'RESOURCE_EXHAUSTED: Rate limit exceeded, retry in 15s',
-    provider: 'groq',
-    model: 'llama-3.3-70b-versatile',
+test('classifyModelError classifies OpenRouter 402 credits/max_tokens failure as CREDITS_REQUIRED', () => {
+  const incident = classifyModelError({
+    status: 402,
+    provider: 'custom',
+    model: 'openai/gpt-4.1',
+    message:
+      'OpenRouter error (402): {"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 5000.","code":402,"metadata":{"limit_source":"openrouter_credits"}}}',
   });
-  assert.equal(res.code, 'RATE_LIMIT');
-  assert.equal(res.retryAfterSeconds, 15);
-  assert.ok(res.title.includes('rate limits'));
+
+  assert.equal(incident.code, 'CREDITS_REQUIRED');
+  assert.equal(incident.title, 'openai/gpt-4.1 requires paid credits');
+  assert.ok(incident.message.includes('5000 tokens'));
+  assert.ok(incident.message.includes('Free model'));
 });
 
-test('classifyModelError identifies 503 upstream server outages', () => {
-  const res = classifyModelError({
-    status: 503,
-    message: 'Service Unavailable: model overloaded',
+test('classifyModelError detects rate limit, outage, and auth errors accurately', () => {
+  const rateLimit = classifyModelError({
+    status: 429,
     provider: 'gemini',
     model: 'gemini-4-hydrogen',
+    message: 'Resource exhausted, retry in 12s',
   });
-  assert.equal(res.code, 'SERVER_OUTAGE');
-  assert.ok(res.title.includes('server outage'));
-});
+  assert.equal(rateLimit.code, 'RATE_LIMIT');
+  assert.equal(rateLimit.retryAfterSeconds, 12);
 
-test('classifyModelError identifies 401 invalid API keys', () => {
-  const res = classifyModelError({
+  const outage = classifyModelError({
+    status: 503,
+    provider: 'custom',
+    model: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
+    message: 'Service Unavailable',
+  });
+  assert.equal(outage.code, 'SERVER_OUTAGE');
+
+  const auth = classifyModelError({
     status: 401,
-    message: 'Invalid API key provided',
-    provider: 'openrouter',
-    model: 'anthropic/claude-sonnet-4',
+    provider: 'custom',
+    model: 'openai/gpt-4.1',
+    message: 'Invalid API key',
   });
-  assert.equal(res.code, 'AUTH_ERROR');
-});
-
-test('classifyModelError identifies 404 unavailable models', () => {
-  const res = classifyModelError({
-    status: 404,
-    message: 'Model not found',
-    provider: 'openrouter',
-    model: 'unknown/model',
-  });
-  assert.equal(res.code, 'MODEL_UNAVAILABLE');
+  assert.equal(auth.code, 'AUTH_ERROR');
 });

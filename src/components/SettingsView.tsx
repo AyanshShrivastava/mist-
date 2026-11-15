@@ -23,16 +23,24 @@ import { motion } from 'motion/react';
 import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
-  AiProviderId,
   DeploymentRecord,
   MistProject,
+  ProjectSyncRecord,
   StudioSettings,
   ViewportSize,
   WorkspaceViewMode,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
-import { getDefaultModelForProvider, PROVIDER_CATALOG } from '../data/models';
-import { isProjectSyncedToCloud } from '../firebase/store';
+import {
+  CUSTOM_GATEWAY_PRESETS,
+  detectGatewayFromBaseUrl,
+  getDefaultModelForProvider,
+  normalizeProviderConfigToStudio,
+  PRIMARY_STUDIO_PROVIDERS,
+  PROVIDER_CATALOG,
+  type CustomGatewayId,
+} from '../data/models';
+import { FIRESTORE_DATABASE_ID, FIREBASE_PROJECT_ID } from '../firebase/client';
 import MistLogo from './MistLogo';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
 
@@ -43,50 +51,21 @@ interface SettingsViewProps {
   providerConfig: AiProviderConfig;
   studioSettings: StudioSettings;
   modelIncident: ModelHealthIncident | null;
+  syncRecords: Record<string, ProjectSyncRecord>;
+  firestoreConnection: 'checking' | 'online' | 'offline';
   isSyncingAll: boolean;
+  isVerifyingCloud: boolean;
+  lastVerifiedAt: string | null;
   lastSyncSummary: string | null;
   onBack: () => void;
   onSaveProvider: (next: AiProviderConfig) => void;
   onUpdateSettings: (partial: Partial<StudioSettings>) => void;
   onIncident: (incident: ModelHealthIncident | null) => void;
   onSyncAllToCloud: () => Promise<void>;
+  onVerifyCloudSync: () => Promise<void>;
   onSignIn: () => void;
   onSignOut: () => void;
 }
-
-const KEY_GUIDES: Record<
-  'groq' | 'openrouter',
-  {
-    title: string;
-    portalLabel: string;
-    portalUrl: string;
-    placeholder: string;
-    steps: string[];
-  }
-> = {
-  groq: {
-    title: 'How to create a Groq API key',
-    portalLabel: 'console.groq.com/keys',
-    portalUrl: 'https://console.groq.com/keys',
-    placeholder: 'gsk_...',
-    steps: [
-      'Sign in at console.groq.com/keys with your Groq developer account.',
-      'Select Create API Key, name it Mist Studio, and copy the key starting with gsk_.',
-      'Paste your key below, pick any Groq model from the dropdown, and test the connection.',
-    ],
-  },
-  openrouter: {
-    title: 'How to create an OpenRouter API key',
-    portalLabel: 'openrouter.ai/keys',
-    portalUrl: 'https://openrouter.ai/keys',
-    placeholder: 'sk-or-v1-...',
-    steps: [
-      'Open openrouter.ai/keys and sign in to your OpenRouter dashboard.',
-      'Select Create Key, optionally configure a spend limit, and copy the key starting with sk-or-.',
-      'Paste your key below, pick any Claude, GPT, Gemini, or DeepSeek model, and test.',
-    ],
-  },
-};
 
 export default function SettingsView({
   user,
@@ -95,20 +74,33 @@ export default function SettingsView({
   providerConfig,
   studioSettings,
   modelIncident,
+  syncRecords,
+  firestoreConnection,
   isSyncingAll,
+  isVerifyingCloud,
+  lastVerifiedAt,
   lastSyncSummary,
   onBack,
   onSaveProvider,
   onUpdateSettings,
   onIncident,
   onSyncAllToCloud,
+  onVerifyCloudSync,
   onSignIn,
   onSignOut,
 }: SettingsViewProps) {
-  const [provider, setProvider] = useState<AiProviderId>(providerConfig.provider);
-  const [model, setModel] = useState<string>(providerConfig.model);
-  const [apiKey, setApiKey] = useState<string>(providerConfig.apiKey || '');
-  const [baseUrl, setBaseUrl] = useState<string>(providerConfig.baseUrl || '');
+  const normalizedInit = normalizeProviderConfigToStudio(providerConfig);
+  const [provider, setProvider] = useState<'gemini' | 'custom'>(
+    normalizedInit.provider === 'gemini' ? 'gemini' : 'custom',
+  );
+  const [gatewayId, setGatewayId] = useState<CustomGatewayId>(
+    detectGatewayFromBaseUrl(normalizedInit.baseUrl),
+  );
+  const [model, setModel] = useState<string>(normalizedInit.model);
+  const [apiKey, setApiKey] = useState<string>(normalizedInit.apiKey || '');
+  const [baseUrl, setBaseUrl] = useState<string>(
+    normalizedInit.baseUrl || CUSTOM_GATEWAY_PRESETS[0].baseUrl,
+  );
   const [savedNotice, setSavedNotice] = useState(false);
 
   const [isTestingProvider, setIsTestingProvider] = useState(false);
@@ -124,25 +116,49 @@ export default function SettingsView({
   } | null>(null);
 
   useEffect(() => {
-    setProvider(providerConfig.provider);
-    setModel(providerConfig.model);
-    setApiKey(providerConfig.apiKey || '');
-    setBaseUrl(providerConfig.baseUrl || '');
+    const norm = normalizeProviderConfigToStudio(providerConfig);
+    setProvider(norm.provider === 'gemini' ? 'gemini' : 'custom');
+    setGatewayId(detectGatewayFromBaseUrl(norm.baseUrl));
+    setModel(norm.model);
+    setApiKey(norm.apiKey || '');
+    setBaseUrl(norm.baseUrl || CUSTOM_GATEWAY_PRESETS[0].baseUrl);
   }, [providerConfig]);
 
   const syncedProjectsCount = user
-    ? projects.filter((p) => isProjectSyncedToCloud(p.id)).length
+    ? projects.filter((p) => syncRecords[p.id]?.state === 'synced').length
     : 0;
+  const activeGateway =
+    CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
 
-  const handleSelectProvider = (next: AiProviderId) => {
+  const handleSelectProvider = (next: 'gemini' | 'custom') => {
     setProvider(next);
-    setModel(getDefaultModelForProvider(next));
+    if (next === 'gemini') {
+      setModel(getDefaultModelForProvider('gemini'));
+    } else {
+      const gw = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
+      if (!baseUrl.trim() && gw.baseUrl) setBaseUrl(gw.baseUrl);
+      if (!gw.models.some((m) => m.id === model)) {
+        setModel(gw.models[0].id);
+      }
+    }
+    setProviderTestResult(null);
+  };
+
+  const handleSelectGateway = (nextGwId: CustomGatewayId) => {
+    setGatewayId(nextGwId);
+    const gw = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === nextGwId)!;
+    if (gw.baseUrl) {
+      setBaseUrl(gw.baseUrl);
+    }
+    setModel(gw.models[0].id);
     setProviderTestResult(null);
   };
 
   const buildProviderDraft = (): AiProviderConfig => ({
     provider,
-    model: model.trim() || getDefaultModelForProvider(provider),
+    model:
+      model.trim() ||
+      (provider === 'gemini' ? getDefaultModelForProvider('gemini') : activeGateway.models[0].id),
     apiKey: provider === 'gemini' ? undefined : apiKey.trim(),
     baseUrl: provider === 'custom' ? baseUrl.trim() : undefined,
   });
@@ -232,7 +248,6 @@ export default function SettingsView({
     }
   };
 
-  const keyGuide = provider === 'groq' || provider === 'openrouter' ? KEY_GUIDES[provider] : null;
   const darkMode = studioSettings.theme === 'dark';
 
   return (
@@ -352,102 +367,128 @@ export default function SettingsView({
                       AI Providers &amp; Models
                     </h2>
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      Choose your default model across Gemini, Groq, OpenRouter, or custom endpoints.
+                      Switch between built-in Gemini models and Custom OpenAI-compatible gateways (OpenRouter, Groq, NVIDIA NIM, or any custom URL).
                     </p>
                   </div>
                 </div>
               </div>
 
               <form onSubmit={handleApplyProvider} className="mt-5 space-y-4 text-xs">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {(
-                    [
-                      { id: 'gemini', label: 'Gemini' },
-                      { id: 'groq', label: 'Groq' },
-                      { id: 'openrouter', label: 'OpenRouter' },
-                      { id: 'custom', label: 'Custom' },
-                    ] as const
-                  ).map((item) => (
+                <div className="grid grid-cols-2 gap-2">
+                  {PRIMARY_STUDIO_PROVIDERS.map((pid) => (
                     <button
-                      key={item.id}
+                      key={pid}
                       type="button"
-                      onClick={() => handleSelectProvider(item.id)}
-                      className={`min-h-[40px] rounded-xl border px-3 py-2 font-medium transition-all cursor-pointer ${
-                        provider === item.id
+                      onClick={() => handleSelectProvider(pid)}
+                      className={`min-h-[42px] rounded-xl border px-3 py-2 font-medium transition-all cursor-pointer ${
+                        provider === pid
                           ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500/70 dark:bg-blue-500/15 dark:text-blue-300'
                           : 'border-zinc-200 bg-white/60 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-800'
                       }`}
                     >
-                      {item.label}
+                      {PROVIDER_CATALOG[pid].name}
                     </button>
                   ))}
                 </div>
 
+                {provider === 'custom' && (
+                  <div>
+                    <p className="mb-1.5 font-medium text-zinc-700 dark:text-zinc-300">
+                      Custom Endpoint Preset
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {CUSTOM_GATEWAY_PRESETS.map((gw) => (
+                        <button
+                          key={gw.id}
+                          type="button"
+                          onClick={() => handleSelectGateway(gw.id)}
+                          className={`min-h-[36px] rounded-xl border px-2.5 py-1.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                            gatewayId === gw.id
+                              ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500/70 dark:bg-blue-500/15 dark:text-blue-300'
+                              : 'border-zinc-200 bg-white/60 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                          }`}
+                        >
+                          {gw.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div>
-                  <div className="mb-1.5 flex items-center justify-between">
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
                     <span className="font-medium text-zinc-700 dark:text-zinc-300">
-                      Active Model ({PROVIDER_CATALOG[provider].models.length} models)
+                      Active Model (
+                      {provider === 'gemini'
+                        ? PROVIDER_CATALOG.gemini.models.length
+                        : activeGateway.models.length}{' '}
+                      models · Free &amp; Paid tagged)
                     </span>
                     <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                      Expand arrow to browse all
+                      Expand arrow to filter Free / Paid
                     </span>
                   </div>
                   <ModelSelectorDropdown
                     provider={provider}
                     value={model}
                     onChange={setModel}
+                    modelsOverride={provider === 'custom' ? activeGateway.models : undefined}
+                    gatewayLabel={provider === 'custom' ? activeGateway.name : 'Gemini'}
                   />
                 </div>
 
                 {provider === 'gemini' ? (
                   <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/90 p-3.5 text-xs text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-400">
-                    Gemini runs server-side automatically for generation, code edits, interactive generated-app AI endpoints, and Live Voice Studio — no manual API key required.
+                    <strong className="text-zinc-900 dark:text-zinc-200">Free</strong> Gemini models (Gemini 4 Hydrogen, 3.1 Flash Lite, 3.8 Live Voice) run server-side with Mist&apos;s key. <strong className="text-zinc-900 dark:text-zinc-200">Paid</strong> Gemini models require a billing-enabled Gemini API key.
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {keyGuide && (
+                    {activeGateway.steps && (
                       <div className="rounded-xl border border-zinc-200/90 bg-zinc-50/90 p-3.5 space-y-2 dark:border-zinc-800 dark:bg-zinc-900/70">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="font-semibold text-zinc-900 dark:text-zinc-100">
-                            {keyGuide.title}
+                            How to set up {activeGateway.name}
                           </p>
-                          <a
-                            href={keyGuide.portalUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 font-mono text-[11px] text-blue-600 hover:underline dark:text-blue-400"
-                          >
-                            <span>{keyGuide.portalLabel}</span>
-                            <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                          </a>
+                          {activeGateway.portalUrl && (
+                            <a
+                              href={activeGateway.portalUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 font-mono text-[11px] text-blue-600 hover:underline dark:text-blue-400"
+                            >
+                              <span>{activeGateway.portalLabel}</span>
+                              <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                            </a>
+                          )}
                         </div>
                         <ol className="list-decimal pl-4 space-y-1 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
-                          {keyGuide.steps.map((step, i) => (
+                          {activeGateway.steps.map((step, i) => (
                             <li key={i}>{step}</li>
                           ))}
                         </ol>
                       </div>
                     )}
 
-                    {provider === 'custom' && (
-                      <div>
-                        <label
-                          htmlFor="settings-custom-url"
-                          className="block font-medium text-zinc-700 dark:text-zinc-300"
-                        >
-                          OpenAI-Compatible Base URL
-                        </label>
-                        <input
-                          id="settings-custom-url"
-                          type="url"
-                          required
-                          value={baseUrl}
-                          onChange={(e) => setBaseUrl(e.target.value)}
-                          placeholder="https://api.together.xyz/v1"
-                          className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
-                        />
-                      </div>
-                    )}
+                    <div>
+                      <label
+                        htmlFor="settings-custom-url"
+                        className="block font-medium text-zinc-700 dark:text-zinc-300"
+                      >
+                        OpenAI-Compatible Base URL
+                      </label>
+                      <input
+                        id="settings-custom-url"
+                        type="url"
+                        required
+                        value={baseUrl}
+                        onChange={(e) => {
+                          setBaseUrl(e.target.value);
+                          setGatewayId(detectGatewayFromBaseUrl(e.target.value));
+                        }}
+                        placeholder="https://openrouter.ai/api/v1"
+                        className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
+                      />
+                    </div>
 
                     <div>
                       <label
@@ -456,14 +497,7 @@ export default function SettingsView({
                       >
                         <span className="inline-flex items-center gap-1.5">
                           <KeyRound className="h-3.5 w-3.5 text-zinc-400" aria-hidden="true" />
-                          <span>
-                            {provider === 'openrouter'
-                              ? 'OpenRouter'
-                              : provider === 'groq'
-                                ? 'Groq'
-                                : 'Provider'}{' '}
-                            API Key
-                          </span>
+                          <span>{activeGateway.name} API Key</span>
                         </span>
                       </label>
                       <input
@@ -472,7 +506,7 @@ export default function SettingsView({
                         required
                         value={apiKey}
                         onChange={(e) => setApiKey(e.target.value)}
-                        placeholder={keyGuide?.placeholder || 'sk-...'}
+                        placeholder={activeGateway.placeholder}
                         className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
                       />
                     </div>
@@ -695,8 +729,34 @@ export default function SettingsView({
                   </div>
                 </div>
 
-                {/* Clear architectural breakdown of how data is persisted */}
-                <div className="space-y-2 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3.5 text-[11px] leading-relaxed text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400">
+                {/* Verifiable Firestore Database Metadata & Live Sync Inspector */}
+                <div className="space-y-2.5 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3.5 text-[11px] leading-relaxed text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-zinc-200/80 dark:border-zinc-800">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-zinc-900 dark:text-zinc-100">
+                        Firestore Database Target
+                      </p>
+                      <p className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 truncate">
+                        {FIREBASE_PROJECT_ID} · {FIRESTORE_DATABASE_ID}
+                      </p>
+                    </div>
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-semibold ${
+                        firestoreConnection === 'online'
+                          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                          : firestoreConnection === 'offline'
+                            ? 'bg-red-500/15 text-red-700 dark:text-red-300'
+                            : 'bg-zinc-500/15 text-zinc-600 dark:text-zinc-300'
+                      }`}
+                    >
+                      {firestoreConnection === 'online'
+                        ? 'Server Online'
+                        : firestoreConnection === 'offline'
+                          ? 'Offline'
+                          : 'Checking...'}
+                    </span>
+                  </div>
+
                   <div className="flex items-start gap-2">
                     <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
                     <p>
@@ -711,29 +771,98 @@ export default function SettingsView({
                   </div>
                 </div>
 
-                {user && (
-                  <div className="space-y-2">
-                    <button
-                      type="button"
-                      disabled={isSyncingAll}
-                      onClick={() => void onSyncAllToCloud()}
-                      className="inline-flex w-full min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2 font-medium text-zinc-800 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                    >
-                      <RefreshCw
-                        className={`h-3.5 w-3.5 ${isSyncingAll ? 'animate-spin' : ''}`}
-                        aria-hidden="true"
-                      />
-                      <span>
-                        {isSyncingAll ? 'Syncing all projects...' : 'Sync All Projects to Cloud'}
-                      </span>
-                    </button>
-                    {lastSyncSummary && (
-                      <p className="text-center text-[11px] text-emerald-600 dark:text-emerald-400">
-                        {lastSyncSummary}
-                      </p>
-                    )}
+                {/* Per-Project Firestore Verification Ledger */}
+                {projects.length > 0 && (
+                  <div className="rounded-xl border border-zinc-200/80 bg-white/80 dark:border-zinc-800 dark:bg-zinc-900/60 overflow-hidden">
+                    <div className="flex items-center justify-between border-b border-zinc-200/80 px-3 py-2 text-[11px] font-medium text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">
+                      <span>Per-Project Firestore Status</span>
+                      {lastVerifiedAt && (
+                        <span className="text-[10px] text-zinc-400">
+                          Checked {new Date(lastVerifiedAt).toLocaleTimeString()}
+                        </span>
+                      )}
+                    </div>
+                    <div className="max-h-44 divide-y divide-zinc-200/70 overflow-y-auto dark:divide-zinc-800 mist-scrollbar">
+                      {projects.map((p) => {
+                        const rec = syncRecords[p.id];
+                        const statusText = !user
+                          ? 'Local only'
+                          : rec?.state === 'syncing'
+                            ? 'Syncing...'
+                            : rec?.state === 'error'
+                              ? 'Sync error'
+                              : rec?.state === 'synced'
+                                ? `Synced (${rec.cloudFileCount ?? p.files.length} files)`
+                                : 'Pending sync';
+                        const badgeClass = !user
+                          ? 'text-zinc-500'
+                          : rec?.state === 'syncing'
+                            ? 'text-blue-600 dark:text-blue-400'
+                            : rec?.state === 'error'
+                              ? 'text-red-600 dark:text-red-400'
+                              : rec?.state === 'synced'
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : 'text-amber-600 dark:text-amber-400';
+
+                        return (
+                          <div
+                            key={p.id}
+                            className="flex items-center justify-between gap-2 px-3 py-2 text-[11px]"
+                          >
+                            <div className="min-w-0">
+                              <p className="font-medium text-zinc-900 dark:text-zinc-100 truncate">
+                                {p.name}
+                              </p>
+                              <p className="font-mono text-[10px] text-zinc-400 truncate">
+                                {p.id} · {p.files.length} local files
+                              </p>
+                            </div>
+                            <span className={`font-semibold whitespace-nowrap shrink-0 ${badgeClass}`}>
+                              {statusText}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
+
+                <div className="space-y-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      disabled={isVerifyingCloud}
+                      onClick={() => void onVerifyCloudSync()}
+                      className="inline-flex w-full min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-3 py-2 font-medium text-zinc-800 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                    >
+                      <CheckCircle2
+                        className={`h-3.5 w-3.5 ${isVerifyingCloud ? 'animate-pulse text-blue-500' : 'text-emerald-600 dark:text-emerald-400'}`}
+                        aria-hidden="true"
+                      />
+                      <span>{isVerifyingCloud ? 'Verifying...' : 'Verify in Firestore'}</span>
+                    </button>
+
+                    {user && (
+                      <button
+                        type="button"
+                        disabled={isSyncingAll}
+                        onClick={() => void onSyncAllToCloud()}
+                        className="inline-flex w-full min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-3 py-2 font-medium text-zinc-800 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                      >
+                        <RefreshCw
+                          className={`h-3.5 w-3.5 ${isSyncingAll ? 'animate-spin' : ''}`}
+                          aria-hidden="true"
+                        />
+                        <span>{isSyncingAll ? 'Syncing...' : 'Sync All to Cloud'}</span>
+                      </button>
+                    )}
+                  </div>
+                  {lastSyncSummary && (
+                    <p className="text-center text-[11px] text-emerald-600 dark:text-emerald-400">
+                      {lastSyncSummary}
+                    </p>
+                  )}
+                </div>
               </div>
             </motion.section>
 

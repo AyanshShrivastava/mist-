@@ -6,10 +6,12 @@ import type {
   DeploymentRecord,
   MistProject,
   ProjectFile,
+  ProjectSyncRecord,
   SelectedVisualElement,
   StudioSettings,
 } from './types/mist';
 import type { ModelHealthIncident } from './utils/aiErrors';
+import { normalizeProviderConfigToStudio } from './data/models';
 import {
   applyVisualPatchToFiles,
   buildExportManifest,
@@ -21,6 +23,7 @@ import {
   sanitizeSlug,
 } from './utils/projectOps';
 import {
+  checkFirestoreServerConnection,
   fetchUserProfilePreferences,
   signInWithGoogle,
   signOutUser,
@@ -30,10 +33,13 @@ import {
 import {
   clearKnownCloudProjects,
   deleteProjectFromFirestore,
+  getSyncRecordsSnapshot,
   listUserProjectsFromFirestore,
   saveDeploymentToFirestore,
   saveProjectToFirestore,
+  subscribeToSyncStatus,
   syncLocalProjectsToFirestore,
+  verifyUserProjectsInFirestore,
 } from './firebase/store';
 import HomeView from './components/HomeView';
 import WorkspaceView from './components/WorkspaceView';
@@ -72,7 +78,9 @@ function loadLocalProjects(): MistProject[] {
 function loadProviderConfig(): AiProviderConfig {
   try {
     const raw = localStorage.getItem(STORAGE_PROVIDER_KEY);
-    if (raw) return JSON.parse(raw) as AiProviderConfig;
+    if (raw) {
+      return normalizeProviderConfigToStudio(JSON.parse(raw) as AiProviderConfig);
+    }
   } catch {
     // ignore
   }
@@ -132,7 +140,15 @@ export default function App() {
   // Deploy, Cloud Sync & Modals state
   const [isSavingCloud, setIsSavingCloud] = useState(false);
   const [isSyncingAll, setIsSyncingAll] = useState(false);
+  const [isVerifyingCloud, setIsVerifyingCloud] = useState(false);
+  const [lastVerifiedAt, setLastVerifiedAt] = useState<string | null>(null);
   const [lastSyncSummary, setLastSyncSummary] = useState<string | null>(null);
+  const [syncRecords, setSyncRecords] = useState<Record<string, ProjectSyncRecord>>(() =>
+    getSyncRecordsSnapshot(),
+  );
+  const [firestoreConnection, setFirestoreConnection] = useState<'checking' | 'online' | 'offline'>(
+    'checking',
+  );
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
   const [publishedUrl, setPublishedUrl] = useState<string | null>(null);
@@ -147,6 +163,17 @@ export default function App() {
   const darkMode = studioSettings.theme === 'dark';
   const bundleTimerRef = useRef<number | null>(null);
   const cloudSaveTimerRef = useRef<number | null>(null);
+
+  // Subscribe to per-project Firestore sync records & check Firestore connection
+  useEffect(() => {
+    const unsubSync = subscribeToSyncStatus(() => {
+      setSyncRecords(getSyncRecordsSnapshot());
+    });
+    void checkFirestoreServerConnection().then((status) => {
+      setFirestoreConnection(status);
+    });
+    return unsubSync;
+  }, []);
 
   // Sync dark mode class on <html> + persist studioSettings
   useEffect(() => {
@@ -263,6 +290,7 @@ export default function App() {
           setIsSavingCloud(true);
           try {
             await saveProjectToFirestore(snapshot);
+            setFirestoreConnection('online');
           } catch {
             // Logged in firebase/client.ts
           } finally {
@@ -363,14 +391,15 @@ export default function App() {
         setAuthPromptReason(null);
         try {
           const cloudPrefs = await fetchUserProfilePreferences(firebaseUser);
+          setFirestoreConnection('online');
           if (cloudPrefs) {
             if (cloudPrefs.preferredProvider || cloudPrefs.preferredModel) {
               setProviderConfig((prev) => {
-                const updated: AiProviderConfig = {
+                const updated = normalizeProviderConfigToStudio({
                   ...prev,
                   provider: cloudPrefs.preferredProvider || prev.provider,
                   model: cloudPrefs.preferredModel || prev.model,
-                };
+                });
                 try {
                   localStorage.setItem(STORAGE_PROVIDER_KEY, JSON.stringify(updated));
                 } catch {
@@ -419,6 +448,7 @@ export default function App() {
           if (localOnly.length > 0) {
             await syncLocalProjectsToFirestore(localOnly, cloudIds);
           }
+          setLastVerifiedAt(new Date().toISOString());
         } catch {
           // Errors logged in firebase/client.ts
         }
@@ -595,7 +625,8 @@ export default function App() {
     }
   };
 
-  const handleSaveProvider = (next: AiProviderConfig) => {
+  const handleSaveProvider = (rawNext: AiProviderConfig) => {
+    const next = normalizeProviderConfigToStudio(rawNext);
     setProviderConfig(next);
     setModelIncident((prev) =>
       prev && (prev.provider !== next.provider || prev.model !== next.model) ? null : prev,
@@ -636,8 +667,11 @@ export default function App() {
       for (const project of projects) {
         await saveProjectToFirestore(project);
       }
+      const verified = await verifyUserProjectsInFirestore(user.uid, projects);
+      setFirestoreConnection('online');
+      setLastVerifiedAt(verified.verifiedAt);
       setLastSyncSummary(
-        `Synced all ${projects.length} project${projects.length === 1 ? '' : 's'} to cloud.`,
+        `Synced & verified all ${projects.length} project${projects.length === 1 ? '' : 's'} in Firestore.`,
       );
     } catch (err) {
       setLastSyncSummary(
@@ -645,6 +679,34 @@ export default function App() {
       );
     } finally {
       setIsSyncingAll(false);
+    }
+  };
+
+  const handleVerifyFirestoreSync = async () => {
+    if (!user) {
+      const status = await checkFirestoreServerConnection();
+      setFirestoreConnection(status);
+      setLastVerifiedAt(new Date().toISOString());
+      return;
+    }
+    setIsVerifyingCloud(true);
+    setLastSyncSummary(null);
+    try {
+      const status = await checkFirestoreServerConnection();
+      setFirestoreConnection(status);
+      const res = await verifyUserProjectsInFirestore(user.uid, projectsRef.current);
+      setLastVerifiedAt(res.verifiedAt);
+      setLastSyncSummary(
+        res.allSynced
+          ? `Verified directly from Firestore server: ${projectsRef.current.length} of ${projectsRef.current.length} projects & file trees match.`
+          : `Verified against Firestore server: found ${res.cloudProjectCount} cloud projects; some local edits are pending sync.`,
+      );
+    } catch (err) {
+      setLastSyncSummary(
+        err instanceof Error ? err.message : 'Unable to verify Firestore server state.',
+      );
+    } finally {
+      setIsVerifyingCloud(false);
     }
   };
 
@@ -667,6 +729,8 @@ export default function App() {
       clearKnownCloudProjects();
       setProjects([]);
       setActiveProjectId(null);
+      setLastVerifiedAt(null);
+      setLastSyncSummary(null);
       try {
         localStorage.removeItem(STORAGE_PROJECTS_KEY);
       } catch {
@@ -688,13 +752,18 @@ export default function App() {
           providerConfig={providerConfig}
           studioSettings={studioSettings}
           modelIncident={modelIncident}
+          syncRecords={syncRecords}
+          firestoreConnection={firestoreConnection}
           isSyncingAll={isSyncingAll}
+          isVerifyingCloud={isVerifyingCloud}
+          lastVerifiedAt={lastVerifiedAt}
           lastSyncSummary={lastSyncSummary}
           onBack={() => setActivePage('home')}
           onSaveProvider={handleSaveProvider}
           onUpdateSettings={handleUpdateSettings}
           onIncident={setModelIncident}
           onSyncAllToCloud={handleSyncAllToCloud}
+          onVerifyCloudSync={handleVerifyFirestoreSync}
           onSignIn={() => void handleGoogleSignIn()}
           onSignOut={() => void handleSignOut()}
         />
@@ -704,6 +773,7 @@ export default function App() {
           project={activeProject}
           user={user}
           providerConfig={providerConfig}
+          syncRecord={syncRecords[activeProject.id]}
           defaultViewMode={studioSettings.defaultViewMode}
           defaultViewport={studioSettings.defaultViewport}
           modelIncident={modelIncident}
@@ -780,6 +850,9 @@ export default function App() {
           deployments={deployments}
           providerConfig={providerConfig}
           modelIncident={modelIncident}
+          syncRecords={syncRecords}
+          firestoreConnection={firestoreConnection}
+          isSyncingAll={isSyncingAll}
           isGenerating={isGenerating}
           generationError={generationError}
           darkMode={darkMode}
@@ -793,6 +866,7 @@ export default function App() {
           onOpenProject={(project) => setActiveProjectId(project.id)}
           onDuplicateProject={handleDuplicateProject}
           onDeleteProject={handleDeleteProject}
+          onSyncAllToCloud={() => void handleSyncAllToCloud()}
           onOpenProviders={() => setProvidersOpen(true)}
           onOpenSettings={() => setActivePage('settings')}
           onOpenDeployments={() => {
