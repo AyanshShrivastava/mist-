@@ -25,6 +25,57 @@ export function sanitizeSlug(input: string): string {
   return normalized;
 }
 
+const SLUG_STOP_WORDS = new Set([
+  'a',
+  'an',
+  'the',
+  'and',
+  'for',
+  'with',
+  'website',
+  'app',
+  'application',
+  'platform',
+  'builder',
+  'page',
+]);
+
+export function suggestShortSlug(input: string, maxLen = 24): string {
+  const tokens = input
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]+/g, ' ')
+    .split(/[\s-]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && !SLUG_STOP_WORDS.has(t));
+
+  if (tokens.length === 0) {
+    return sanitizeSlug(input).slice(0, maxLen).replace(/-+$/g, '') || sanitizeSlug(input);
+  }
+
+  let acc = '';
+  for (const token of tokens) {
+    const candidate = acc ? `${acc}-${token}` : token;
+    if (candidate.length <= maxLen) {
+      acc = candidate;
+    } else if (!acc) {
+      acc = token.slice(0, maxLen);
+      break;
+    } else {
+      break;
+    }
+  }
+  const cleaned = acc.replace(/^-+|-+$/g, '');
+  return cleaned.length >= 2 ? cleaned : sanitizeSlug(input).slice(0, maxLen);
+}
+
+export function maskApiKey(apiKey?: string): string {
+  const trimmed = (apiKey || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.length <= 6) return '••••••';
+  if (trimmed.length <= 10) return `•••${trimmed.slice(-3)}`;
+  return `${trimmed.slice(0, 4)}••••${trimmed.slice(-4)}`;
+}
+
 export function inferLanguageFromPath(filePath: string): FileLanguage {
   if (filePath.endsWith('.tsx')) return 'tsx';
   if (filePath.endsWith('.ts')) return 'ts';

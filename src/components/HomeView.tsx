@@ -47,6 +47,7 @@ import {
 } from '../data/models';
 import MistLogo, { MistMark } from './MistLogo';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
+import { maskApiKey } from '../utils/projectOps';
 
 interface HomeViewProps {
   user: User | null;
@@ -846,6 +847,22 @@ export default function HomeView({
                       </button>
                     </div>
 
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-zinc-200/80 bg-zinc-50 px-2.5 py-1.5 text-[11px] text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+                      <span>
+                        Active Key:{' '}
+                        <span className="font-mono font-semibold text-zinc-900 dark:text-zinc-100">
+                          {maskApiKey(providerConfig.apiKey) || 'Not set'}
+                        </span>
+                      </span>
+                      <span>
+                        {user?.email
+                          ? providerConfig.sessionOnlyKey
+                            ? 'Session RAM only'
+                            : `Encrypted vault: ${user.email}`
+                          : 'Sign in to sync key to account'}
+                      </span>
+                    </div>
+
                     <ModelSelectorDropdown
                       provider="custom"
                       value={providerConfig.model}
@@ -1032,13 +1049,13 @@ export default function HomeView({
                           <>
                             <span className="text-xs text-zinc-400">·</span>
                             <a
-                              href={`/p/${project.publishedSlug}`}
+                              href={`/${project.publishedSlug}`}
                               target="_blank"
                               rel="noreferrer"
                               className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline dark:text-emerald-400"
                             >
                               <Globe className="h-3 w-3" aria-hidden="true" />
-                              <span>/p/{project.publishedSlug}</span>
+                              <span>/{project.publishedSlug}</span>
                             </a>
                           </>
                         )}

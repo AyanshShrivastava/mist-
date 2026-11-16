@@ -95,11 +95,29 @@ export interface ByokCompletionOptions {
   skipDnsLookup?: boolean;
 }
 
+export function extractChoiceText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part === 'object') {
+          const obj = part as { text?: unknown; content?: unknown };
+          if (typeof obj.text === 'string') return obj.text;
+          if (typeof obj.content === 'string') return obj.content;
+        }
+        return '';
+      })
+      .join('');
+  }
+  return '';
+}
+
 export async function callByokCompletionRaw(params: ByokCompletionOptions): Promise<string> {
   const {
     messages,
     jsonMode = true,
-    temperature = 0.4,
+    temperature = 0.3,
     maxTokens = 10240,
     timeoutMs = 90_000,
     signal,
@@ -165,9 +183,9 @@ export async function callByokCompletionRaw(params: ByokCompletionOptions): Prom
   }
 
   const data = (await resp.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    choices?: Array<{ message?: { content?: unknown } }>;
   };
-  const content = data.choices?.[0]?.message?.content;
+  const content = extractChoiceText(data.choices?.[0]?.message?.content);
   if (!content) {
     throw new ProviderHttpError(502, `${providerLabel} returned an empty response.`);
   }
@@ -192,7 +210,7 @@ export async function streamByokCompletion(params: StreamByokOptions): Promise<s
   const {
     messages,
     jsonMode = true,
-    temperature = 0.4,
+    temperature = 0.3,
     maxTokens = 12288,
     connectTimeoutMs = 25_000,
     idleTimeoutMs = 45_000,
@@ -319,13 +337,15 @@ export async function streamByokCompletion(params: StreamByokOptions): Promise<s
       if (!payload || payload === '[DONE]') return;
       try {
         const parsed = JSON.parse(payload) as {
-          choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>;
+          choices?: Array<{ delta?: { content?: unknown }; message?: { content?: unknown } }>;
           error?: { message?: string };
         };
         if (parsed.error?.message) {
           throw new ProviderHttpError(502, redactSecrets(parsed.error.message));
         }
-        const delta = parsed.choices?.[0]?.delta?.content ?? parsed.choices?.[0]?.message?.content ?? '';
+        const delta = extractChoiceText(
+          parsed.choices?.[0]?.delta?.content ?? parsed.choices?.[0]?.message?.content,
+        );
         if (delta) {
           fullContent += delta;
           onDelta(fullContent);

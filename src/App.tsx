@@ -35,7 +35,9 @@ import {
   sanitizeSlug,
 } from './utils/projectOps';
 import {
+  fetchUserEncryptedVault,
   fetchUserProfilePreferences,
+  saveUserEncryptedVault,
   signInWithGoogle,
   signOutUser,
   subscribeToAuth,
@@ -60,8 +62,8 @@ import {
 } from './components/Modals';
 
 const STORAGE_PROJECTS_KEY = 'mist_projects_v1';
-const STORAGE_PROVIDER_KEY = 'mist_provider_v1';
-const STORAGE_SEARCH_KEY = 'mist_search_v1';
+const LEGACY_STORAGE_PROVIDER_KEY = 'mist_provider_v1';
+const LEGACY_STORAGE_SEARCH_KEY = 'mist_search_v1';
 const STORAGE_SETTINGS_KEY = 'mist_settings_v1';
 const STORAGE_THEME_KEY = 'mist_theme_v1';
 
@@ -85,49 +87,12 @@ function loadLocalProjects(): MistProject[] {
   }
 }
 
-function loadProviderConfig(): AiProviderConfig {
+function scrubLegacyCredentialStorage(): void {
   try {
-    const raw = localStorage.getItem(STORAGE_PROVIDER_KEY);
-    if (raw) {
-      return normalizeProviderConfigToStudio(JSON.parse(raw) as AiProviderConfig);
-    }
+    localStorage.removeItem(LEGACY_STORAGE_PROVIDER_KEY);
+    localStorage.removeItem(LEGACY_STORAGE_SEARCH_KEY);
   } catch {
-    // ignore
-  }
-  return { ...DEFAULT_BYOK_CONFIG };
-}
-
-function persistProviderConfig(config: AiProviderConfig): void {
-  try {
-    const safeToPersist: AiProviderConfig = config.sessionOnlyKey
-      ? { ...config, apiKey: '' }
-      : config;
-    localStorage.setItem(STORAGE_PROVIDER_KEY, JSON.stringify(safeToPersist));
-  } catch {
-    // ignore
-  }
-}
-
-function loadWebSearchConfig(): WebSearchConfig {
-  try {
-    const raw = localStorage.getItem(STORAGE_SEARCH_KEY);
-    if (raw) {
-      return normalizeWebSearchConfig(JSON.parse(raw) as Partial<WebSearchConfig>);
-    }
-  } catch {
-    // ignore
-  }
-  return { ...DEFAULT_WEB_SEARCH_CONFIG };
-}
-
-function persistWebSearchConfig(config: WebSearchConfig): void {
-  try {
-    const safeToPersist: WebSearchConfig = config.sessionOnlyKey
-      ? { ...config, apiKey: '' }
-      : config;
-    localStorage.setItem(STORAGE_SEARCH_KEY, JSON.stringify(safeToPersist));
-  } catch {
-    // ignore
+    // ignore storage access issues
   }
 }
 
@@ -249,11 +214,15 @@ export default function App() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activePage, setActivePage] = useState<'home' | 'settings'>('home');
   const [deployments, setDeployments] = useState<DeploymentRecord[]>([]);
-  const [providerConfig, setProviderConfig] = useState<AiProviderConfig>(() => loadProviderConfig());
+  const [providerConfig, setProviderConfig] = useState<AiProviderConfig>(() => ({
+    ...DEFAULT_BYOK_CONFIG,
+  }));
   const providerConfigRef = useRef(providerConfig);
   providerConfigRef.current = providerConfig;
 
-  const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig>(() => loadWebSearchConfig());
+  const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig>(() => ({
+    ...DEFAULT_WEB_SEARCH_CONFIG,
+  }));
   const webSearchConfigRef = useRef(webSearchConfig);
   webSearchConfigRef.current = webSearchConfig;
 
@@ -292,6 +261,97 @@ export default function App() {
   const cloudSaveTimerRef = useRef<number | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
   const refineAbortRef = useRef<AbortController | null>(null);
+  const ignorePopRef = useRef(false);
+
+  // Never store API keys in browser localStorage: purge any legacy plaintext keys on startup
+  useEffect(() => {
+    scrubLegacyCredentialStorage();
+  }, []);
+
+  // Browser Back / Forward navigation helper between Home, Workspace, and Settings
+  const navigateToHome = useCallback(() => {
+    setActivePage('home');
+    setActiveProjectId(null);
+    setPublishedUrl(null);
+    if (typeof window !== 'undefined' && window.history.state?.mistView) {
+      window.history.pushState({ mistView: 'home' }, '');
+    }
+  }, []);
+
+  const navigateToProject = useCallback((projectId: string) => {
+    setActivePage('home');
+    setActiveProjectId(projectId);
+    setPublishedUrl(null);
+    if (typeof window !== 'undefined') {
+      window.history.pushState({ mistView: 'project', projectId }, '');
+    }
+  }, []);
+
+  const navigateToSettings = useCallback(() => {
+    setActivePage('settings');
+    if (typeof window !== 'undefined') {
+      window.history.pushState({ mistView: 'settings', projectId: activeProjectId }, '');
+    }
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!window.history.state?.mistView) {
+      window.history.replaceState({ mistView: 'home' }, '');
+    }
+    const handlePopState = () => {
+      ignorePopRef.current = true;
+      const st = window.history.state as { mistView?: string; projectId?: string | null } | null;
+      if (st?.mistView === 'settings') {
+        setActivePage('settings');
+      } else if (st?.mistView === 'project' && st.projectId) {
+        setActivePage('home');
+        setActiveProjectId(st.projectId);
+      } else {
+        setActivePage('home');
+        setActiveProjectId(null);
+        setPublishedUrl(null);
+      }
+      queueMicrotask(() => {
+        ignorePopRef.current = false;
+      });
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Encrypt & persist BYOK AI + Search credentials to Firestore bound to the signed-in Google email
+  const syncCredentialsToAccountVault = useCallback(
+    async (firebaseUser: User, nextAi: AiProviderConfig, nextSearch: WebSearchConfig) => {
+      try {
+        const idToken = await firebaseUser.getIdToken();
+        const resp = await fetch('/api/user/vault/seal', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({ aiConfig: nextAi, searchConfig: nextSearch }),
+        });
+        if (!resp.ok) return;
+        const sealed = (await resp.json()) as {
+          encryptedPayload?: string;
+          aiKeyHint?: string;
+          searchKeyHint?: string;
+        };
+        if (sealed.encryptedPayload) {
+          await saveUserEncryptedVault(firebaseUser, {
+            ciphertext: sealed.encryptedPayload,
+            aiKeyHint: sealed.aiKeyHint,
+            searchKeyHint: sealed.searchKeyHint,
+          });
+        }
+      } catch {
+        // Non-blocking account vault sync
+      }
+    },
+    [],
+  );
 
   // Sync dark mode class on <html> + persist studioSettings
   useEffect(() => {
@@ -626,8 +686,7 @@ export default function App() {
         };
 
         setProjects((prev) => [newProject, ...prev]);
-        setActivePage('home');
-        setActiveProjectId(newProject.id);
+        navigateToProject(newProject.id);
         if (currentUser) {
           void saveProjectToFirestore(newProject, { isNew: true }).catch(() => {});
         }
@@ -653,24 +712,27 @@ export default function App() {
     [],
   );
 
-  // Subscribe once to Auth state changes; hydrate settings & background cloud sync
+  // Subscribe once to Auth state changes; hydrate settings, email-bound encrypted vault, & cloud sync
   useEffect(() => {
     const unsub = subscribeToAuth(async (firebaseUser) => {
       setUser(firebaseUser);
       if (firebaseUser) {
         setAuthPromptReason(null);
         try {
-          const cloudPrefs = await fetchUserProfilePreferences(firebaseUser);
+          const [cloudPrefs, encryptedVault] = await Promise.all([
+            fetchUserProfilePreferences(firebaseUser),
+            fetchUserEncryptedVault(firebaseUser),
+          ]);
+
+          let hydratedAiConfig = providerConfigRef.current;
+          let hydratedSearchConfig = webSearchConfigRef.current;
+
           if (cloudPrefs) {
             if (cloudPrefs.preferredProvider || cloudPrefs.preferredModel) {
-              setProviderConfig((prev) => {
-                const updated = normalizeProviderConfigToStudio({
-                  ...prev,
-                  provider: cloudPrefs.preferredProvider || prev.provider,
-                  model: cloudPrefs.preferredModel || prev.model,
-                });
-                persistProviderConfig(updated);
-                return updated;
+              hydratedAiConfig = normalizeProviderConfigToStudio({
+                ...hydratedAiConfig,
+                provider: cloudPrefs.preferredProvider || hydratedAiConfig.provider,
+                model: cloudPrefs.preferredModel || hydratedAiConfig.model,
               });
             }
             setStudioSettings((prev) => {
@@ -692,9 +754,58 @@ export default function App() {
             });
           }
 
+          if (encryptedVault?.ciphertext) {
+            try {
+              const idToken = await firebaseUser.getIdToken();
+              const unsealResp = await fetch('/api/user/vault/unseal', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${idToken}`,
+                },
+                body: JSON.stringify({ encryptedPayload: encryptedVault.ciphertext }),
+              });
+              if (unsealResp.ok) {
+                const unsealed = (await unsealResp.json()) as {
+                  aiConfig?: AiProviderConfig;
+                  searchConfig?: WebSearchConfig;
+                };
+                if (unsealed.aiConfig) {
+                  hydratedAiConfig = normalizeProviderConfigToStudio({
+                    ...hydratedAiConfig,
+                    ...unsealed.aiConfig,
+                    // Preserve any key typed before sign-in if the account vault had no key yet
+                    apiKey: unsealed.aiConfig.apiKey || hydratedAiConfig.apiKey || '',
+                  });
+                }
+                if (unsealed.searchConfig) {
+                  hydratedSearchConfig = normalizeWebSearchConfig({
+                    ...hydratedSearchConfig,
+                    ...unsealed.searchConfig,
+                    apiKey: unsealed.searchConfig.apiKey || hydratedSearchConfig.apiKey || '',
+                  });
+                }
+              }
+            } catch {
+              // Non-blocking decrypt failure keeps memory defaults
+            }
+          } else if (
+            hydratedAiConfig.apiKey?.trim() ||
+            hydratedSearchConfig.apiKey?.trim()
+          ) {
+            void syncCredentialsToAccountVault(
+              firebaseUser,
+              hydratedAiConfig,
+              hydratedSearchConfig,
+            );
+          }
+
+          setProviderConfig(hydratedAiConfig);
+          setWebSearchConfig(hydratedSearchConfig);
+
           await syncUserProfile(firebaseUser, {
-            preferredProvider: cloudPrefs?.preferredProvider || providerConfigRef.current.provider,
-            preferredModel: cloudPrefs?.preferredModel || providerConfigRef.current.model,
+            preferredProvider: hydratedAiConfig.provider || cloudPrefs?.preferredProvider,
+            preferredModel: hydratedAiConfig.model || cloudPrefs?.preferredModel,
             theme: cloudPrefs?.theme || studioSettingsRef.current.theme,
             defaultViewMode: cloudPrefs?.defaultViewMode || studioSettingsRef.current.defaultViewMode,
             defaultViewport: cloudPrefs?.defaultViewport || studioSettingsRef.current.defaultViewport,
@@ -738,7 +849,7 @@ export default function App() {
       }
     });
     return unsub;
-  }, [executeGenerateWebsite, refreshDeployments]);
+  }, [executeGenerateWebsite, navigateToProject, refreshDeployments, syncCredentialsToAccountVault]);
 
   // Require sign-in when clicking Generate Website on the front page
   const handleGenerateWebsite = (prompt: string) => {
@@ -756,7 +867,7 @@ export default function App() {
   const handleDuplicateProject = (target: MistProject) => {
     const copy = duplicateProjectData(target);
     setProjects((prev) => [copy, ...prev]);
-    setActiveProjectId(copy.id);
+    navigateToProject(copy.id);
     if (user) {
       void saveProjectToFirestore(copy, { isNew: true }).catch(() => {});
     }
@@ -1077,12 +1188,13 @@ export default function App() {
     setModelIncident((prev) =>
       prev && (prev.provider !== next.provider || prev.model !== next.model) ? null : prev,
     );
-    persistProviderConfig(next);
+    scrubLegacyCredentialStorage();
     if (user) {
       void syncUserProfile(user, {
         preferredProvider: next.provider,
         preferredModel: next.model,
       }).catch(() => {});
+      void syncCredentialsToAccountVault(user, next, webSearchConfigRef.current);
     }
   };
 
@@ -1091,7 +1203,10 @@ export default function App() {
     setWebSearchConfig(next);
     setGenerationError(null);
     setRefineError(null);
-    persistWebSearchConfig(next);
+    scrubLegacyCredentialStorage();
+    if (user) {
+      void syncCredentialsToAccountVault(user, providerConfigRef.current, next);
+    }
   };
 
   const handleUpdateSettings = (partial: Partial<StudioSettings>) => {
@@ -1135,10 +1250,25 @@ export default function App() {
   const handleSignOut = async () => {
     setAuthError(null);
     try {
+      if (user) {
+        try {
+          const idToken = await user.getIdToken();
+          await fetch('/api/ai/session/revoke-all', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${idToken}` },
+          });
+        } catch {
+          // Best-effort session revocation before sign-out
+        }
+      }
       await signOutUser();
       clearKnownCloudProjects();
+      scrubLegacyCredentialStorage();
       setProjects([]);
+      setProviderConfig({ ...DEFAULT_BYOK_CONFIG });
+      setWebSearchConfig({ ...DEFAULT_WEB_SEARCH_CONFIG });
       setActiveProjectId(null);
+      setActivePage('home');
       try {
         localStorage.removeItem(STORAGE_PROJECTS_KEY);
       } catch {
@@ -1186,10 +1316,7 @@ export default function App() {
           isRefining={isRefining}
           streamProgress={aiStreamProgress}
           refineError={refineError}
-          onBackHome={() => {
-            setActiveProjectId(null);
-            setPublishedUrl(null);
-          }}
+          onBackHome={navigateToHome}
           onUpdateProjectName={(name) =>
             updateActiveProject((prev) => ({ ...prev, name: name.slice(0, 120) }))
           }
@@ -1236,13 +1363,13 @@ export default function App() {
             setDeployError(null);
             setPublishedUrl(
               activeProject.isPublished && activeProject.publishedSlug
-                ? `/p/${activeProject.publishedSlug}`
+                ? `/${activeProject.publishedSlug}`
                 : null,
             );
             setDeployOpen(true);
           }}
           onOpenProviders={() => setProvidersOpen(true)}
-          onOpenSettings={() => setActivePage('settings')}
+          onOpenSettings={navigateToSettings}
           onOpenAccount={() => {
             setAuthPromptReason(null);
             setAccountOpen(true);
@@ -1273,11 +1400,11 @@ export default function App() {
           onGenerate={handleGenerateWebsite}
           onCancelGeneration={handleCancelGeneration}
           onOpenVoiceChat={() => setVoiceChatOpen(true)}
-          onOpenProject={(project) => setActiveProjectId(project.id)}
+          onOpenProject={(project) => navigateToProject(project.id)}
           onDuplicateProject={handleDuplicateProject}
           onDeleteProject={handleDeleteProject}
           onOpenProviders={() => setProvidersOpen(true)}
-          onOpenSettings={() => setActivePage('settings')}
+          onOpenSettings={navigateToSettings}
           onOpenDeployments={() => {
             void refreshDeployments(user);
             setDeploymentsListOpen(true);

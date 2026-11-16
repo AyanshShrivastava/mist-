@@ -8,6 +8,7 @@ import {
   type User,
 } from 'firebase/auth';
 import {
+  deleteDoc,
   doc,
   enableNetwork,
   getDoc,
@@ -38,6 +39,15 @@ export interface UserProfilePreferences {
   enableAppAi?: boolean;
   appAiMode?: AppAiMode;
   webSearchMode?: WebSearchMode;
+}
+
+export interface UserCredentialVaultDoc {
+  ownerId: string;
+  boundEmail: string;
+  algorithm: 'AES-256-GCM';
+  ciphertext: string;
+  aiKeyHint?: string;
+  searchKeyHint?: string;
 }
 
 const app = initializeApp(firebaseConfig);
@@ -313,5 +323,88 @@ export async function syncUserProfile(
     if (syncInFlight.get(user.uid) === next) {
       syncInFlight.delete(user.uid);
     }
+  }
+}
+
+export async function fetchUserEncryptedVault(
+  user: User,
+): Promise<UserCredentialVaultDoc | null> {
+  const vaultPath = `users/${user.uid}/private/credentials`;
+  const ref = doc(db, 'users', user.uid, 'private', 'credentials');
+  try {
+    await user.getIdToken();
+    const snap = await getDocServerOrCache(ref);
+    if (!snap || !snap.exists()) return null;
+    const data = snap.data();
+    if (typeof data.ciphertext !== 'string' || !data.ciphertext) {
+      return null;
+    }
+    return {
+      ownerId: String(data.ownerId || user.uid),
+      boundEmail: String(data.boundEmail || user.email || ''),
+      algorithm: 'AES-256-GCM',
+      ciphertext: data.ciphertext,
+      aiKeyHint: typeof data.aiKeyHint === 'string' ? data.aiKeyHint : undefined,
+      searchKeyHint: typeof data.searchKeyHint === 'string' ? data.searchKeyHint : undefined,
+    };
+  } catch (error) {
+    if (isOfflineFirestoreError(error)) return null;
+    handleFirestoreError(error, OperationType.GET, vaultPath);
+  }
+}
+
+export async function saveUserEncryptedVault(
+  user: User,
+  params: { ciphertext: string; aiKeyHint?: string; searchKeyHint?: string },
+): Promise<void> {
+  const email = (user.email || '').trim().slice(0, 254);
+  if (!email || !params.ciphertext) return;
+
+  const vaultPath = `users/${user.uid}/private/credentials`;
+  const ref = doc(db, 'users', user.uid, 'private', 'credentials');
+  const safeAiHint = (params.aiKeyHint || '').slice(0, 32);
+  const safeSearchHint = (params.searchKeyHint || '').slice(0, 32);
+
+  try {
+    await user.getIdToken();
+    const existingSnap = await getDocServerOrCache(ref);
+    if (!existingSnap) return;
+
+    if (!existingSnap.exists()) {
+      await setDoc(ref, {
+        ownerId: user.uid,
+        boundEmail: email,
+        algorithm: 'AES-256-GCM',
+        ciphertext: params.ciphertext.slice(0, 16384),
+        aiKeyHint: safeAiHint,
+        searchKeyHint: safeSearchHint,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(ref, {
+        boundEmail: email,
+        algorithm: 'AES-256-GCM',
+        ciphertext: params.ciphertext.slice(0, 16384),
+        aiKeyHint: safeAiHint,
+        searchKeyHint: safeSearchHint,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    if (isOfflineFirestoreError(error)) return;
+    handleFirestoreError(error, OperationType.WRITE, vaultPath);
+  }
+}
+
+export async function clearUserEncryptedVault(user: User): Promise<void> {
+  const vaultPath = `users/${user.uid}/private/credentials`;
+  const ref = doc(db, 'users', user.uid, 'private', 'credentials');
+  try {
+    await user.getIdToken();
+    await deleteDoc(ref);
+  } catch (error) {
+    if (isOfflineFirestoreError(error)) return;
+    handleFirestoreError(error, OperationType.DELETE, vaultPath);
   }
 }

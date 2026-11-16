@@ -28,7 +28,7 @@ import type {
   ModelVerificationResult,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
-import { sanitizeSlug } from '../utils/projectOps';
+import { maskApiKey, sanitizeSlug, suggestShortSlug } from '../utils/projectOps';
 import {
   CUSTOM_GATEWAY_PRESETS,
   detectGatewayFromBaseUrl,
@@ -446,6 +446,12 @@ export function ProvidersModal({
                   </button>
                 </div>
 
+                {maskApiKey(apiKey) && (
+                  <p className="mt-1.5 text-[11px] text-zinc-600 dark:text-zinc-300">
+                    Active Key: <span className="font-mono font-semibold text-blue-600 dark:text-blue-400">{maskApiKey(apiKey)}</span> — automatically backs <code className="font-mono">/api/app-ai</code> so generated apps never ask users for a key.
+                  </p>
+                )}
+
                 <label className="mt-2 flex items-center gap-2 text-[11px] text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
                   <input
                     type="checkbox"
@@ -453,8 +459,16 @@ export function ProvidersModal({
                     onChange={(e) => setSessionOnlyKey(e.target.checked)}
                     className="h-3.5 w-3.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-900"
                   />
-                  <span>Keep API key in memory only (clear automatically when tab closes)</span>
+                  <span>Keep API key in memory only (never saved to account vault; clears on close)</span>
                 </label>
+
+                <div className="mt-2 rounded-xl border border-zinc-200/80 bg-zinc-50 px-3 py-2 text-[11px] text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+                  {user?.email
+                    ? sessionOnlyKey
+                      ? `Session-only active: key stays strictly in RAM and will not sync to ${user.email}.`
+                      : `Encrypted with AES-256-GCM & synced to your signed-in account (${user.email}) — zero keys are stored in browser localStorage.`
+                    : 'Sign in with Google to encrypt & sync this key to your account email (zero localStorage key storage).'}
+                </div>
               </div>
 
               <div>
@@ -595,19 +609,22 @@ export function DeployModal({
   onDeploy,
 }: DeployModalProps) {
   const [slug, setSlug] = useState(
-    project?.publishedSlug || sanitizeSlug(project?.name || 'mist-site'),
+    project?.publishedSlug || suggestShortSlug(project?.name || 'mist-site'),
   );
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (isOpen && project) {
-      setSlug(project.publishedSlug || sanitizeSlug(project?.name || 'mist-site'));
+      setSlug(project.publishedSlug || suggestShortSlug(project?.name || 'mist-site'));
     }
   }, [isOpen, project]);
 
-  const fullUrl = publishedUrl
-    ? `${window.location.origin}${publishedUrl}`
-    : `${window.location.origin}/p/${sanitizeSlug(slug)}`;
+  const resolvedPath = publishedUrl
+    ? publishedUrl
+    : `/${sanitizeSlug(slug)}`;
+  const fullUrl = resolvedPath.startsWith('http')
+    ? resolvedPath
+    : `${window.location.origin}${resolvedPath.startsWith('/') ? resolvedPath : `/${resolvedPath}`}`;
 
   const handleCopy = async () => {
     try {
@@ -661,12 +678,21 @@ export function DeployModal({
 
             <div className="space-y-4 p-5 text-xs">
               <div>
-                <label htmlFor="mist-deploy-slug" className="block font-medium text-zinc-700 dark:text-zinc-300">
-                  Deployment Slug
-                </label>
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="mist-deploy-slug" className="block font-medium text-zinc-700 dark:text-zinc-300">
+                    Short Deployment URL Path
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setSlug(suggestShortSlug(slug || project.name, 16))}
+                    className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400 cursor-pointer"
+                  >
+                    Shorten slug
+                  </button>
+                </div>
                 <div className="mt-1.5 flex items-center rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
                   <span className="border-r border-zinc-200 px-3 py-2 font-mono text-zinc-500 dark:border-zinc-800">
-                    /p/
+                    /
                   </span>
                   <input
                     id="mist-deploy-slug"
@@ -676,6 +702,9 @@ export function DeployModal({
                     className="flex-1 bg-transparent px-3 py-2 font-mono text-xs text-zinc-950 focus:outline-none dark:text-white"
                   />
                 </div>
+                <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                  Published cleanly at <code className="font-mono text-zinc-700 dark:text-zinc-300">/{sanitizeSlug(slug)}</code> (short custom domain base can be configured via <code className="font-mono">PUBLIC_APP_URL</code>).
+                </p>
               </div>
 
               {deployError && (

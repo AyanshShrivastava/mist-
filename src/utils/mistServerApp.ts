@@ -23,15 +23,18 @@ import {
   validateAndExtractCitations,
 } from '../data/webSearch';
 import { classifyModelError, type ModelHealthIncident } from './aiErrors';
-import { normalizeProjectFilePath, resolveAppEntryPath } from './projectOps';
+import { maskApiKey, normalizeProjectFilePath, resolveAppEntryPath } from './projectOps';
 import {
   createFirebaseAuthMiddleware,
   createPreviewAiSession,
   createRateLimiter,
   resolvePreviewAiSession,
+  revokeAllUserPreviewSessions,
   revokePreviewAiSession,
   sanitizeErrorMessage,
+  sealUserVaultPayload,
   SecurityValidationError,
+  unsealUserVaultPayload,
   validateProjectFilesPayload,
   verifyFirebaseAuthHeader,
   type AuthenticatedRequest,
@@ -47,6 +50,7 @@ import {
 } from './byokClient';
 import {
   createFirestoreDeploymentStore,
+  formatDeploymentUrl,
   type DeploymentStore,
 } from './deploymentStore';
 import {
@@ -844,7 +848,11 @@ export async function bundleProjectToHtml(params: {
 const SYSTEM_GENERATOR_PROMPT = `You are Mist, a senior product designer, interactive game developer, and React + TypeScript + Tailwind CSS + Three.js engineer.
 Generate clean, cohesive, responsive, fully playable/interactive web apps with strong contrast, crisp typography, mobile support, and zero broken links.
 
-CRITICAL RULES:
+LIGHTWEIGHT & HIGH-RELIABILITY ARCHITECTURE RULES:
+- Structure each project cleanly into 2 to 5 cohesive files max (e.g., src/App.tsx + 1-3 well-defined files in src/components/* + src/index.css). Keep state & types coherent across files so zero imports or props are broken.
+- Verify that EVERY local import (e.g. import Header from './components/Header') matches an actual file you return AND that the exported default/named symbol exists identically.
+- Write complete, rich, production-grade TypeScript code — NEVER use "// TODO", "...rest of code", empty click handlers, or placeholder cards.
+- Build genuine mobile-first + desktop responsive layouts (sm:, md:, lg: grids/flex, touch-friendly >=40px tap targets, no horizontal overflow on 390px viewports).
 - Use React 19, TypeScript (.tsx), and Tailwind CSS utility classes.
 - Allowed imports: 'react', 'react-dom/client', 'lucide-react', 'three', 'three/addons/*' (e.g., OrbitControls, RoomEnvironment), and local relative imports like './components/Navbar'.
 - NEVER use Sparkles, Star, or Wand icons from lucide-react; prefer crisp functional icons (Send, Play, RotateCcw, Cpu, ArrowRight, Terminal, Layers, Check, Pause, Trophy, Volume2).
@@ -866,9 +874,23 @@ THREE.JS & 3D RULES (apply when building 3D scenes, viewers, or 3D games):
 - Use THREE.ACESFilmicToneMapping, PMREMGenerator + RoomEnvironment for rich metallic/PBR reflections, and a warm DirectionalLight + cool HemisphereLight fill.
 - Build multi-part THREE.Group objects and procedural CanvasTextures (zero external 404 texture URLs), and never place CSS backdrop-blur over the WebGL viewport.
 
-LIVE AI FEATURES INSIDE GENERATED APPS (REQUESTED-ONLY POLICY):
+LIVE AI FEATURES & ACTIVE API KEY GUARANTEE:
+- Mist ALREADY authenticates and configures the user's active BYOK API key on the Mist backend behind POST /api/app-ai and window.mistAI.complete() / window.mistAI.chat().
+- Generated apps MUST NEVER prompt users for an API key, render an "Enter API Key" input box, or show "Missing API key" warnings!
 - Do NOT add chatbots, "Ask AI" widgets, or /api/app-ai calls to standard websites, portfolios, stores, 2D Canvas games, or Three.js apps unless specifically requested or enabled in the user instructions.
 - ONLY when AI features are explicitly requested or enabled in the prompt, implement real fetch('/api/app-ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, messages, systemInstruction }) }) calls returning { text } — with real loading & error states, never setTimeout/mock stubs.`;
+
+export function buildActiveKeyDirective(config?: AiProviderConfig): string {
+  if (!config) return '';
+  const providerTitle = config.name?.trim() || config.provider || 'BYOK Provider';
+  const masked = maskApiKey(config.apiKey);
+  if (!masked) {
+    return `\nACTIVE STUDIO RUNTIME CONTEXT:\n- Active Provider/Model: ${providerTitle} (${config.model}).`;
+  }
+  return `\nACTIVE STUDIO API KEY CONTEXT:
+- The user's active BYOK API key (${masked} on ${providerTitle} · ${config.model}) IS ALREADY CONFIGURED AND ACTIVE in Mist.
+- If the app uses AI features, POST /api/app-ai (and window.mistAI) automatically authenticates requests with that configured API key via Mist's secure session relay — NEVER ask the end-user to enter an API key or hardcode any raw secret string.`;
+}
 
 function extractJsonObject(raw: string): Record<string, unknown> {
   const trimmed = raw.trim();
@@ -899,17 +921,22 @@ function detectStreamedPaths(accumulatedText: string): string[] {
   return paths;
 }
 
-function buildGenerateUserPrompt(prompt: string, enableAppAi: boolean): string {
+export function buildGenerateUserPrompt(
+  prompt: string,
+  enableAppAi: boolean,
+  config?: AiProviderConfig,
+): string {
   const aiCapabilityDirective = enableAppAi
     ? '\n- Interactive App AI Runtime is requested/enabled: wire real fetch(\'/api/app-ai\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify({ prompt, messages, systemInstruction }) }) calls directly in the generated UI with real loading & error states.'
     : '\n- Do NOT include AI chatbots, "Ask AI" sidebars, or /api/app-ai calls — build a clean, self-contained application tailored purely to the user request.';
+  const activeKeyNote = buildActiveKeyDirective(config);
 
-  return `Build a complete, multi-file React + TypeScript + Tailwind CSS web app (or Three.js / Canvas game) for this request:
-"${prompt.trim()}"${aiCapabilityDirective}
+  return `Build a complete, high-craft React + TypeScript + Tailwind CSS web app (or Three.js / Canvas game) for this request:
+"${prompt.trim()}"${aiCapabilityDirective}${activeKeyNote}
 
 CRITICAL OUTPUT RULES:
 - "src/App.tsx" MUST be the VERY FIRST file in the "files" array and MUST default-export App (export default function App()).
-- Complete EVERY component and handler without placeholders or truncation.
+- Keep architecture tight (2 to 5 well-structured files max), verify all relative imports match returned files cleanly, and complete EVERY component and handler without placeholders or truncation.
 - Also include "src/index.css" starting with @import "tailwindcss";.
 - Respond strictly with valid JSON matching this shape:
 {
@@ -924,11 +951,12 @@ CRITICAL OUTPUT RULES:
 }`;
 }
 
-function buildRefineUserPrompt(
+export function buildRefineUserPrompt(
   instruction: string,
   files: ProjectFile[],
   selectedElement?: { tagName: string; textContent: string; className: string },
   enableAppAi?: boolean,
+  config?: AiProviderConfig,
 ): string {
   const fileBundleText = (files || [])
     .map((f) => `--- FILE: ${f.path} ---\n${f.content}`)
@@ -939,11 +967,12 @@ function buildRefineUserPrompt(
     : '';
 
   const aiDirective = enableAppAi
-    ? `- Wire real calls to POST /api/app-ai ({ prompt, messages, systemInstruction }) returning { text } if adding/updating live AI features — never fake setTimeout stubs.`
+    ? `- Wire real calls to POST /api/app-ai ({ prompt, messages, systemInstruction }) returning { text } if adding/updating live AI features — Mist's active BYOK API key backs /api/app-ai automatically (never ask the user for an API key or use setTimeout stubs).`
     : `- Do NOT introduce unrequested AI chatbots or /api/app-ai calls unless the instruction asks for them.`;
+  const activeKeyNote = buildActiveKeyDirective(config);
 
   return `Refine the existing application according to EVERY detail in this instruction:
-"${instruction.trim()}"${elementContext}
+"${instruction.trim()}"${elementContext}${activeKeyNote}
 
 MULTI-PART REFINEMENT MANDATE:
 - Read every clause in the user's message carefully (e.g., color/palette changes, game/canvas bug fixes, speed/physics tweaks, new buttons or panels, layout changes) and apply ALL of them together in this single pass!
@@ -999,6 +1028,8 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), payment=()');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     next();
   });
   app.use(express.json({ limit: '6mb' }));
@@ -1228,6 +1259,66 @@ Return JSON: { "content": "..." }`;
     },
   );
 
+  // Account-bound encrypted BYOK credential vault seal & unseal routes
+  app.post(
+    '/api/user/vault/seal',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'A Google account email is required to seal credentials.' });
+          return;
+        }
+        const { aiConfig, searchConfig } = req.body as {
+          aiConfig?: AiProviderConfig;
+          searchConfig?: WebSearchConfig;
+        };
+        const sealed = sealUserVaultPayload({
+          uid: user.uid,
+          email: user.email,
+          aiConfig: aiConfig ? normalizeProviderConfigToStudio(aiConfig) : undefined,
+          searchConfig: searchConfig ? normalizeWebSearchConfig(searchConfig) : undefined,
+        });
+        res.json(sealed);
+      } catch (err) {
+        const status = err instanceof SecurityValidationError ? err.status : 400;
+        res.status(status).json({ error: sanitizeErrorMessage(err) || 'Failed to seal credential vault.' });
+      }
+    },
+  );
+
+  app.post(
+    '/api/user/vault/unseal',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'A Google account email is required to unseal credentials.' });
+          return;
+        }
+        const { encryptedPayload } = req.body as { encryptedPayload?: string };
+        const unsealed = unsealUserVaultPayload({
+          uid: user.uid,
+          email: user.email,
+          encryptedPayload: encryptedPayload || '',
+        });
+        res.json({
+          aiConfig: unsealed.aiConfig ? normalizeProviderConfigToStudio(unsealed.aiConfig) : undefined,
+          searchConfig: unsealed.searchConfig
+            ? normalizeWebSearchConfig(unsealed.searchConfig)
+            : undefined,
+        });
+      } catch (err) {
+        const status = err instanceof SecurityValidationError ? err.status : 403;
+        res.status(status).json({ error: sanitizeErrorMessage(err) || 'Failed to unseal credential vault.' });
+      }
+    },
+  );
+
   // Ephemeral owner-bound preview AI session endpoints
   app.post(
     '/api/ai/session',
@@ -1243,6 +1334,15 @@ Return JSON: { "content": "..." }`;
         const status = getHttpStatusFromError(err);
         res.status(status).json({ error: sanitizeErrorMessage(err) });
       }
+    },
+  );
+
+  app.post(
+    '/api/ai/session/revoke-all',
+    requireVerifiedAuth,
+    (req: AuthenticatedRequest, res) => {
+      const revokedCount = revokeAllUserPreviewSessions(req.authUser?.uid);
+      res.json({ ok: true, revokedCount });
     },
   );
 
@@ -1513,8 +1613,36 @@ Return JSON: { "content": "..." }`;
       });
     };
 
+    const parseOrRepairJson = async (rawOutput: string): Promise<Record<string, unknown>> => {
+      try {
+        return extractJsonObject(rawOutput);
+      } catch {
+        // Automatic single-pass JSON repair for lightweight models that wrap or trail text
+        const repaired = await callByokCompletionRaw({
+          config: params.config,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a strict JSON repair formatter. Extract and return ONLY valid JSON preserving every file path and code content faithfully without adding placeholders.',
+            },
+            {
+              role: 'user',
+              content: `Repair this model output into valid JSON strictly matching { "projectName"?, "description"?, "summary": string, "files": [{ "path": string, "language": string, "content": string }] }:\n\n${rawOutput.slice(0, 28000)}`,
+            },
+          ],
+          jsonMode: true,
+          maxTokens: 12288,
+          signal: params.signal,
+          fetchImpl: aiFetchImpl,
+          skipDnsLookup,
+        });
+        return extractJsonObject(repaired);
+      }
+    };
+
     let rawText = await invokeModel(searchContextSection);
-    let parsed = extractJsonObject(rawText);
+    let parsed = await parseOrRepairJson(rawText);
 
     // Provider-independent optional follow-up search step
     if (
@@ -1586,7 +1714,7 @@ Return JSON: { "content": "..." }`;
         }
 
         rawText = await invokeModel(searchContextSection);
-        parsed = extractJsonObject(rawText);
+        parsed = await parseOrRepairJson(rawText);
       }
     }
 
@@ -1655,7 +1783,7 @@ Return JSON: { "content": "..." }`;
           phase: `Connecting to ${providerTitle} (${config.model})...`,
         });
 
-        const userPrompt = buildGenerateUserPrompt(prompt, effectiveEnableAppAi);
+        const userPrompt = buildGenerateUserPrompt(prompt, effectiveEnableAppAi, config);
         let seenPaths: string[] = [];
         let lastEmitAt = 0;
 
@@ -1763,7 +1891,7 @@ Return JSON: { "content": "..." }`;
           return;
         }
 
-        const userPrompt = buildGenerateUserPrompt(prompt, effectiveEnableAppAi);
+        const userPrompt = buildGenerateUserPrompt(prompt, effectiveEnableAppAi, config);
         const { parsed, searchOutcome } = await runGroundedModelCall({
           queryText: prompt,
           searchMode,
@@ -1860,6 +1988,7 @@ Return JSON: { "content": "..." }`;
           validatedInputFiles,
           selectedElement,
           effectiveEnableAppAi,
+          config,
         );
         let seenPaths: string[] = [];
         let lastEmitAt = 0;
@@ -1979,6 +2108,7 @@ Return JSON: { "content": "..." }`;
           validatedInputFiles,
           selectedElement,
           effectiveEnableAppAi,
+          config,
         );
 
         const { parsed, searchOutcome } = await runGroundedModelCall({
@@ -2214,9 +2344,11 @@ Return JSON: { "content": "..." }`;
           authUser.idToken,
         );
 
+        const shortUrl = formatDeploymentUrl(saved.slug, process.env.PUBLIC_APP_URL);
         res.json({
           slug: saved.slug,
-          url: `/p/${saved.slug}`,
+          url: shortUrl,
+          legacyUrl: `/p/${saved.slug}`,
           title: saved.title,
           updatedAt: saved.updatedAt,
           htmlBundle: saved.htmlBundle,
@@ -2249,6 +2381,28 @@ Return JSON: { "content": "..." }`;
     },
   );
 
+  const RESERVED_ROOT_SEGMENTS = new Set([
+    'api',
+    'p',
+    'vendor',
+    'src',
+    'assets',
+    'node_modules',
+    'robots.txt',
+    'sitemap.xml',
+    'favicon.ico',
+    'manifest.webmanifest',
+  ]);
+
+  const sendDeploymentHtml = (res: express.Response, htmlBundle: string) => {
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data: blob: https:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self';",
+    );
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(htmlBundle);
+  };
+
   app.get('/p/:slug', async (req, res) => {
     const cleanSlug = (req.params.slug || '')
       .toLowerCase()
@@ -2266,21 +2420,44 @@ Return JSON: { "content": "..." }`;
           .status(404)
           .setHeader('Content-Type', 'text/html; charset=utf-8')
           .send(
-            `<!doctype html><html><body style="font-family:system-ui,sans-serif;padding:48px;max-width:560px;margin:0 auto;background:#09090b;color:#f4f4f5;"><h1>Site not found</h1><p style="color:#a1a1aa;">No Mist deployment exists at <code>/p/${cleanSlug}</code>.</p><a href="/" style="color:#60a5fa;">Return to Mist</a></body></html>`,
+            `<!doctype html><html><body style="font-family:system-ui,sans-serif;padding:48px;max-width:560px;margin:0 auto;background:#09090b;color:#f4f4f5;"><h1>Site not found</h1><p style="color:#a1a1aa;">No Mist deployment exists at <code>/${cleanSlug}</code>.</p><a href="/" style="color:#60a5fa;">Return to Mist</a></body></html>`,
           );
         return;
       }
-      res.setHeader(
-        'Content-Security-Policy',
-        "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data: blob: https:; connect-src 'self'; object-src 'none'; base-uri 'none';",
-      );
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(record.htmlBundle);
+      sendDeploymentHtml(res, record.htmlBundle);
     } catch (err) {
       const status = err instanceof SecurityValidationError ? err.status : 500;
       res.status(status).setHeader('Content-Type', 'text/plain; charset=utf-8').send(
         sanitizeErrorMessage(err) || 'Unable to load deployment.',
       );
+    }
+  });
+
+  // Short vanity deployment route (e.g. https://domain.com/my-site) — falls through to SPA if not a published slug
+  app.get('/:slug', async (req, res, next) => {
+    const rawSlug = String(req.params.slug || '');
+    const lowerSlug = rawSlug.toLowerCase();
+    if (
+      !lowerSlug ||
+      rawSlug.includes('.') ||
+      rawSlug.startsWith('@') ||
+      rawSlug.startsWith('__') ||
+      RESERVED_ROOT_SEGMENTS.has(lowerSlug) ||
+      !/^[a-z0-9][a-z0-9-]{1,79}$/.test(lowerSlug)
+    ) {
+      next();
+      return;
+    }
+
+    try {
+      const record = await deploymentStore.getPublic(lowerSlug);
+      if (!record) {
+        next();
+        return;
+      }
+      sendDeploymentHtml(res, record.htmlBundle);
+    } catch {
+      next();
     }
   });
 

@@ -114,6 +114,9 @@ test('Backend routes enforce Firebase Auth and verified email on AI & deployment
       ['POST', '/api/ai/models'],
       ['POST', '/api/ai/test-provider'],
       ['POST', '/api/ai/session'],
+      ['POST', '/api/ai/session/revoke-all'],
+      ['POST', '/api/user/vault/seal'],
+      ['POST', '/api/user/vault/unseal'],
       ['POST', '/api/ai/generate'],
       ['POST', '/api/ai/generate/stream'],
       ['POST', '/api/ai/refine'],
@@ -277,7 +280,7 @@ test('Deployments isolate owner listings and enforce ownership while keeping pub
       },
     ];
 
-    // Alice publishes a deployment
+    // Alice publishes a deployment and receives a short /:slug URL
     const createResp = await fetch(`${srv.baseUrl}/api/deployments`, {
       method: 'POST',
       headers: {
@@ -292,21 +295,31 @@ test('Deployments isolate owner listings and enforce ownership while keeping pub
       }),
     });
     assert.equal(createResp.status, 200);
+    const createJson = (await createResp.json()) as { url: string; legacyUrl: string };
+    assert.equal(createJson.url, '/alice-site');
+    assert.equal(createJson.legacyUrl, '/p/alice-site');
 
-    // Public viewer fetches /p/alice-site without auth
+    // Public viewer fetches BOTH short /alice-site and legacy /p/alice-site without auth
+    const shortResp = await fetch(`${srv.baseUrl}/alice-site`);
+    assert.equal(shortResp.status, 200);
+    assert.ok((shortResp.headers.get('content-security-policy') || '').includes("frame-ancestors 'self'"));
+    const shortHtml = await shortResp.text();
+    assert.ok(shortHtml.includes('Alice Portfolio'));
+
     const publicResp = await fetch(`${srv.baseUrl}/p/alice-site`);
     assert.equal(publicResp.status, 200);
     const html = await publicResp.text();
     assert.ok(html.includes('Alice Portfolio'));
 
-    // Alice sees her deployment in GET /api/deployments
+    // Alice sees her deployment in GET /api/deployments with short URL
     const aliceList = (await (
       await fetch(`${srv.baseUrl}/api/deployments`, {
         headers: { Authorization: 'Bearer token-user-a' },
       })
-    ).json()) as { deployments: Array<{ slug: string }> };
+    ).json()) as { deployments: Array<{ slug: string; url: string }> };
     assert.equal(aliceList.deployments.length, 1);
     assert.equal(aliceList.deployments[0].slug, 'alice-site');
+    assert.equal(aliceList.deployments[0].url, '/alice-site');
 
     // Bob sees 0 deployments in GET /api/deployments
     const bobList = (await (
@@ -1020,6 +1033,186 @@ test('Default DuckDuckGo web search works with zero API keys on /api/search/test
     assert.equal(genJson.searchOutcome.providerName, 'DuckDuckGo (Free · No Key)');
     assert.equal(genJson.searchOutcome.sources[0].url, 'https://www.typescriptlang.org/');
     assert.deepEqual(genJson.searchOutcome.citedIds, ['S1']);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('POST /api/user/vault/seal, /unseal, and /api/ai/session/revoke-all enforce account email binding', async () => {
+  const srv = await startTestServer();
+  try {
+    const sealResp = await fetch(`${srv.baseUrl}/api/user/vault/seal`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-a',
+      },
+      body: JSON.stringify({
+        aiConfig: {
+          provider: 'custom',
+          name: 'Gemini (BYOK)',
+          baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+          model: 'gemini-3.1-flash-lite',
+          apiKey: 'AIzaSyAlicePrivateKey7788',
+        },
+        searchConfig: {
+          provider: 'brave_llm_context',
+          apiKey: 'BSA_alice_key_5566',
+        },
+      }),
+    });
+    assert.equal(sealResp.status, 200);
+    const sealed = (await sealResp.json()) as {
+      encryptedPayload: string;
+      aiKeyHint: string;
+      searchKeyHint: string;
+    };
+    assert.equal(sealed.aiKeyHint, 'AIza••••7788');
+    assert.equal(sealed.searchKeyHint, 'BSA_••••5566');
+
+    // Alice unseals cleanly
+    const aliceUnseal = await fetch(`${srv.baseUrl}/api/user/vault/unseal`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-a',
+      },
+      body: JSON.stringify({ encryptedPayload: sealed.encryptedPayload }),
+    });
+    assert.equal(aliceUnseal.status, 200);
+    const aliceData = (await aliceUnseal.json()) as {
+      aiConfig: { apiKey: string; model: string };
+      searchConfig: { apiKey: string };
+    };
+    assert.equal(aliceData.aiConfig.apiKey, 'AIzaSyAlicePrivateKey7788');
+    assert.equal(aliceData.searchConfig.apiKey, 'BSA_alice_key_5566');
+
+    // Bob cannot unseal Alice's email-bound vault ciphertext
+    const bobUnseal = await fetch(`${srv.baseUrl}/api/user/vault/unseal`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-b',
+      },
+      body: JSON.stringify({ encryptedPayload: sealed.encryptedPayload }),
+    });
+    assert.equal(bobUnseal.status, 403);
+
+    // Preview session + bulk revoke-all invalidates token immediately
+    const sessResp = await fetch(`${srv.baseUrl}/api/ai/session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-a',
+      },
+      body: JSON.stringify({
+        providerConfig: {
+          provider: 'custom',
+          name: 'OpenRouter',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          model: 'openrouter/free',
+          apiKey: 'sk-or-test-key',
+        },
+      }),
+    });
+    assert.equal(sessResp.status, 200);
+    const { token } = (await sessResp.json()) as { token: string };
+    assert.ok(token.startsWith('mist_sess_'));
+
+    const revokeAllResp = await fetch(`${srv.baseUrl}/api/ai/session/revoke-all`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer token-user-a' },
+    });
+    assert.equal(revokeAllResp.status, 200);
+    const revokeJson = (await revokeAllResp.json()) as { revokedCount: number };
+    assert.ok(revokeJson.revokedCount >= 1);
+
+    const appAiAfterRevoke = await fetch(`${srv.baseUrl}/api/app-ai`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionToken: token, prompt: 'hello' }),
+    });
+    assert.equal(appAiAfterRevoke.status, 401);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('POST /api/ai/generate informs model of active masked key and repairs malformed lightweight-model JSON', async () => {
+  let callIndex = 0;
+  let capturedPromptText = '';
+  const srv = await startTestServer({
+    aiFetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      callIndex += 1;
+      const bodyStr = typeof init?.body === 'string' ? init.body : '';
+      if (callIndex === 1) {
+        capturedPromptText = bodyStr;
+        // Simulate raw secret key NOT leaking into prompt, while masked active key IS communicated
+        assert.equal(bodyStr.includes('AIzaSyLightweightSecret8899'), false);
+        assert.ok(bodyStr.includes('AIza••••8899'));
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'Sure, here is your portfolio code without valid json braces' } }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  projectName: 'Repaired Portfolio',
+                  description: 'Cleanly repaired from lightweight output',
+                  summary: 'Generated cleanly after repair pass',
+                  files: [
+                    {
+                      path: 'src/App.tsx',
+                      language: 'tsx',
+                      content: 'export default function App() { return <main>Repaired</main>; }',
+                    },
+                    {
+                      path: 'src/index.css',
+                      language: 'css',
+                      content: '@import "tailwindcss";',
+                    },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch,
+  });
+
+  try {
+    const resp = await fetch(`${srv.baseUrl}/api/ai/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-a',
+      },
+      body: JSON.stringify({
+        prompt: 'Build an interactive AI portfolio',
+        enableAppAi: true,
+        searchMode: 'off',
+        providerConfig: {
+          provider: 'custom',
+          name: 'Gemini (BYOK)',
+          baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+          model: 'gemini-3.1-flash-lite',
+          apiKey: 'AIzaSyLightweightSecret8899',
+        },
+      }),
+    });
+    assert.equal(resp.status, 200);
+    const json = (await resp.json()) as { projectName: string; files: Array<{ path: string }> };
+    assert.equal(json.projectName, 'Repaired Portfolio');
+    assert.equal(callIndex, 2);
+    assert.ok(capturedPromptText.includes('POST /api/app-ai'));
   } finally {
     await srv.close();
   }

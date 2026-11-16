@@ -8,9 +8,9 @@ import type {
   Response as ExpressResponse,
   NextFunction,
 } from 'express';
-import type { AiProviderConfig, ProjectFile } from '../types/mist';
+import type { AiProviderConfig, ProjectFile, WebSearchConfig } from '../types/mist';
 import { redactSecrets } from './aiErrors';
-import { normalizeProjectFilePath } from './projectOps';
+import { maskApiKey, normalizeProjectFilePath } from './projectOps';
 
 // --- 1. SSRF Protection, Safe Redirect-Blocked Fetch & URL Validation ---
 
@@ -441,6 +441,178 @@ export function revokePreviewAiSession(token?: string, requesterUid?: string): b
     throw new SecurityValidationError(401, 'Authentication required to revoke this session.');
   }
   return previewSessions.delete(token);
+}
+
+export function revokeAllUserPreviewSessions(uid?: string): number {
+  if (!uid) return 0;
+  let removed = 0;
+  for (const [token, rec] of previewSessions.entries()) {
+    if (rec.ownerUid === uid) {
+      previewSessions.delete(token);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+// --- 4B. Account-Bound AES-256-GCM Encrypted Credential Vault ---
+
+function deriveUserVaultKey(params: {
+  uid: string;
+  email: string;
+  secretOverride?: string;
+}): Buffer {
+  const uid = params.uid.trim();
+  const normalizedEmail = params.email.trim().toLowerCase();
+  if (!uid || !normalizedEmail) {
+    throw new SecurityValidationError(400, 'Verified account UID and email are required for credential vault operations.');
+  }
+
+  let runtimeProject = 'mist-local';
+  try {
+    runtimeProject = getFirebaseProjectId();
+  } catch {
+    // Fallback for isolated test environments without firebase-applet-config.json
+  }
+
+  const rawSecret =
+    params.secretOverride?.trim() ||
+    process.env.MIST_VAULT_SECRET?.trim() ||
+    `${runtimeProject}:mist-account-vault-master-v1`;
+
+  const derived = crypto.hkdfSync(
+    'sha256',
+    Buffer.from(rawSecret, 'utf8'),
+    Buffer.from(`mist:${runtimeProject}:${uid}`, 'utf8'),
+    Buffer.from(`mist-vault:${normalizedEmail}`, 'utf8'),
+    32,
+  );
+  return Buffer.from(derived);
+}
+
+function makeVaultAad(uid: string, email: string): Buffer {
+  return Buffer.from(`${uid.trim()}:${email.trim().toLowerCase()}:mist-vault-v1`, 'utf8');
+}
+
+export interface VaultPlainPayload {
+  aiConfig?: AiProviderConfig;
+  searchConfig?: WebSearchConfig;
+}
+
+export function sealUserVaultPayload(params: {
+  uid: string;
+  email: string;
+  aiConfig?: AiProviderConfig;
+  searchConfig?: WebSearchConfig;
+  secretOverride?: string;
+}): {
+  encryptedPayload: string;
+  aiKeyHint: string;
+  searchKeyHint: string;
+} {
+  const key = deriveUserVaultKey({
+    uid: params.uid,
+    email: params.email,
+    secretOverride: params.secretOverride,
+  });
+
+  const cleanAi: AiProviderConfig | undefined = params.aiConfig
+    ? {
+        ...params.aiConfig,
+        apiKey: params.aiConfig.sessionOnlyKey ? '' : params.aiConfig.apiKey || '',
+      }
+    : undefined;
+  const cleanSearch: WebSearchConfig | undefined = params.searchConfig
+    ? {
+        ...params.searchConfig,
+        apiKey: params.searchConfig.sessionOnlyKey ? '' : params.searchConfig.apiKey || '',
+      }
+    : undefined;
+
+  const plaintext = JSON.stringify({
+    v: 1,
+    email: params.email.trim().toLowerCase(),
+    aiConfig: cleanAi,
+    searchConfig: cleanSearch,
+  });
+
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(makeVaultAad(params.uid, params.email));
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+
+  const envelope = JSON.stringify({
+    v: 1,
+    iv: iv.toString('base64'),
+    tag: authTag.toString('base64'),
+    ct: encrypted.toString('base64'),
+  });
+
+  return {
+    encryptedPayload: Buffer.from(envelope, 'utf8').toString('base64'),
+    aiKeyHint: cleanAi?.apiKey ? maskApiKey(cleanAi.apiKey) : '',
+    searchKeyHint: cleanSearch?.apiKey ? maskApiKey(cleanSearch.apiKey) : '',
+  };
+}
+
+export function unsealUserVaultPayload(params: {
+  uid: string;
+  email: string;
+  encryptedPayload: string;
+  secretOverride?: string;
+}): VaultPlainPayload {
+  if (!params.encryptedPayload || typeof params.encryptedPayload !== 'string') {
+    throw new SecurityValidationError(400, 'Missing encrypted vault payload.');
+  }
+
+  let parsedEnvelope: { v?: number; iv?: string; tag?: string; ct?: string };
+  try {
+    const rawJson = Buffer.from(params.encryptedPayload, 'base64').toString('utf8');
+    parsedEnvelope = JSON.parse(rawJson) as { v?: number; iv?: string; tag?: string; ct?: string };
+  } catch {
+    throw new SecurityValidationError(400, 'Malformed encrypted credential vault.');
+  }
+
+  if (
+    parsedEnvelope.v !== 1 ||
+    typeof parsedEnvelope.iv !== 'string' ||
+    typeof parsedEnvelope.tag !== 'string' ||
+    typeof parsedEnvelope.ct !== 'string'
+  ) {
+    throw new SecurityValidationError(400, 'Unsupported credential vault format.');
+  }
+
+  const key = deriveUserVaultKey({
+    uid: params.uid,
+    email: params.email,
+    secretOverride: params.secretOverride,
+  });
+
+  try {
+    const iv = Buffer.from(parsedEnvelope.iv, 'base64');
+    const tag = Buffer.from(parsedEnvelope.tag, 'base64');
+    const ct = Buffer.from(parsedEnvelope.ct, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAAD(makeVaultAad(params.uid, params.email));
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+    const data = JSON.parse(decrypted) as {
+      email?: string;
+      aiConfig?: AiProviderConfig;
+      searchConfig?: WebSearchConfig;
+    };
+    if (data.email && data.email !== params.email.trim().toLowerCase()) {
+      throw new SecurityValidationError(403, 'Credential vault email does not match your signed-in Google account.');
+    }
+    return {
+      aiConfig: data.aiConfig,
+      searchConfig: data.searchConfig,
+    };
+  } catch (err) {
+    if (err instanceof SecurityValidationError) throw err;
+    throw new SecurityValidationError(403, 'Unable to decrypt credential vault for this Google account.');
+  }
 }
 
 // --- 5. Firebase Auth ID Token Verification (RS256 via Google Public x509 Certs) ---

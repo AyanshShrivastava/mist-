@@ -44,6 +44,7 @@ import type {
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
 import { detectGatewayFromBaseUrl, findModelEntry } from '../data/models';
+import { maskApiKey } from '../utils/projectOps';
 import CodeEditor from './CodeEditor';
 import VisualInspector from './VisualInspector';
 import SearchSourcesCard from './SearchSourcesCard';
@@ -456,11 +457,11 @@ export default function WorkspaceView({
         <button
           type="button"
           onClick={onBackHome}
-          aria-label="Back to Mist Home"
+          aria-label="Back to Websites"
           className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-800 shrink-0 cursor-pointer"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-          <MistLogo size="xs" showWordmark={false} />
+          <span>Back</span>
         </button>
 
         <input
@@ -497,10 +498,12 @@ export default function WorkspaceView({
           <button
             type="button"
             onClick={onBackHome}
-            aria-label="Back to Mist Home"
+            aria-label="Back to Websites"
             className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Back</span>
+            <span className="text-zinc-300 dark:text-zinc-700">·</span>
             <MistLogo size="xs" showWordmark={false} />
             <span className="font-display font-bold text-black dark:text-white">Mist</span>
           </button>
@@ -606,6 +609,11 @@ export default function WorkspaceView({
             type="button"
             onClick={onOpenProviders}
             aria-label="Configure AI models"
+            title={
+              maskApiKey(providerConfig.apiKey)
+                ? `Active Key: ${maskApiKey(providerConfig.apiKey)}`
+                : 'Add BYOK API key'
+            }
             className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Cpu className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
@@ -1183,15 +1191,20 @@ export default function WorkspaceView({
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {maskApiKey(providerConfig.apiKey) && (
+                    <span className="hidden xl:inline font-mono text-[10px] text-zinc-400">
+                      Key {maskApiKey(providerConfig.apiKey)}
+                    </span>
+                  )}
                   {project.isPublished && project.publishedSlug && (
                     <a
-                      href={`/p/${project.publishedSlug}`}
+                      href={`/${project.publishedSlug}`}
                       target="_blank"
                       rel="noreferrer"
                       className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline dark:text-emerald-400"
                     >
                       <Check className="h-3 w-3" aria-hidden="true" />
-                      <span>/p/{project.publishedSlug}</span>
+                      <span>/{project.publishedSlug}</span>
                     </a>
                   )}
                   <button
@@ -1330,6 +1343,17 @@ export default function WorkspaceView({
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 text-xs font-medium">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileMoreOpen(false);
+                      onBackHome();
+                    }}
+                    className="col-span-2 flex min-h-[46px] items-center gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-white cursor-pointer"
+                  >
+                    <ArrowLeft className="h-4 w-4 text-blue-500" aria-hidden="true" />
+                    <span>Back to Websites</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => {

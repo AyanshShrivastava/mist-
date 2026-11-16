@@ -96,6 +96,50 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidCredentialVault(data, userId) {
+      return data.ownerId is string
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.boundEmail is string
+        && data.boundEmail.size() >= 3
+        && data.boundEmail.size() <= 254
+        && request.auth.token.email is string
+        && data.boundEmail == request.auth.token.email
+        && data.algorithm == 'AES-256-GCM'
+        && data.ciphertext is string
+        && data.ciphertext.size() >= 1
+        && data.ciphertext.size() <= 16384
+        && (!('aiKeyHint' in data) || (data.aiKeyHint is string && data.aiKeyHint.size() <= 32))
+        && (!('searchKeyHint' in data) || (data.searchKeyHint is string && data.searchKeyHint.size() <= 32))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProjectMessage(data, projectId, messageId) {
+      return data.id is string
+        && isValidId(data.id)
+        && data.id == messageId
+        && data.projectId is string
+        && isValidId(data.projectId)
+        && data.projectId == projectId
+        && data.ownerId is string
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.role in ['user', 'assistant']
+        && data.content is string
+        && data.content.size() <= 24000
+        && data.seq is int
+        && data.seq >= 0
+        && data.seq <= 100000
+        && data.timestamp is string
+        && data.timestamp.size() >= 1
+        && data.timestamp.size() <= 64
+        && (!('changedFiles' in data) || (data.changedFiles is list && data.changedFiles.size() <= 120 && (data.changedFiles.size() == 0 || data.changedFiles[0] is string)))
+        && (!('searchOutcome' in data) || (data.searchOutcome is map && data.searchOutcome.keys().hasOnly(['status', 'queries', 'sources', 'citedIds', 'warning', 'error', 'searchedAt', 'providerName'])))
+        && data.updatedAt is timestamp;
+    }
+
     function isValidDeployment(data, slug) {
       return data.slug is string
         && data.slug.size() >= 2
@@ -146,6 +190,36 @@ service cloud.firestore {
           'enableAppAi', 'appAiMode', 'webSearchMode', 'email', 'updatedAt'
         ]);
       allow delete: if isValidId(userId) && isOwner(userId);
+
+      // Private account-bound encrypted BYOK credential vault
+      match /private/{vaultId} {
+        allow get: if isValidId(userId) && vaultId == 'credentials' && isOwner(userId);
+        allow list: if false;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && vaultId == 'credentials'
+          && isOwner(userId)
+          && isValidCredentialVault(incoming(), userId)
+          && incoming().keys().hasAll(['ownerId', 'boundEmail', 'algorithm', 'ciphertext', 'createdAt', 'updatedAt'])
+          && incoming().keys().hasOnly([
+            'ownerId', 'boundEmail', 'algorithm', 'ciphertext',
+            'aiKeyHint', 'searchKeyHint', 'createdAt', 'updatedAt'
+          ])
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && vaultId == 'credentials'
+          && isOwner(userId)
+          && isValidCredentialVault(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'boundEmail', 'algorithm', 'ciphertext', 'aiKeyHint', 'searchKeyHint', 'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && vaultId == 'credentials' && isOwner(userId);
+      }
     }
 
     // Projects collection
@@ -211,6 +285,47 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid;
         allow delete: if isValidId(projectId)
           && isValidId(fileId)
+          && isVerifiedUser()
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid;
+      }
+
+      // Subcollection: project chat & refinement history (Master Gate via parent project)
+      match /messages/{messageId} {
+        allow get: if isValidId(projectId)
+          && isValidId(messageId)
+          && isVerifiedUser()
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid;
+        allow list: if isVerifiedUser()
+          && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(projectId)
+          && isValidId(messageId)
+          && isValidProjectMessage(incoming(), projectId, messageId)
+          && incoming().keys().hasAll(['id', 'projectId', 'ownerId', 'role', 'content', 'seq', 'timestamp', 'updatedAt'])
+          && incoming().keys().hasOnly([
+            'id', 'projectId', 'ownerId', 'role', 'content', 'seq', 'timestamp',
+            'changedFiles', 'searchOutcome', 'updatedAt'
+          ])
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid;
+        allow update: if isVerifiedUser()
+          && isValidId(projectId)
+          && isValidId(messageId)
+          && isValidProjectMessage(incoming(), projectId, messageId)
+          && incoming().id == existing().id
+          && incoming().projectId == existing().projectId
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'role', 'content', 'seq', 'timestamp', 'changedFiles', 'searchOutcome', 'updatedAt'
+          ])
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid;
+        allow delete: if isValidId(projectId)
+          && isValidId(messageId)
           && isVerifiedUser()
           && exists(/databases/$(database)/documents/projects/$(projectId))
           && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid;

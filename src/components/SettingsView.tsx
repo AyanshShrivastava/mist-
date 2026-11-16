@@ -52,6 +52,7 @@ import {
 } from '../data/webSearch';
 import MistLogo from './MistLogo';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
+import { maskApiKey } from '../utils/projectOps';
 
 interface SettingsViewProps {
   user: User | null;
@@ -737,6 +738,12 @@ export default function SettingsView({
                         {showKey ? <EyeOff className="h-3.5 w-3.5" aria-hidden="true" /> : <Eye className="h-3.5 w-3.5" aria-hidden="true" />}
                       </button>
                     </div>
+                    {maskApiKey(apiKey) && (
+                      <p className="mt-1.5 text-[11px] text-zinc-600 dark:text-zinc-300">
+                        Active Key: <span className="font-mono font-semibold text-blue-600 dark:text-blue-400">{maskApiKey(apiKey)}</span> — automatically used by Mist generation &amp; <code className="font-mono">/api/app-ai</code>.
+                      </p>
+                    )}
+
                     <label className="mt-2 flex items-center gap-2 text-[11px] text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
                       <input
                         type="checkbox"
@@ -744,8 +751,16 @@ export default function SettingsView({
                         onChange={(e) => setSessionOnlyKey(e.target.checked)}
                         className="h-3.5 w-3.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-900"
                       />
-                      <span>Keep API key in memory only (clear automatically when tab closes)</span>
+                      <span>Keep API key in memory only (never saved to account vault; clears on close)</span>
                     </label>
+
+                    <div className="mt-2 rounded-xl border border-zinc-200/80 bg-zinc-50 px-3 py-2 text-[11px] text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+                      {user?.email
+                        ? sessionOnlyKey
+                          ? `Session-only mode enabled: key stays in RAM and will not be saved to ${user.email}.`
+                          : `Encrypted with AES-256-GCM and bound to your Google account (${user.email}) — zero keys are stored in browser localStorage.`
+                        : 'Sign in with Google to encrypt and sync this API key to your account email across sessions.'}
+                    </div>
                   </div>
 
                   <div>
@@ -991,7 +1006,7 @@ export default function SettingsView({
                         onChange={(e) => setSearchSessionOnlyKey(e.target.checked)}
                         className="h-3.5 w-3.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-900"
                       />
-                      <span>Keep search API key in memory only (session-only; never saved to storage)</span>
+                      <span>Keep search API key in memory only (never synced to account vault or localStorage)</span>
                     </label>
                   </div>
                 )}
@@ -1193,7 +1208,11 @@ export default function SettingsView({
                     Runtime Endpoint: <code className="font-mono text-blue-600 dark:text-blue-400">POST /api/app-ai</code>
                   </p>
                   <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                    Exposed only when enabled via <code className="font-mono">window.mistAI.complete()</code> &amp; <code className="font-mono">window.mistAI.chat()</code>.
+                    Active Key:{' '}
+                    <span className="font-mono font-semibold text-zinc-800 dark:text-zinc-200">
+                      {maskApiKey(apiKey) || 'None configured'}
+                    </span>{' '}
+                    — automatically backs <code className="font-mono">window.mistAI.complete()</code> &amp; <code className="font-mono">window.mistAI.chat()</code> via secure session relay.
                   </p>
                 </div>
                 <button

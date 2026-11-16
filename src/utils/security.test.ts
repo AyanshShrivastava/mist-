@@ -6,9 +6,12 @@ import {
   createPreviewAiSession,
   isPrivateOrReservedIp,
   resolvePreviewAiSession,
+  revokeAllUserPreviewSessions,
   revokePreviewAiSession,
   safeFetchExternal,
+  sealUserVaultPayload,
   SecurityValidationError,
+  unsealUserVaultPayload,
   validateExternalUrlSyntax,
   validateProjectFilesPayload,
   verifyFirebaseJwtString,
@@ -21,9 +24,10 @@ import {
   mapGroqModels,
   mapOpenRouterModels,
 } from './modelCatalogServer';
-import { ProviderHttpError, streamByokCompletion } from './byokClient';
+import { extractChoiceText, ProviderHttpError, streamByokCompletion } from './byokClient';
 import { redactSecrets } from './aiErrors';
 import { chunkOperations } from '../firebase/batchOps';
+import { maskApiKey, suggestShortSlug } from './projectOps';
 
 test('SSRF protection blocks private/loopback IPs, DNS rebinding resolutions, and HTTP redirects', async () => {
   assert.equal(isPrivateOrReservedIp('127.0.0.1'), true);
@@ -455,4 +459,101 @@ test('streamByokCompletion handles incomplete trailing SSE chunks, caller cancel
   assert.equal(redacted.includes('sk-or-v1-abcdef'), false);
   assert.equal(redacted.includes('AIzaSyA123456'), false);
   assert.ok(redacted.includes('[REDACTED]'));
+});
+
+test('Account-bound AES-256-GCM vault binds credentials strictly to uid + email and respects sessionOnlyKey', () => {
+  const sealed = sealUserVaultPayload({
+    uid: 'user-vault-1',
+    email: 'Alice@Example.com',
+    aiConfig: {
+      provider: 'custom',
+      name: 'Gemini (BYOK)',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      model: 'gemini-3.1-flash-lite',
+      apiKey: 'AIzaSySecretKeyValue9911',
+      sessionOnlyKey: false,
+    },
+    searchConfig: {
+      provider: 'brave_llm_context',
+      apiKey: 'BSA_search_secret_4455',
+      sessionOnlyKey: false,
+    },
+  });
+
+  assert.equal(sealed.aiKeyHint, 'AIza••••9911');
+  assert.equal(sealed.searchKeyHint, 'BSA_••••4455');
+  assert.equal(sealed.encryptedPayload.includes('AIzaSySecretKeyValue9911'), false);
+
+  const unsealed = unsealUserVaultPayload({
+    uid: 'user-vault-1',
+    email: 'alice@example.com',
+    encryptedPayload: sealed.encryptedPayload,
+  });
+  assert.equal(unsealed.aiConfig?.apiKey, 'AIzaSySecretKeyValue9911');
+  assert.equal(unsealed.aiConfig?.model, 'gemini-3.1-flash-lite');
+  assert.equal(unsealed.searchConfig?.apiKey, 'BSA_search_secret_4455');
+
+  // Wrong UID rejected with 403
+  assert.throws(
+    () =>
+      unsealUserVaultPayload({
+        uid: 'user-vault-attacker',
+        email: 'alice@example.com',
+        encryptedPayload: sealed.encryptedPayload,
+      }),
+    (err: unknown) => err instanceof SecurityValidationError && err.status === 403,
+  );
+
+  // Wrong email rejected with 403
+  assert.throws(
+    () =>
+      unsealUserVaultPayload({
+        uid: 'user-vault-1',
+        email: 'bob@example.com',
+        encryptedPayload: sealed.encryptedPayload,
+      }),
+    (err: unknown) => err instanceof SecurityValidationError && err.status === 403,
+  );
+
+  // sessionOnlyKey strips API key before encryption
+  const sessionOnlySealed = sealUserVaultPayload({
+    uid: 'user-vault-1',
+    email: 'alice@example.com',
+    aiConfig: {
+      provider: 'custom',
+      model: 'openrouter/free',
+      apiKey: 'sk-or-never-persist',
+      sessionOnlyKey: true,
+    },
+  });
+  assert.equal(sessionOnlySealed.aiKeyHint, '');
+  const sessionOnlyUnsealed = unsealUserVaultPayload({
+    uid: 'user-vault-1',
+    email: 'alice@example.com',
+    encryptedPayload: sessionOnlySealed.encryptedPayload,
+  });
+  assert.equal(sessionOnlyUnsealed.aiConfig?.apiKey, '');
+});
+
+test('revokeAllUserPreviewSessions revokes all tokens for target user only', () => {
+  const s1 = createPreviewAiSession({ provider: 'custom', model: 'm1', apiKey: 'k1' }, 'uid-bulk-a');
+  const s2 = createPreviewAiSession({ provider: 'custom', model: 'm2', apiKey: 'k2' }, 'uid-bulk-a');
+  const sOther = createPreviewAiSession({ provider: 'custom', model: 'm3', apiKey: 'k3' }, 'uid-bulk-b');
+
+  assert.equal(revokeAllUserPreviewSessions('uid-bulk-a'), 2);
+  assert.equal(resolvePreviewAiSession(s1.token), null);
+  assert.equal(resolvePreviewAiSession(s2.token), null);
+  assert.equal(resolvePreviewAiSession(sOther.token)?.apiKey, 'k3');
+  revokePreviewAiSession(sOther.token, 'uid-bulk-b');
+});
+
+test('extractChoiceText, maskApiKey, and suggestShortSlug normalize outputs cleanly', () => {
+  assert.equal(extractChoiceText('plain text'), 'plain text');
+  assert.equal(
+    extractChoiceText([{ type: 'text', text: '{"ok":' }, { text: 'true}' }]),
+    '{"ok":true}',
+  );
+  assert.equal(maskApiKey('AIzaSyABCDEF1234'), 'AIza••••1234');
+  assert.equal(maskApiKey(''), '');
+  assert.equal(suggestShortSlug('My Awesome Coffee Roastery Website App Builder', 20), 'my-awesome-coffee');
 });

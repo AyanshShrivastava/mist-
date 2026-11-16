@@ -18,6 +18,12 @@ export interface DeploymentSummary {
   updatedAt: string;
 }
 
+export function formatDeploymentUrl(slug: string, publicBaseUrl?: string): string {
+  const cleanSlug = slug.replace(/^\/+/, '');
+  const cleanBase = (publicBaseUrl || '').trim().replace(/\/+$/, '');
+  return cleanBase ? `${cleanBase}/${cleanSlug}` : `/${cleanSlug}`;
+}
+
 export interface DeploymentStore {
   listByOwner(ownerUid: string, idToken: string): Promise<DeploymentSummary[]>;
   getPublic(slug: string): Promise<StoredDeployment | null>;
@@ -152,7 +158,7 @@ export function createFirestoreDeploymentStore(options?: {
           slug: decoded.slug,
           projectId: decoded.projectId,
           title: decoded.title,
-          url: `/p/${decoded.slug}`,
+          url: formatDeploymentUrl(decoded.slug, process.env.PUBLIC_APP_URL),
           updatedAt: decoded.updatedAt,
         });
       }
@@ -289,7 +295,7 @@ export function createMemoryDeploymentStore(): DeploymentStore {
             slug: dep.slug,
             projectId: dep.projectId,
             title: dep.title,
-            url: `/p/${dep.slug}`,
+            url: formatDeploymentUrl(dep.slug, process.env.PUBLIC_APP_URL),
             updatedAt: dep.updatedAt,
           });
         }
