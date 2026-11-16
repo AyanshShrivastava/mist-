@@ -62,6 +62,12 @@ import {
   WebSearchError,
   type WebSearchService,
 } from './webSearchService';
+import {
+  defaultNotificationService,
+  PushNotificationService,
+  type NotificationPayload,
+  type WebPushSubscription,
+} from './notificationService';
 
 const require = createRequire(import.meta.url);
 
@@ -1001,12 +1007,14 @@ export interface MistAppDeps {
   aiFetchImpl?: typeof fetch;
   searchFetchImpl?: typeof fetch;
   searchService?: WebSearchService;
+  notificationService?: PushNotificationService;
   skipDnsLookup?: boolean;
   trustProxy?: boolean | number | string;
   aiRateLimitMax?: number;
   catalogRateLimitMax?: number;
   deployRateLimitMax?: number;
   searchRateLimitMax?: number;
+  notificationRateLimitMax?: number;
 }
 
 export function createMistApp(deps: MistAppDeps = {}): Express {
@@ -1016,6 +1024,7 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
   const aiFetchImpl = deps.aiFetchImpl;
   const searchFetchImpl = deps.searchFetchImpl ?? deps.aiFetchImpl;
   const searchService = deps.searchService || defaultWebSearchService;
+  const notificationService = deps.notificationService || defaultNotificationService;
   const skipDnsLookup = deps.skipDnsLookup;
 
   const configuredTrustProxy =
@@ -1066,6 +1075,11 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
     windowMs: 60_000,
     maxRequests: deps.searchRateLimitMax ?? 40,
     label: 'web search',
+  });
+  const notificationRateLimiter = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: deps.notificationRateLimitMax ?? 60,
+    label: 'notifications',
   });
 
   const recentModelIncidents = new Map<string, ModelHealthIncident>();
@@ -1845,6 +1859,18 @@ Return JSON: { "content": "..." }`;
         const finalized = await postProcessGeneratedProject({ parsed, prompt, config });
         finalized.searchOutcome = searchOutcome;
         clearIncident(config.provider, config.model);
+
+        if (req.authUser?.uid) {
+          notificationService
+            .sendNotificationToUser(req.authUser.uid, {
+              title: 'Build Finished ✨',
+              body: `"${finalized.projectName || 'Website'}" generated successfully!`,
+              data: { url: '/' },
+              tag: 'generation-complete',
+            })
+            .catch(() => {});
+        }
+
         sendEvent({ type: 'complete', result: finalized });
         res.end();
       } catch (err) {
@@ -1915,6 +1941,18 @@ Return JSON: { "content": "..." }`;
         const finalized = await postProcessGeneratedProject({ parsed, prompt, config });
         finalized.searchOutcome = searchOutcome;
         clearIncident(config.provider, config.model);
+
+        if (req.authUser?.uid) {
+          notificationService
+            .sendNotificationToUser(req.authUser.uid, {
+              title: 'Build Finished ✨',
+              body: `"${finalized.projectName || 'Website'}" generated successfully!`,
+              data: { url: '/' },
+              tag: 'generation-complete',
+            })
+            .catch(() => {});
+        }
+
         res.json(finalized);
       } catch (err) {
         const status = getHttpStatusFromError(err);
@@ -2355,6 +2393,19 @@ Return JSON: { "content": "..." }`;
         );
 
         const shortUrl = formatDeploymentUrl(saved.slug, process.env.PUBLIC_APP_URL);
+
+        // Fire-and-forget push notification to owner
+        notificationService
+          .sendNotificationToUser(authUser.uid, {
+            title: 'Website Deployed! 🚀',
+            body: `"${saved.title}" is now live at ${shortUrl}`,
+            data: { url: shortUrl },
+            tag: `deploy-${saved.slug}`,
+          })
+          .catch((err) => {
+            console.warn('[Mist Notifications] Failed to dispatch deploy push notification:', err);
+          });
+
         res.json({
           slug: saved.slug,
           url: shortUrl,
@@ -2391,6 +2442,114 @@ Return JSON: { "content": "..." }`;
     },
   );
 
+  // --- 6. Web Push Notifications (VAPID) ---
+  app.get('/sw.js', (_req, res) => {
+    const swPath = path.resolve(process.cwd(), 'public', 'sw.js');
+    if (fs.existsSync(swPath)) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Service-Worker-Allowed', '/');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(swPath);
+    } else {
+      res.status(404).send('Service worker not found.');
+    }
+  });
+
+  app.get('/api/notifications/vapid-public-key', (_req, res) => {
+    res.json(notificationService.getVapidPublicConfig());
+  });
+
+  app.post(
+    '/api/notifications/subscribe',
+    notificationRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.headers.authorization
+          ? await verifyAuth(req.headers.authorization).catch(() => null)
+          : null;
+        const { subscription } = req.body as { subscription?: WebPushSubscription };
+        if (!subscription || !subscription.endpoint || !subscription.keys) {
+          res.status(400).json({ error: 'Valid PushSubscription payload with keys is required.' });
+          return;
+        }
+        const record = notificationService.addSubscription(subscription, user?.uid);
+        res.json({ ok: true, subscription: record });
+      } catch (err) {
+        res.status(400).json({ error: sanitizeErrorMessage(err) || 'Failed to subscribe.' });
+      }
+    },
+  );
+
+  app.post('/api/notifications/unsubscribe', notificationRateLimiter, (req, res) => {
+    const { endpoint } = req.body as { endpoint?: string };
+    if (!endpoint) {
+      res.status(400).json({ error: 'Endpoint is required.' });
+      return;
+    }
+    const removed = notificationService.removeSubscription(endpoint);
+    res.json({ ok: true, removed });
+  });
+
+  app.post(
+    '/api/notifications/test',
+    notificationRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.headers.authorization
+          ? await verifyAuth(req.headers.authorization).catch(() => null)
+          : null;
+        const { subscription } = req.body as { subscription?: WebPushSubscription };
+
+        if (subscription && subscription.endpoint && subscription.keys) {
+          const result = await notificationService.sendNotification(subscription, {
+            title: 'Mist Notification 🔔',
+            body: 'Web Push with VAPID is working successfully on Mist!',
+            icon: '/favicon.ico',
+            badge: '/favicon.ico',
+            data: { url: '/' },
+            tag: 'test-notification',
+          });
+          if (!result.success) {
+            res
+              .status(result.statusCode || 500)
+              .json({ error: result.error || 'Failed to deliver notification.' });
+            return;
+          }
+          res.json({ ok: true });
+          return;
+        }
+
+        if (user?.uid) {
+          const { sent, failed } = await notificationService.sendNotificationToUser(user.uid, {
+            title: 'Mist Notification 🔔',
+            body: 'Web Push with VAPID is working successfully on Mist!',
+            icon: '/favicon.ico',
+            badge: '/favicon.ico',
+            data: { url: '/' },
+            tag: 'test-notification',
+          });
+          if (sent === 0 && failed > 0) {
+            res.status(502).json({ error: 'Failed to deliver push notification to your device.' });
+            return;
+          }
+          res.json({ ok: true, sent, failed });
+          return;
+        }
+
+        res.status(400).json({
+          error: 'An active push subscription or Google sign-in is required to test notifications.',
+        });
+      } catch (err) {
+        res.status(500).json({ error: sanitizeErrorMessage(err) || 'Test notification failed.' });
+      }
+    },
+  );
+
+  app.post('/api/notifications/keys/generate', notificationRateLimiter, (_req, res) => {
+    const keys = notificationService.generateNewKeypair();
+    res.json(keys);
+  });
+
   const RESERVED_ROOT_SEGMENTS = new Set([
     'api',
     'p',
@@ -2398,6 +2557,7 @@ Return JSON: { "content": "..." }`;
     'src',
     'assets',
     'node_modules',
+    'sw.js',
     'robots.txt',
     'sitemap.xml',
     'favicon.ico',
