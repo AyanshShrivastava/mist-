@@ -28,6 +28,7 @@ import {
   createFirebaseAuthMiddleware,
   createPreviewAiSession,
   createRateLimiter,
+  enforceSameOriginOnMutations,
   resolvePreviewAiSession,
   revokeAllUserPreviewSessions,
   revokePreviewAiSession,
@@ -397,6 +398,7 @@ export async function bundleProjectToHtml(params: {
   title: string;
   includeInspector?: boolean;
   enableAppAi?: boolean;
+  standaloneExport?: boolean;
 }): Promise<{ html: string; bundleError?: string }> {
   const vendorBundle = await ensureVendorRuntime();
 
@@ -662,8 +664,10 @@ export async function bundleProjectToHtml(params: {
     .replace(/<\/style/gi, '<\\/style');
 
   const safeTitle = params.title.replace(/[<>]/g, '');
-  const initialAppAiEnabled = Boolean(params.enableAppAi);
-  const inlinePreviewSandbox = Boolean(params.includeInspector);
+  const isStandaloneExport = Boolean(params.standaloneExport);
+  const initialAppAiEnabled = isStandaloneExport ? false : Boolean(params.enableAppAi);
+  const inlineVendorScript = Boolean(params.includeInspector) || isStandaloneExport;
+  const includeInspector = isStandaloneExport ? false : Boolean(params.includeInspector);
 
   // Runtime sandbox compatibility (isolated storage shim inside opaque srcDoc without allow-same-origin,
   // plus authenticated parent postMessage relay for /api/app-ai so no keys/tokens leak into the iframe).
@@ -819,7 +823,7 @@ export async function bundleProjectToHtml(params: {
 })();
 `;
 
-  const vendorScriptTag = inlinePreviewSandbox
+  const vendorScriptTag = inlineVendorScript
     ? `<script>${escapeInlineScript(vendorBundle)}</script>`
     : `<script src="/vendor/preview-runtime.js"></script>`;
 
@@ -832,12 +836,12 @@ export async function bundleProjectToHtml(params: {
     <style>${compiledTwCss}</style>
     <style>${customCss}</style>
     ${vendorScriptTag}
-    <script>${escapeInlineScript(MIST_APP_AI_RUNTIME_SCRIPT)}</script>
+    ${isStandaloneExport ? '' : `<script>${escapeInlineScript(MIST_APP_AI_RUNTIME_SCRIPT)}</script>`}
   </head>
   <body>
     <div id="root"></div>
     <script>${escapeInlineScript(jsBundle)}</script>
-    ${params.includeInspector ? `<script>${escapeInlineScript(INSPECTOR_BRIDGE_SCRIPT)}</script>` : ''}
+    ${includeInspector ? `<script>${escapeInlineScript(INSPECTOR_BRIDGE_SCRIPT)}</script>` : ''}
   </body>
 </html>`;
 
@@ -1030,10 +1034,13 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), payment=()');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+    res.setHeader('X-DNS-Prefetch-Control', 'off');
     next();
   });
+  app.use(enforceSameOriginOnMutations);
   app.use(express.json({ limit: '6mb' }));
-  app.use('/src/assets', express.static(path.resolve(process.cwd(), 'src/assets')));
 
   const requireVerifiedAuth = createFirebaseAuthMiddleware({
     requireVerifiedEmail: true,
@@ -1174,18 +1181,21 @@ Return JSON: { "content": "..." }`;
 
   app.post('/api/bundle', catalogRateLimiter, async (req, res) => {
     try {
-      const { files, title, includeInspector, enableAppAi } = req.body as {
+      const { files, title, includeInspector, enableAppAi, standaloneExport } = req.body as {
         files: ProjectFile[];
         title?: string;
         includeInspector?: boolean;
         enableAppAi?: boolean;
+        standaloneExport?: boolean;
       };
       const validatedFiles = validateProjectFilesPayload(files);
+      const isStandalone = Boolean(standaloneExport);
       const result = await bundleProjectToHtml({
         files: validatedFiles,
         title: title || 'Mist Preview',
-        includeInspector: includeInspector !== false,
-        enableAppAi: Boolean(enableAppAi),
+        includeInspector: isStandalone ? false : includeInspector !== false,
+        enableAppAi: isStandalone ? false : Boolean(enableAppAi),
+        standaloneExport: isStandalone,
       });
       res.json(result);
     } catch (err) {

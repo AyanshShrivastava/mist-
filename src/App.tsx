@@ -33,6 +33,7 @@ import {
   mergeProjectFiles,
   normalizeProjectFilePath,
   sanitizeSlug,
+  suggestShortSlug,
 } from './utils/projectOps';
 import {
   fetchUserEncryptedVault,
@@ -244,10 +245,11 @@ export default function App() {
   const [refineError, setRefineError] = useState<string | null>(null);
   const [aiStreamProgress, setAiStreamProgress] = useState<AiStreamProgress | null>(null);
 
-  // Deploy & Modals state
+  // Deploy / Publish Export state
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
-  const [publishedUrl, setPublishedUrl] = useState<string | null>(null);
+  const [downloadedFileName, setDownloadedFileName] = useState<string | null>(null);
+  const [deployProjectId, setDeployProjectId] = useState<string | null>(null);
 
   const [providersOpen, setProvidersOpen] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
@@ -256,6 +258,8 @@ export default function App() {
   const [voiceChatOpen, setVoiceChatOpen] = useState(false);
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null;
+  const deployProject =
+    (deployProjectId ? projects.find((p) => p.id === deployProjectId) : null) || activeProject;
   const darkMode = studioSettings.theme === 'dark';
   const bundleTimerRef = useRef<number | null>(null);
   const cloudSaveTimerRef = useRef<number | null>(null);
@@ -272,7 +276,7 @@ export default function App() {
   const navigateToHome = useCallback(() => {
     setActivePage('home');
     setActiveProjectId(null);
-    setPublishedUrl(null);
+    setDownloadedFileName(null);
     if (typeof window !== 'undefined' && window.history.state?.mistView) {
       window.history.pushState({ mistView: 'home' }, '');
     }
@@ -281,7 +285,7 @@ export default function App() {
   const navigateToProject = useCallback((projectId: string) => {
     setActivePage('home');
     setActiveProjectId(projectId);
-    setPublishedUrl(null);
+    setDownloadedFileName(null);
     if (typeof window !== 'undefined') {
       window.history.pushState({ mistView: 'project', projectId }, '');
     }
@@ -310,7 +314,7 @@ export default function App() {
       } else {
         setActivePage('home');
         setActiveProjectId(null);
-        setPublishedUrl(null);
+        setDownloadedFileName(null);
       }
       queueMicrotask(() => {
         ignorePopRef.current = false;
@@ -1083,81 +1087,122 @@ export default function App() {
     }
   };
 
-  const handleExportZip = async () => {
-    if (!activeProject) return;
-    const manifest = buildExportManifest(activeProject);
+  const triggerBrowserFileDownload = (blob: Blob, fileName: string) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const fetchStandaloneHtmlBundle = async (target: MistProject): Promise<string | undefined> => {
+    try {
+      const resp = await fetch('/api/bundle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          files: target.files,
+          title: target.name,
+          includeInspector: false,
+          enableAppAi: false,
+          standaloneExport: true,
+        }),
+      });
+      if (!resp.ok) return undefined;
+      const data = (await resp.json()) as { html?: string };
+      return typeof data.html === 'string' && data.html.trim() ? data.html : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const handleExportZip = async (
+    targetProject?: MistProject | null,
+    customSlug?: string,
+  ): Promise<string | null> => {
+    const target = targetProject || activeProject;
+    if (!target) return null;
+    const cleanSlug = customSlug ? sanitizeSlug(customSlug) : target.publishedSlug || suggestShortSlug(target.name);
+    const standaloneHtml = await fetchStandaloneHtmlBundle(target);
+    const manifest = buildExportManifest(target, { standaloneHtml, slug: cleanSlug });
     const zip = new JSZip();
     for (const [filePath, content] of Object.entries(manifest)) {
       zip.file(filePath, content);
     }
     const blob = await zip.generateAsync({ type: 'blob' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${sanitizeSlug(activeProject.name)}.zip`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    const fileName = `${cleanSlug}.zip`;
+    triggerBrowserFileDownload(blob, fileName);
+    return fileName;
   };
 
-  const handleDeployProject = async (slug: string) => {
-    if (!activeProject) return;
-    if (!user) {
-      setDeployError('Sign in with Google before publishing a live website.');
-      setAuthPromptReason('Sign in with Google to publish and own live website URLs.');
-      setAccountOpen(true);
-      return;
-    }
+  const handleDownloadStandaloneHtml = async (
+    targetProject?: MistProject | null,
+    customSlug?: string,
+  ) => {
+    const target = targetProject || deployProject || activeProject;
+    if (!target) return;
     setIsDeploying(true);
     setDeployError(null);
-    const hasAppAi = Boolean(
-      activeProject.appAiEnabled ||
-        activeProject.files.some((f) => /\/api\/app-ai|window\.mistAI/.test(f.content)),
-    );
     try {
-      // Ensure the parent project document exists in Firestore before creating the deployment
-      await saveProjectToFirestore(activeProject);
-      const idToken = await user.getIdToken();
-      const resp = await fetch('/api/deployments', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          slug,
-          projectId: activeProject.id,
-          title: activeProject.name,
-          files: activeProject.files,
-          enableAppAi: hasAppAi,
-        }),
-      });
-      const data = (await resp.json()) as {
-        slug?: string;
-        url?: string;
-        htmlBundle?: string;
-        error?: string;
-      };
-      if (!resp.ok || !data.url || !data.slug) {
-        throw new Error(data.error || 'Deployment failed.');
+      const cleanSlug = customSlug ? sanitizeSlug(customSlug) : suggestShortSlug(target.name);
+      const html = await fetchStandaloneHtmlBundle(target);
+      if (!html) {
+        throw new Error('Could not build standalone HTML right now. Use Download Publish ZIP instead.');
       }
-
-      setPublishedUrl(data.url);
-      const deployedProject: MistProject = {
-        ...activeProject,
-        isPublished: true,
-        publishedSlug: data.slug,
-        updatedAt: new Date().toISOString(),
-      };
-      updateActiveProject(() => deployedProject);
-      await saveProjectToFirestore(deployedProject);
-      await refreshDeployments(user);
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const fileName = `${cleanSlug}-index.html`;
+      triggerBrowserFileDownload(blob, fileName);
+      setDownloadedFileName(fileName);
     } catch (err) {
-      setDeployError(err instanceof Error ? err.message : 'Failed to publish deployment.');
+      setDeployError(err instanceof Error ? err.message : 'Failed to export standalone HTML.');
     } finally {
       setIsDeploying(false);
     }
+  };
+
+  const handleDownloadPublishZip = async (
+    slug: string,
+    targetProject?: MistProject | null,
+  ) => {
+    const target = targetProject || deployProject || activeProject;
+    if (!target) return;
+    setIsDeploying(true);
+    setDeployError(null);
+    try {
+      const cleanSlug = sanitizeSlug(slug || suggestShortSlug(target.name));
+      const fileName = await handleExportZip(target, cleanSlug);
+      if (fileName) {
+        setDownloadedFileName(fileName);
+      }
+      const updatedProject: MistProject = {
+        ...target,
+        isPublished: true,
+        publishedSlug: cleanSlug,
+        updatedAt: new Date().toISOString(),
+      };
+      setProjects((prev) => prev.map((p) => (p.id === target.id ? updatedProject : p)));
+      if (user) {
+        void saveProjectToFirestore(updatedProject).catch(() => {});
+      }
+    } catch (err) {
+      setDeployError(err instanceof Error ? err.message : 'Failed to prepare publish ZIP.');
+    } finally {
+      setIsDeploying(false);
+    }
+  };
+
+  const handleOpenPublish = (targetProject?: MistProject) => {
+    const target = targetProject || activeProject;
+    if (!target) return;
+    setDeployProjectId(target.id);
+    setDeployError(null);
+    setDownloadedFileName(null);
+    setDeployOpen(true);
+    const defaultSlug = target.publishedSlug || suggestShortSlug(target.name);
+    void handleDownloadPublishZip(defaultSlug, target);
   };
 
   const handleDeleteDeployment = async (slug: string) => {
@@ -1358,16 +1403,8 @@ export default function App() {
           onOpenVoiceChat={() => setVoiceChatOpen(true)}
           onRebundle={() => void runBundle(activeProject)}
           onDuplicateProject={() => handleDuplicateProject(activeProject)}
-          onExportZip={() => void handleExportZip()}
-          onOpenDeploy={() => {
-            setDeployError(null);
-            setPublishedUrl(
-              activeProject.isPublished && activeProject.publishedSlug
-                ? `/${activeProject.publishedSlug}`
-                : null,
-            );
-            setDeployOpen(true);
-          }}
+          onExportZip={() => void handleExportZip(activeProject)}
+          onOpenDeploy={() => handleOpenPublish(activeProject)}
           onOpenProviders={() => setProvidersOpen(true)}
           onOpenSettings={navigateToSettings}
           onOpenAccount={() => {
@@ -1401,6 +1438,7 @@ export default function App() {
           onCancelGeneration={handleCancelGeneration}
           onOpenVoiceChat={() => setVoiceChatOpen(true)}
           onOpenProject={(project) => navigateToProject(project.id)}
+          onPublishProject={(project) => handleOpenPublish(project)}
           onDuplicateProject={handleDuplicateProject}
           onDeleteProject={handleDeleteProject}
           onOpenProviders={() => setProvidersOpen(true)}
@@ -1428,12 +1466,13 @@ export default function App() {
 
       <DeployModal
         isOpen={deployOpen}
-        project={activeProject}
+        project={deployProject}
         isDeploying={isDeploying}
         deployError={deployError}
-        publishedUrl={publishedUrl}
+        downloadedFileName={downloadedFileName}
         onClose={() => setDeployOpen(false)}
-        onDeploy={(slug) => void handleDeployProject(slug)}
+        onDownloadPublishZip={(slug) => void handleDownloadPublishZip(slug)}
+        onDownloadStandaloneHtml={(slug) => void handleDownloadStandaloneHtml(undefined, slug)}
       />
 
       <DeploymentsModal

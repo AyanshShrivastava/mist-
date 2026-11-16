@@ -27,7 +27,7 @@ import {
 import { extractChoiceText, ProviderHttpError, streamByokCompletion } from './byokClient';
 import { redactSecrets } from './aiErrors';
 import { chunkOperations } from '../firebase/batchOps';
-import { maskApiKey, suggestShortSlug } from './projectOps';
+import { buildExportManifest, maskApiKey, suggestShortSlug } from './projectOps';
 
 test('SSRF protection blocks private/loopback IPs, DNS rebinding resolutions, and HTTP redirects', async () => {
   assert.equal(isPrivateOrReservedIp('127.0.0.1'), true);
@@ -557,3 +557,46 @@ test('extractChoiceText, maskApiKey, and suggestShortSlug normalize outputs clea
   assert.equal(maskApiKey(''), '');
   assert.equal(suggestShortSlug('My Awesome Coffee Roastery Website App Builder', 20), 'my-awesome-coffee');
 });
+
+test('buildExportManifest includes standalone dist/index.html, Render Static blueprint, and free no-credit-card guide', () => {
+  const manifest = buildExportManifest(
+    {
+      id: 'proj_test',
+      name: 'Tokyo Coffee Roastery',
+      description: 'Specialty pour-over cafe',
+      prompt: 'Build a Tokyo specialty coffee roastery website',
+      isPublished: false,
+      createdAt: '2026-11-16T00:00:00Z',
+      updatedAt: '2026-11-16T00:00:00Z',
+      files: [
+        {
+          id: 'f1',
+          path: 'src/App.tsx',
+          language: 'tsx',
+          content: 'export default function App() { return <main>Tokyo Coffee</main>; }',
+        },
+        {
+          id: 'f2',
+          path: 'src/index.css',
+          language: 'css',
+          content: '@import "tailwindcss";\n',
+        },
+      ],
+      chatHistory: [],
+    },
+    {
+      slug: 'tokyo-coffee',
+      standaloneHtml: '<!doctype html><html><body>Tokyo Coffee Standalone</body></html>',
+    },
+  );
+
+  assert.equal(manifest['dist/index.html'], '<!doctype html><html><body>Tokyo Coffee Standalone</body></html>');
+  assert.ok(manifest['render.yaml'].includes('name: tokyo-coffee'));
+  assert.ok(manifest['render.yaml'].includes('runtime: static'));
+  assert.ok(manifest['render.yaml'].includes('staticPublishPath: ./dist'));
+  assert.ok(manifest['DEPLOY_FREE.md'].includes('no credit card billing required'));
+  assert.ok(manifest['DEPLOY_FREE.md'].includes('https://app.netlify.com/drop'));
+  assert.ok(manifest['DEPLOY_FREE.md'].includes('https://dashboard.render.com/select-repo?type=static'));
+  assert.equal(Object.values(manifest).some((v) => v.includes('/api/app-ai')), false);
+});
+

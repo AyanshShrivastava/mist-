@@ -837,3 +837,41 @@ export function createFirebaseAuthMiddleware(options?: {
     }
   };
 }
+
+// --- 6. Same-Origin / Cross-Site Mutation Defense ---
+
+export function enforceSameOriginOnMutations(
+  req: ExpressRequest,
+  res: ExpressResponse,
+  next: NextFunction,
+): void {
+  const method = req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    next();
+    return;
+  }
+
+  const secFetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+  if (secFetchSite === 'cross-site') {
+    res.status(403).json({ error: 'Cross-site mutating requests are blocked for security.' });
+    return;
+  }
+
+  const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+  const hostHeader = typeof req.headers.host === 'string' ? req.headers.host.trim().toLowerCase() : '';
+  if (originHeader && hostHeader) {
+    try {
+      const parsedOrigin = new URL(originHeader);
+      if (parsedOrigin.host.toLowerCase() !== hostHeader) {
+        res.status(403).json({ error: 'Cross-origin mutating requests are blocked for security.' });
+        return;
+      }
+    } catch {
+      res.status(403).json({ error: 'Invalid request Origin header.' });
+      return;
+    }
+  }
+
+  next();
+}
+

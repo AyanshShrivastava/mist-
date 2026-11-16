@@ -8,14 +8,19 @@ import {
   Code2,
   Copy,
   Cpu,
+  Download,
   FileCode2,
   FolderOpen,
+  Gamepad2,
   Globe,
   KeyRound,
+  Layers,
   Loader2,
   Menu,
   Mic,
   Moon,
+  Pause,
+  Play,
   Search,
   Settings,
   Sun,
@@ -48,6 +53,9 @@ import {
 import MistLogo, { MistMark } from './MistLogo';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
 import { maskApiKey } from '../utils/projectOps';
+import showcasePromptImg from '../assets/images/mist_showcase_prompt_1794824266440.jpg';
+import showcaseBuildImg from '../assets/images/mist_showcase_build_1794824267456.jpg';
+import showcaseLaunchImg from '../assets/images/mist_showcase_launch_1794824268004.jpg';
 
 interface HomeViewProps {
   user: User | null;
@@ -70,6 +78,7 @@ interface HomeViewProps {
   onCancelGeneration: () => void;
   onOpenVoiceChat: () => void;
   onOpenProject: (project: MistProject) => void;
+  onPublishProject: (project: MistProject) => void;
   onDuplicateProject: (project: MistProject) => void;
   onDeleteProject: (projectId: string) => void;
   onOpenProviders: () => void;
@@ -78,32 +87,73 @@ interface HomeViewProps {
   onOpenAccount: () => void;
 }
 
-const QUICK_PROMPTS = [
+const INTERACTIVE_MODES = [
   {
-    label: 'Subway Surfers 2D',
-    icon: Box,
-    prompt:
-      'Interactive Subway Surfers 2D endless runner game on an HTML5 canvas with 3 train lanes, coin pickups, oncoming trains & barriers, smooth keyboard/swipe lane switching, jump & slide, combo score HUD, and working Play Game & Restart buttons.',
-  },
-  {
-    label: '3D Three.js Showcase',
-    icon: Code2,
-    prompt:
-      'Interactive Three.js 3D architectural product studio with OrbitControls, real-time PBR materials, lighting presets, camera angles, and clean HUD overlay.',
-  },
-  {
-    label: 'AI Writing Workspace',
-    icon: Terminal,
-    prompt:
-      'Editorial AI writing & editing web app with a clean split workspace, tone controls, and a live AI assistant powered by POST /api/app-ai.',
-  },
-  {
-    label: 'Coffee Roastery',
-    icon: Globe,
-    prompt:
+    id: 'web',
+    label: 'Web App',
+    detail: 'Landing pages, SaaS tools & dashboards',
+    icon: Layers,
+    starterPrompt:
       'Minimalist Tokyo specialty coffee roastery website with single-origin menu, brew ratio calculator, and bar reservation.',
   },
-];
+  {
+    id: 'game',
+    label: '2D Canvas Game',
+    detail: 'Playable arcade runners & physics games',
+    icon: Gamepad2,
+    starterPrompt:
+      'Interactive Subway Surfers 2D endless runner game on an HTML5 canvas with 3 train lanes, coin pickups, oncoming barriers, keyboard & swipe controls, and Play/Restart buttons.',
+  },
+  {
+    id: '3d',
+    label: '3D Scene',
+    detail: 'Three.js interactive product & spatial views',
+    icon: Box,
+    starterPrompt:
+      'Interactive Three.js 3D architectural product studio with OrbitControls, real-time PBR materials, camera angle presets, and clean HUD overlay.',
+  },
+  {
+    id: 'research',
+    label: 'Live Web App',
+    detail: 'Real web research with verified source links',
+    icon: Globe,
+    starterPrompt:
+      'Editorial AI research digest & writing workspace with live web search citations and an in-app assistant powered by POST /api/app-ai.',
+  },
+] as const;
+
+const WORKFLOW_STEPS = [
+  {
+    step: '01',
+    title: 'Give a Simple Prompt',
+    caption: 'Describe your idea in plain English or use Voice Studio.',
+    image: showcasePromptImg,
+    alt: 'Studio desk showing a prompt composer turning an idea into a web layout plan',
+    samplePrompt: '"Build a Tokyo specialty coffee roastery site with a brew ratio calculator."',
+    sampleFiles: ['Prompt queued', 'Model ready (BYOK)'],
+    outcome: 'Understands layout, interactivity, 2D Canvas, or 3D scene requirements automatically.',
+  },
+  {
+    step: '02',
+    title: 'AI Builds & Researches Live',
+    caption: 'Generates complete React + TypeScript files and verifies real web sources.',
+    image: showcaseBuildImg,
+    alt: 'Widescreen monitor displaying React TypeScript code beside a live website preview',
+    samplePrompt: 'Writing src/App.tsx, src/components/BrewCalculator.tsx, src/index.css...',
+    sampleFiles: ['src/App.tsx', 'src/components/Menu.tsx', 'src/index.css'],
+    outcome: 'Edit visually by clicking elements or chatting in AI Refine with Chat & Preview tabs.',
+  },
+  {
+    step: '03',
+    title: 'Download ZIP & Host Free',
+    caption: 'Clicking Publish downloads your standalone site ready for no-card free hosts.',
+    image: showcaseLaunchImg,
+    alt: 'Minimalist laptop displaying the finished specialty coffee roastery website live in browser',
+    samplePrompt: 'Packaged dist/index.html + render.yaml -> Ready for Netlify Drop or Render Static.',
+    sampleFiles: ['dist/index.html', 'render.yaml', 'DEPLOY_FREE.md'],
+    outcome: '100% standalone static output — zero visitor load or billing on Mist’s server.',
+  },
+] as const;
 
 export default function HomeView({
   user,
@@ -126,6 +176,7 @@ export default function HomeView({
   onCancelGeneration,
   onOpenVoiceChat,
   onOpenProject,
+  onPublishProject,
   onDuplicateProject,
   onDeleteProject,
   onOpenProviders,
@@ -134,12 +185,24 @@ export default function HomeView({
   onOpenAccount,
 }: HomeViewProps) {
   const [promptInput, setPromptInput] = useState('');
+  const [selectedMode, setSelectedMode] = useState<string>('web');
   const [promptValidationError, setPromptValidationError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [projectFilter, setProjectFilter] = useState<'all' | 'published' | 'draft'>('all');
   const [quickModelOpen, setQuickModelOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  // Interactive Prompt-to-Website Walkthrough state
+  const [activeShowcaseStep, setActiveShowcaseStep] = useState(0);
+  const [isShowcasePlaying, setIsShowcasePlaying] = useState(() => {
+    if (typeof window !== 'undefined' && window.matchMedia) {
+      return !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    }
+    return true;
+  });
+  const [showLoggedInTour, setShowLoggedInTour] = useState(false);
+
   const [liveModels, setLiveModels] = useState<ModelCatalogItem[] | null>(null);
   const [catalogSource, setCatalogSource] = useState<CatalogSource>('preset');
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
@@ -150,6 +213,15 @@ export default function HomeView({
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const catalogAbortRef = useRef<AbortController | null>(null);
   const catalogSeqRef = useRef(0);
+
+  useEffect(() => {
+    if (!isShowcasePlaying) return;
+    if (user && !showLoggedInTour) return;
+    const id = window.setInterval(() => {
+      setActiveShowcaseStep((prev) => (prev + 1) % WORKFLOW_STEPS.length);
+    }, 4500);
+    return () => window.clearInterval(id);
+  }, [isShowcasePlaying, user, showLoggedInTour]);
 
   const loadQuickCatalog = useCallback(
     async (forceRefresh = false) => {
@@ -268,13 +340,121 @@ export default function HomeView({
     providerConfig.model ? currentModelMeta?.label || providerConfig.model : 'Select model'
   }`;
   const appAiActiveForPrompt = shouldEnableAppAi(promptInput, appAiMode);
+  const currentStepData = WORKFLOW_STEPS[activeShowcaseStep] || WORKFLOW_STEPS[0];
+
+  const renderShowcaseWalkthrough = () => (
+    <section
+      id="walkthrough"
+      aria-label="How Mist builds websites"
+      className="mx-auto max-w-6xl px-4 sm:px-6 pb-12"
+    >
+      <div className="rounded-2xl border border-zinc-200/90 bg-white/85 p-4 sm:p-6 dark:border-zinc-800/90 dark:bg-zinc-950/75">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+          <div>
+            <h2 className="font-display text-lg sm:text-xl font-semibold tracking-tight text-zinc-950 dark:text-white">
+              From Prompt to Free Live Website
+            </h2>
+            <p className="mt-0.5 text-xs sm:text-sm text-zinc-600 dark:text-zinc-400">
+              Watch how Mist turns plain-English prompts into standalone React code ready for free static hosting.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsShowcasePlaying((p) => !p)}
+              className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 cursor-pointer whitespace-nowrap"
+            >
+              {isShowcasePlaying ? (
+                <>
+                  <Pause className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
+                  <span>Pause Reel</span>
+                </>
+              ) : (
+                <>
+                  <Play className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
+                  <span>Play Reel</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+          {/* Interactive Step Selector */}
+          <div className="lg:col-span-5 flex flex-col justify-between gap-2.5">
+            {WORKFLOW_STEPS.map((item, idx) => {
+              const isActive = idx === activeShowcaseStep;
+              return (
+                <button
+                  key={item.step}
+                  type="button"
+                  onClick={() => {
+                    setActiveShowcaseStep(idx);
+                    setIsShowcasePlaying(false);
+                  }}
+                  className={`flex-1 rounded-xl border p-3.5 text-left transition-colors cursor-pointer ${
+                    isActive
+                      ? 'border-blue-500/80 bg-blue-50/75 dark:border-blue-500/70 dark:bg-blue-950/30'
+                      : 'border-zinc-200/80 bg-zinc-50/60 hover:bg-zinc-100/70 dark:border-zinc-800/80 dark:bg-zinc-900/50 dark:hover:bg-zinc-900'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-display text-sm font-semibold text-zinc-950 dark:text-white">
+                      {item.step}. {item.title}
+                    </span>
+                    {isActive && (
+                      <span className="text-[11px] font-medium text-blue-600 dark:text-blue-400">
+                        Viewing
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+                    {item.caption}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Synchronized Visual Frame */}
+          <div className="lg:col-span-7 relative overflow-hidden rounded-xl border border-zinc-200 bg-zinc-950 dark:border-zinc-800 lg:min-h-[340px] flex flex-col justify-end">
+            <div className="relative h-48 sm:h-56 lg:absolute lg:inset-0 lg:h-full w-full overflow-hidden">
+              <img
+                src={currentStepData.image}
+                alt={currentStepData.alt}
+                referrerPolicy="no-referrer"
+                className="h-full w-full object-cover object-center transition-opacity duration-300"
+              />
+              <div
+                aria-hidden="true"
+                className="hidden lg:block absolute inset-0 bg-gradient-to-t from-black/90 via-black/45 to-black/15"
+              />
+            </div>
+            <div className="relative z-10 bg-zinc-950 lg:bg-transparent p-4 sm:p-5 text-white space-y-2">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-300 font-mono">
+                <span>Step {currentStepData.step} of 03</span>
+                <span aria-hidden="true">·</span>
+                <span>{currentStepData.sampleFiles.join(' · ')}</span>
+              </div>
+              <p className="font-mono text-xs sm:text-sm text-zinc-100 bg-black/55 border border-white/15 rounded-lg px-3 py-2">
+                {currentStepData.samplePrompt}
+              </p>
+              <p className="text-xs text-zinc-300 lg:text-zinc-200 leading-relaxed">
+                {currentStepData.outcome}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
 
   return (
     <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] flex flex-col">
       {/* Three-Zone Studio Header */}
       <header className="sticky top-0 z-30 border-b border-zinc-200/80 bg-[#FAFAFA]/85 backdrop-blur-xl dark:border-zinc-800/80 dark:bg-[#09090B]/80 transition-colors">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 h-15">
-          <a href="#top" className="focus:outline-none">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-8 px-4 sm:px-6 h-15">
+          <a href="#top" className="focus:outline-none whitespace-nowrap shrink-0">
             <MistLogo size="md" />
           </a>
 
@@ -310,7 +490,7 @@ export default function HomeView({
               className="inline-flex items-center gap-1.5 hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Globe className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" aria-hidden="true" />
-              <span>Deployments</span>
+              <span>Free Hosting</span>
             </button>
             <button
               type="button"
@@ -409,7 +589,7 @@ export default function HomeView({
                   className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50/80 px-3.5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer"
                 >
                   <Globe className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-                  <span>Deployments</span>
+                  <span>Free Hosting</span>
                 </button>
                 <button
                   type="button"
@@ -429,53 +609,88 @@ export default function HomeView({
       </header>
 
       <main id="top" className="flex-1">
-        {/* Hero Prompt Composer */}
-        <section className="mx-auto max-w-4xl px-4 sm:px-6 pt-6 pb-9 sm:pt-14 sm:pb-14 lg:pt-20 lg:pb-20">
+        {/* Hero & Interactive Studio Composer */}
+        <section className="mx-auto max-w-5xl px-4 sm:px-6 pt-6 pb-8 sm:pt-12 sm:pb-12">
           <motion.div
-            initial={{ opacity: 0, y: 14 }}
+            initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: 0.34, ease: [0.16, 1, 0.3, 1] }}
             className="text-center sm:text-left"
           >
-            <p className="inline-flex items-center gap-2 text-xs font-medium tracking-wide text-blue-600 dark:text-blue-400">
-              <span>Prompt</span>
-              <span aria-hidden="true">&rarr;</span>
-              <span>Create</span>
-              <span aria-hidden="true">&rarr;</span>
-              <span>Deploy</span>
-            </p>
-            <h1 className="mt-2.5 sm:mt-3 font-display text-[30px] sm:text-5xl lg:text-[56px] font-semibold tracking-tight leading-[1.08] text-zinc-950 dark:text-white [text-wrap:balance]">
+            {user ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
+                  Welcome back, {user.displayName?.split(' ')[0] || user.email} · {projects.length} saved {projects.length === 1 ? 'site' : 'sites'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowLoggedInTour((v) => !v)}
+                  className="text-xs font-medium text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white underline-offset-4 hover:underline cursor-pointer"
+                >
+                  {showLoggedInTour ? 'Hide Walkthrough' : 'How Mist Works'}
+                </button>
+              </div>
+            ) : (
+              <p className="inline-flex items-center gap-2 text-xs font-medium tracking-wide text-blue-600 dark:text-blue-400">
+                <span>Describe Idea</span>
+                <span aria-hidden="true">&rarr;</span>
+                <span>AI Builds Live</span>
+                <span aria-hidden="true">&rarr;</span>
+                <span>Download &amp; Host Free</span>
+              </p>
+            )}
+
+            <h1 className="mt-2 font-display text-[30px] sm:text-5xl lg:text-[52px] font-semibold tracking-tight leading-[1.08] text-zinc-950 dark:text-white [text-wrap:balance]">
               Mist —{' '}
               <span className="bg-gradient-to-r from-blue-600 via-indigo-500 to-sky-500 dark:from-blue-400 dark:via-indigo-300 dark:to-sky-400 bg-clip-text text-transparent">
                 Ideas into websites.
               </span>
             </h1>
-            <p className="mt-3 sm:mt-4 text-sm sm:text-lg leading-relaxed text-zinc-600 dark:text-zinc-400 max-w-2xl mx-auto sm:mx-0">
-              Build React apps, interactive 2D Canvas games, Three.js 3D experiences, and AI-enabled tools on your own BYOK model and API key.
+            <p className="mt-3 text-sm sm:text-base leading-relaxed text-zinc-600 dark:text-zinc-400 max-w-2xl mx-auto sm:mx-0">
+              {user
+                ? 'Pick a starting style below or describe anything in plain English. Publish downloads a standalone bundle ready for free no-card hosting.'
+                : 'Type a prompt or speak an idea, watch Mist build React apps, 2D games, or 3D scenes with your encrypted BYOK key, and export for free external hosting.'}
             </p>
-
-            {/* Clean Capability Markers (Unboxed typography + functional symbols) */}
-            <div className="mt-4 flex flex-wrap items-center justify-center sm:justify-start gap-x-5 gap-y-2 text-xs text-zinc-500 dark:text-zinc-400">
-              <span className="inline-flex items-center gap-1.5">
-                <Code2 className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-                <span>React + TypeScript</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <Box className="h-3.5 w-3.5 text-indigo-500" aria-hidden="true" />
-                <span>Three.js &amp; 2D Canvas</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <Terminal className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-                <span>Live /api/app-ai</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <KeyRound className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
-                <span>100% BYOK</span>
-              </span>
-            </div>
           </motion.div>
 
-          {/* Model Health Warning Banner (Rate Limits / Server Outages) */}
+          {/* Interactive One-Tap Builder Type Picker */}
+          <div className="mt-6 grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+            {INTERACTIVE_MODES.map((mode) => {
+              const Icon = mode.icon;
+              const isSelected = selectedMode === mode.id;
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedMode(mode.id);
+                    setPromptInput(mode.starterPrompt);
+                    setPromptValidationError(null);
+                    if (mode.id === 'research') {
+                      onChangeWebSearchMode('on');
+                      onChangeAppAiMode('always');
+                    }
+                    promptInputRef.current?.focus();
+                  }}
+                  className={`flex flex-col items-start gap-1 rounded-xl border p-3 text-left transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'border-blue-500/80 bg-blue-50/75 dark:border-blue-500/60 dark:bg-blue-950/30'
+                      : 'border-zinc-200/90 bg-white/80 hover:bg-zinc-50 dark:border-zinc-800/90 dark:bg-zinc-900/70 dark:hover:bg-zinc-900'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-950 dark:text-white">
+                    <Icon className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400 shrink-0" aria-hidden="true" />
+                    <span>{mode.label}</span>
+                  </span>
+                  <span className="text-[11px] text-zinc-600 dark:text-zinc-400 leading-snug">
+                    {mode.detail}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Model Health Warning Banner */}
           <AnimatePresence>
             {modelIncident && (
               <motion.div
@@ -483,7 +698,7 @@ export default function HomeView({
                 initial={{ opacity: 0, y: -6 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
-                className="mt-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50/95 px-4 py-3 text-xs text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/50 dark:text-amber-200"
+                className="mt-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50/95 px-4 py-3 text-xs text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/50 dark:text-amber-200"
               >
                 <div className="flex items-start gap-2.5">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
@@ -503,12 +718,13 @@ export default function HomeView({
             )}
           </AnimatePresence>
 
+          {/* Simple Interactive Prompt Composer */}
           <motion.form
             onSubmit={handleSubmit}
-            initial={{ opacity: 0, y: 18 }}
+            initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.42, delay: 0.06, ease: [0.16, 1, 0.3, 1] }}
-            className="mist-composer-shell mt-7 rounded-2xl border border-zinc-200/90 p-4 sm:p-5 dark:border-zinc-800/90 focus-within:border-blue-500/70 dark:focus-within:border-blue-500/60 transition-colors"
+            transition={{ duration: 0.36, delay: 0.04, ease: [0.16, 1, 0.3, 1] }}
+            className="mist-composer-shell mt-5 rounded-2xl border border-zinc-200/90 p-4 sm:p-5 dark:border-zinc-800/90 focus-within:border-blue-500/70 dark:focus-within:border-blue-500/60 transition-colors"
           >
             <label htmlFor="mist-prompt-input" className="sr-only">
               Describe the website you want to build
@@ -522,11 +738,11 @@ export default function HomeView({
                 setPromptInput(e.target.value);
                 if (promptValidationError) setPromptValidationError(null);
               }}
-              placeholder="Describe your website, 2D game, or Three.js scene: e.g., Subway Surfers 2D runner with coins and lane switching, or a SaaS dashboard with live AI..."
+              placeholder="Describe what you want to create (e.g., Tokyo coffee shop, 2D runner game, or portfolio)..."
               className="w-full resize-none bg-transparent text-sm sm:text-base text-zinc-950 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500"
             />
 
-            {/* Live Lovable / Base44 Build Activity Feed while generating */}
+            {/* Live AI Build Activity Feed while generating */}
             <AnimatePresence>
               {isGenerating && streamProgress && (
                 <motion.div
@@ -642,13 +858,13 @@ export default function HomeView({
               </div>
             )}
 
-            <div className="mt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-zinc-200/80 pt-3.5 dark:border-zinc-800/80">
-              <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 min-w-0">
+            <div className="mt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-t border-zinc-200/80 pt-3.5 dark:border-zinc-800/80">
+              <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-1.5 min-w-0">
                 <button
                   type="button"
                   aria-expanded={quickModelOpen}
                   onClick={() => setQuickModelOpen((v) => !v)}
-                  className={`inline-flex min-h-[44px] sm:min-h-[34px] items-center justify-between sm:justify-start gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`inline-flex min-h-[44px] sm:min-h-[34px] items-center justify-between sm:justify-start gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     activeIncidentMatches(modelIncident, providerConfig)
                       ? 'border-amber-400/70 bg-amber-50 text-amber-900 dark:border-amber-700/70 dark:bg-amber-950/50 dark:text-amber-200'
                       : !hasApiKey
@@ -658,7 +874,7 @@ export default function HomeView({
                 >
                   <span className="inline-flex items-center gap-1.5 min-w-0">
                     <Cpu className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" aria-hidden="true" />
-                    <span className="max-w-[96px] sm:max-w-[180px] truncate">{providerLabel}</span>
+                    <span className="max-w-[96px] sm:max-w-[116px] truncate">{providerLabel}</span>
                     {!hasApiKey ? (
                       <span className="hidden sm:inline text-[10px] font-semibold text-blue-600 dark:text-blue-300">
                         · Add key
@@ -692,13 +908,13 @@ export default function HomeView({
                   type="button"
                   whileTap={{ scale: 0.96 }}
                   onClick={onOpenVoiceChat}
-                  className="inline-flex min-h-[44px] sm:min-h-[34px] items-center justify-center sm:justify-start gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex min-h-[44px] sm:min-h-[34px] items-center justify-center sm:justify-start gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <Mic className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
                   <span>Voice Chat</span>
                 </motion.button>
 
-                <label className="col-span-2 sm:col-span-1 inline-flex min-h-[38px] sm:min-h-[34px] items-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-2.5 text-[11px] font-medium text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+                <label className="col-span-2 sm:col-span-1 inline-flex min-h-[38px] sm:min-h-[34px] items-center gap-1 rounded-xl border border-zinc-200 bg-zinc-50 px-2 text-[11px] font-medium text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
                   <Terminal
                     className={`h-3.5 w-3.5 shrink-0 ${
                       appAiActiveForPrompt ? 'text-blue-600 dark:text-blue-400' : 'text-zinc-400'
@@ -723,7 +939,7 @@ export default function HomeView({
                   </select>
                 </label>
 
-                <label className="col-span-2 sm:col-span-1 inline-flex min-h-[38px] sm:min-h-[34px] items-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-2.5 text-[11px] font-medium text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+                <label className="col-span-2 sm:col-span-1 inline-flex min-h-[38px] sm:min-h-[34px] items-center gap-1 rounded-xl border border-zinc-200 bg-zinc-50 px-2 text-[11px] font-medium text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
                   <Globe
                     className={`h-3.5 w-3.5 shrink-0 ${
                       webSearchMode === 'on'
@@ -762,7 +978,7 @@ export default function HomeView({
                 )}
               </div>
 
-              <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between sm:justify-end gap-2 sm:gap-3 shrink-0">
+              <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between sm:justify-end gap-2 sm:gap-2.5 shrink-0">
                 {!user && (
                   <span className="text-center sm:text-right text-[11px] text-zinc-500 dark:text-zinc-400 whitespace-nowrap">
                     Sign in to generate
@@ -773,7 +989,7 @@ export default function HomeView({
                   whileHover={{ y: -1 }}
                   whileTap={{ scale: 0.97 }}
                   disabled={isGenerating}
-                  className="inline-flex min-h-[48px] sm:min-h-[40px] w-full sm:w-auto items-center justify-center gap-2 rounded-xl mist-primary-gradient px-5 py-2.5 text-sm font-medium text-white shadow-md shadow-blue-600/20 disabled:opacity-60 transition-all whitespace-nowrap shrink-0 cursor-pointer"
+                  className="inline-flex min-h-[48px] sm:min-h-[38px] w-full sm:w-auto items-center justify-center gap-2 rounded-xl mist-primary-gradient px-4 py-2 text-sm font-medium text-white shadow-md shadow-blue-600/20 disabled:opacity-60 transition-all whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   {isGenerating ? (
                     <>
@@ -890,41 +1106,10 @@ export default function HomeView({
               )}
             </AnimatePresence>
           </motion.form>
-
-          {/* Starter Prompt Suggestions */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.35, delay: 0.14 }}
-            className="mt-5 space-y-2 sm:space-y-0 sm:flex sm:flex-wrap sm:items-center sm:justify-start sm:gap-2"
-          >
-            <span className="block sm:inline text-center sm:text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 sm:mr-1">
-              Try a prompt:
-            </span>
-            <div className="grid grid-cols-2 gap-2 sm:contents">
-              {QUICK_PROMPTS.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <motion.button
-                    key={item.label}
-                    type="button"
-                    whileHover={{ y: -1 }}
-                    whileTap={{ scale: 0.97 }}
-                    onClick={() => {
-                      setPromptInput(item.prompt);
-                      setPromptValidationError(null);
-                      promptInputRef.current?.focus();
-                    }}
-                    className="inline-flex min-h-[42px] sm:min-h-[32px] items-center justify-center sm:justify-start gap-1.5 rounded-xl sm:rounded-lg border border-zinc-200/90 bg-white/90 px-2.5 sm:px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-blue-300 hover:bg-white dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:border-blue-700/60 dark:hover:bg-zinc-900 transition-colors truncate sm:whitespace-nowrap sm:shrink-0 cursor-pointer"
-                  >
-                    <Icon className="h-3.5 w-3.5 text-blue-500 shrink-0" aria-hidden="true" />
-                    <span className="truncate">{item.label}</span>
-                  </motion.button>
-                );
-              })}
-            </div>
-          </motion.div>
         </section>
+
+        {/* Visual Walkthrough Reel (Always visible when signed out; toggleable when signed in) */}
+        {(!user || showLoggedInTour) && renderShowcaseWalkthrough()}
 
         {/* Saved Websites Management */}
         <section
@@ -940,7 +1125,7 @@ export default function HomeView({
                 <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
                   {user
                     ? `Projects created for ${user.email}`
-                    : 'Sign in with Google to keep your websites saved across devices.'}
+                    : 'Sign in with Google to save projects and encrypted BYOK keys to your account.'}
                 </p>
               </div>
 
@@ -994,7 +1179,7 @@ export default function HomeView({
                 </h3>
                 <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400 max-w-md mx-auto">
                   {projects.length === 0
-                    ? 'Describe an idea in the prompt composer above or open Voice Studio to talk through your website design.'
+                    ? 'Pick any mode above, describe an idea in the prompt composer, or open Voice Studio.'
                     : 'Clear your search filter to view all saved websites.'}
                 </p>
                 {projects.length === 0 && (
@@ -1048,15 +1233,10 @@ export default function HomeView({
                         {project.isPublished && project.publishedSlug && (
                           <>
                             <span className="text-xs text-zinc-400">·</span>
-                            <a
-                              href={`/${project.publishedSlug}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline dark:text-emerald-400"
-                            >
-                              <Globe className="h-3 w-3" aria-hidden="true" />
-                              <span>/{project.publishedSlug}</span>
-                            </a>
+                            <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                              <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                              <span>Exported ({project.publishedSlug}.zip)</span>
+                            </span>
                           </>
                         )}
                       </div>
@@ -1069,9 +1249,17 @@ export default function HomeView({
                       <button
                         type="button"
                         onClick={() => onOpenProject(project)}
-                        className="flex-1 sm:flex-initial min-h-[44px] sm:min-h-[36px] rounded-xl sm:rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
+                        className="flex-1 sm:flex-initial min-h-[44px] sm:min-h-[36px] rounded-xl sm:rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer whitespace-nowrap"
                       >
                         Open Editor
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onPublishProject(project)}
+                        className="inline-flex min-h-[44px] sm:min-h-[36px] items-center gap-1.5 rounded-xl sm:rounded-lg mist-primary-gradient px-3 py-1.5 text-xs font-medium text-white shadow-sm cursor-pointer whitespace-nowrap"
+                      >
+                        <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Publish</span>
                       </button>
                       <button
                         type="button"
@@ -1102,7 +1290,7 @@ export default function HomeView({
         <div className="mx-auto flex max-w-7xl flex-col sm:flex-row items-center justify-between gap-4 px-4 sm:px-6 text-xs text-zinc-500 dark:text-zinc-400">
           <div className="flex items-center gap-2.5 text-center sm:text-left">
             <MistLogo size="sm" />
-            <span>— Ideas into websites. · {deployments.length} published {deployments.length === 1 ? 'site' : 'sites'}</span>
+            <span>— Ideas into websites. · {projects.length} {projects.length === 1 ? 'project' : 'projects'}</span>
           </div>
           <div className="flex items-center gap-2">
             <button

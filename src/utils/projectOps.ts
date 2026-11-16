@@ -392,8 +392,12 @@ export function applyDeterministicRefinement(
   };
 }
 
-export function buildExportManifest(project: MistProject): Record<string, string> {
+export function buildExportManifest(
+  project: MistProject,
+  options?: { standaloneHtml?: string; slug?: string },
+): Record<string, string> {
   const manifest: Record<string, string> = {};
+  const cleanSlug = options?.slug ? sanitizeSlug(options.slug) : suggestShortSlug(project.name);
 
   const usesThreeJs = project.files.some((file) =>
     /from\s+['"]three(?:\/|['"])|import\s+['"]three['"]/.test(file.content),
@@ -401,7 +405,7 @@ export function buildExportManifest(project: MistProject): Record<string, string
 
   manifest['package.json'] = JSON.stringify(
     {
-      name: sanitizeSlug(project.name),
+      name: cleanSlug,
       private: true,
       version: '1.0.0',
       type: 'module',
@@ -502,5 +506,43 @@ export function buildExportManifest(project: MistProject): Record<string, string
     manifest[file.path] = file.content;
   }
 
+  if (options?.standaloneHtml) {
+    manifest['dist/index.html'] = options.standaloneHtml;
+  }
+
+  manifest['render.yaml'] = [
+    'services:',
+    '  - type: web',
+    `    name: ${cleanSlug}`,
+    '    runtime: static',
+    '    buildCommand: npm install && npm run build',
+    '    staticPublishPath: ./dist',
+    '    routes:',
+    '      - type: rewrite',
+    '        source: /*',
+    '        destination: /index.html',
+    '',
+  ].join('\n');
+
+  manifest['DEPLOY_FREE.md'] = [
+    `# Publish "${project.name.replace(/[\r\n]/g, ' ')}" for Free (No Credit Card Required)`,
+    '',
+    'Your exported project runs 100% standalone on any free static host with zero traffic sent back to Mist.',
+    '',
+    'CAUTION: Choose ONLY static hosting plans with a free tier and no credit card billing required.',
+    'Avoid paid server instances or hosts that require adding a credit card upfront.',
+    '',
+    '## Recommended Free Static Hosts (No Credit Card)',
+    '1. Netlify Drop (Fastest - Drag & Drop): https://app.netlify.com/drop',
+    '   - Unzip this file and drag the `dist` folder onto Netlify Drop to go live immediately.',
+    '2. Render Static Sites (GitHub + render.yaml included): https://dashboard.render.com/select-repo?type=static',
+    '   - Push this folder to a GitHub repo, pick "Static Site", set Build Command `npm install && npm run build`, Publish Directory `dist`.',
+    '3. Vercel Hobby (Free Static): https://vercel.com/new',
+    '4. Cloudflare Pages (Free Unlimited Static Bandwidth): https://dash.cloudflare.com/',
+    '5. GitHub Pages (Free Public Repo Hosting): https://pages.github.com/',
+    '',
+  ].join('\n');
+
   return manifest;
 }
+

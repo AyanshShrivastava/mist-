@@ -4,15 +4,18 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
+  FileCode2,
   Globe,
   KeyRound,
   Link2,
   Loader2,
   LogOut,
   ShieldAlert,
+  ShieldCheck,
   Tag,
   Trash2,
   X,
@@ -589,14 +592,48 @@ export function ProvidersModal({
   );
 }
 
+const FREE_STATIC_HOSTS = [
+  {
+    name: 'Netlify Drop',
+    badge: 'Fastest · Drag & Drop',
+    url: 'https://app.netlify.com/drop',
+    steps: 'Unzip your download and drag the `dist` folder onto Netlify Drop. Live in ~10 seconds.',
+  },
+  {
+    name: 'Render Static Sites',
+    badge: 'No Credit Card · render.yaml Included',
+    url: 'https://dashboard.render.com/select-repo?type=static',
+    steps: 'Push the folder to GitHub, choose Static Site (`dist` directory). `render.yaml` is pre-included.',
+  },
+  {
+    name: 'Vercel Hobby',
+    badge: 'No Credit Card · Free Static',
+    url: 'https://vercel.com/new',
+    steps: 'Import from GitHub or run `npx vercel` inside the unzipped folder.',
+  },
+  {
+    name: 'Cloudflare Pages',
+    badge: 'No Credit Card · Unlimited Bandwidth',
+    url: 'https://dash.cloudflare.com/',
+    steps: 'Workers & Pages -> Upload Assets -> drag the `dist` folder or connect GitHub.',
+  },
+  {
+    name: 'GitHub Pages',
+    badge: 'No Credit Card · Free Public Hosting',
+    url: 'https://pages.github.com/',
+    steps: 'Upload `dist/index.html` as `index.html` to a public repo and enable GitHub Pages.',
+  },
+];
+
 interface DeployModalProps {
   isOpen: boolean;
   project: MistProject | null;
   isDeploying: boolean;
   deployError: string | null;
-  publishedUrl: string | null;
+  downloadedFileName: string | null;
   onClose: () => void;
-  onDeploy: (slug: string) => void;
+  onDownloadPublishZip: (slug: string) => void;
+  onDownloadStandaloneHtml: (slug: string) => void;
 }
 
 export function DeployModal({
@@ -604,14 +641,14 @@ export function DeployModal({
   project,
   isDeploying,
   deployError,
-  publishedUrl,
+  downloadedFileName,
   onClose,
-  onDeploy,
+  onDownloadPublishZip,
+  onDownloadStandaloneHtml,
 }: DeployModalProps) {
   const [slug, setSlug] = useState(
     project?.publishedSlug || suggestShortSlug(project?.name || 'mist-site'),
   );
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (isOpen && project) {
@@ -619,22 +656,7 @@ export function DeployModal({
     }
   }, [isOpen, project]);
 
-  const resolvedPath = publishedUrl
-    ? publishedUrl
-    : `/${sanitizeSlug(slug)}`;
-  const fullUrl = resolvedPath.startsWith('http')
-    ? resolvedPath
-    : `${window.location.origin}${resolvedPath.startsWith('/') ? resolvedPath : `/${resolvedPath}`}`;
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(fullUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // Ignore clipboard failure
-    }
-  };
+  const cleanSlug = sanitizeSlug(slug);
 
   return (
     <AnimatePresence>
@@ -654,17 +676,22 @@ export function DeployModal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 14 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full sm:max-w-md max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+            className="w-full sm:max-w-xl max-h-[92dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950 mist-scrollbar"
           >
             <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
               <div className="flex items-center gap-2.5">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg mist-primary-gradient text-white shadow-sm">
-                  <Globe className="h-4 w-4" aria-hidden="true" />
+                  <Download className="h-4 w-4" aria-hidden="true" />
                 </div>
-                <h2 id="deploy-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
-                  Publish Website
-                </h2>
+                <div>
+                  <h2 id="deploy-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
+                    Publish &amp; Host Free
+                  </h2>
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    Standalone export · Zero traffic hits Mist&apos;s server
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
@@ -677,10 +704,57 @@ export function DeployModal({
             </div>
 
             <div className="space-y-4 p-5 text-xs">
+              {/* Auto-Download Confirmation & Re-download Actions */}
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/90 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/35">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                    <div>
+                      <p className="font-semibold text-emerald-900 dark:text-emerald-200">
+                        {isDeploying
+                          ? 'Preparing your standalone publish bundle...'
+                          : downloadedFileName
+                            ? `Downloaded ${downloadedFileName}`
+                            : 'Ready to download standalone website bundle'}
+                      </p>
+                      <p className="mt-0.5 text-[11px] text-emerald-800/90 dark:text-emerald-300/90 leading-relaxed">
+                        Includes ready-to-drop <code className="font-mono font-semibold">dist/index.html</code>, <code className="font-mono font-semibold">render.yaml</code>, full React source, and zero server dependencies.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isDeploying}
+                    onClick={() => onDownloadPublishZip(cleanSlug)}
+                    className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg mist-primary-gradient px-3 py-1.5 text-[11px] font-medium text-white shadow-sm disabled:opacity-50 cursor-pointer"
+                  >
+                    {isDeploying ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                    )}
+                    <span>{downloadedFileName ? 'Download ZIP Again' : 'Download Publish ZIP'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isDeploying}
+                    onClick={() => onDownloadStandaloneHtml(cleanSlug)}
+                    className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-medium text-emerald-900 hover:bg-emerald-100/60 dark:border-emerald-800 dark:bg-zinc-900 dark:text-emerald-200 dark:hover:bg-zinc-800 disabled:opacity-50 cursor-pointer"
+                  >
+                    <FileCode2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Download Single index.html</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Project Site Name */}
               <div>
                 <div className="flex items-center justify-between gap-2">
                   <label htmlFor="mist-deploy-slug" className="block font-medium text-zinc-700 dark:text-zinc-300">
-                    Short Deployment URL Path
+                    Package &amp; Site Name
                   </label>
                   <button
                     type="button"
@@ -702,9 +776,6 @@ export function DeployModal({
                     className="flex-1 bg-transparent px-3 py-2 font-mono text-xs text-zinc-950 focus:outline-none dark:text-white"
                   />
                 </div>
-                <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                  Published cleanly at <code className="font-mono text-zinc-700 dark:text-zinc-300">/{sanitizeSlug(slug)}</code> (short custom domain base can be configured via <code className="font-mono">PUBLIC_APP_URL</code>).
-                </p>
               </div>
 
               {deployError && (
@@ -713,52 +784,59 @@ export function DeployModal({
                 </p>
               )}
 
-              {publishedUrl && (
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900/60 dark:bg-emerald-950/40">
-                  <p className="font-medium text-emerald-800 dark:text-emerald-300">
-                    Live deployment updated
+              {/* Caution Callout */}
+              <div
+                role="note"
+                className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50/90 p-3 text-[11px] text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200"
+              >
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                <div className="leading-relaxed">
+                  <p className="font-semibold">Caution: Use ONLY Free Tiers With No Credit Card Billing</p>
+                  <p className="mt-0.5 opacity-90">
+                    Always select the <strong>Free Static Site</strong> option on providers that do not require adding a credit card upfront (like Render Static Sites, Netlify Drop, Vercel Hobby, Cloudflare Pages, or GitHub Pages). Never select paid server plans or hosts requiring card billing.
                   </p>
-                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-white px-2.5 py-1.5 border border-emerald-200 dark:bg-zinc-900 dark:border-emerald-900">
-                    <span className="truncate font-mono text-[11px]">{publishedUrl}</span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        type="button"
-                        aria-label="Copy deployment URL"
-                        onClick={handleCopy}
-                        className="p-1 text-zinc-600 hover:text-zinc-950 dark:text-zinc-300 cursor-pointer"
-                      >
-                        {copied ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
-                      </button>
+                </div>
+              </div>
+
+              {/* Direct Links to Free No-Card Hosts */}
+              <div>
+                <p className="mb-2 flex items-center gap-1.5 font-medium text-zinc-800 dark:text-zinc-200">
+                  <ShieldCheck className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
+                  <span>Simple Steps &amp; Direct Links (Free Static Hosts · No Card Required)</span>
+                </p>
+                <div className="divide-y divide-zinc-200 rounded-xl border border-zinc-200 bg-zinc-50/70 dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900/50">
+                  {FREE_STATIC_HOSTS.map((host) => (
+                    <div key={host.name} className="flex items-start justify-between gap-3 p-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-semibold text-zinc-900 dark:text-white">{host.name}</span>
+                          <span className="text-[10px] text-zinc-500 dark:text-zinc-400">· {host.badge}</span>
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-zinc-600 dark:text-zinc-400 leading-relaxed">
+                          {host.steps}
+                        </p>
+                      </div>
                       <a
-                        href={publishedUrl}
+                        href={host.url}
                         target="_blank"
-                        rel="noreferrer"
-                        aria-label="Open published website"
-                        className="p-1 text-blue-600 hover:text-blue-700 dark:text-blue-400"
+                        rel="noopener noreferrer"
+                        className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-blue-400 dark:hover:bg-zinc-800 shrink-0 whitespace-nowrap"
                       >
-                        <ExternalLink className="h-3.5 w-3.5" />
+                        <span>Open</span>
+                        <ExternalLink className="h-3 w-3" aria-hidden="true" />
                       </a>
                     </div>
-                  </div>
+                  ))}
                 </div>
-              )}
+              </div>
 
-              <div className="flex justify-end gap-2 border-t border-zinc-200 pt-4 dark:border-zinc-800">
+              <div className="sticky bottom-0 flex justify-end gap-2 border-t border-zinc-200 bg-white/95 pt-3 pb-1 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/95">
                 <button
                   type="button"
                   onClick={onClose}
                   className="rounded-xl border border-zinc-200 px-4 py-2 font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900 cursor-pointer"
                 >
-                  Close
-                </button>
-                <button
-                  type="button"
-                  disabled={isDeploying}
-                  onClick={() => onDeploy(sanitizeSlug(slug))}
-                  className="inline-flex items-center gap-1.5 rounded-xl mist-primary-gradient px-4 py-2 font-medium text-white shadow-sm disabled:opacity-50 transition-all cursor-pointer"
-                >
-                  <Globe className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>{isDeploying ? 'Publishing...' : 'Publish Live'}</span>
+                  Done
                 </button>
               </div>
             </div>
@@ -808,9 +886,14 @@ export function DeploymentsModal({
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg mist-primary-gradient text-white shadow-sm">
                   <Globe className="h-4 w-4" aria-hidden="true" />
                 </div>
-                <h2 id="deployments-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
-                  Published Websites
-                </h2>
+                <div>
+                  <h2 id="deployments-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
+                    Free External Hosting
+                  </h2>
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    Publish downloads a standalone ZIP · Zero Mist server load
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
@@ -822,40 +905,70 @@ export function DeploymentsModal({
               </button>
             </div>
 
-            <div className="max-h-96 overflow-y-auto p-5 mist-scrollbar">
-              {deployments.length === 0 ? (
-                <p className="text-center text-xs text-zinc-500 py-8">
-                  No websites published yet. Open any project you generate and click Deploy.
+            <div className="max-h-96 overflow-y-auto p-5 mist-scrollbar space-y-4">
+              <div className="rounded-xl border border-amber-300/80 bg-amber-50/80 p-3 text-[11px] text-amber-950 dark:border-amber-700/50 dark:bg-amber-950/35 dark:text-amber-200">
+                <p className="font-semibold">No-Credit-Card Static Hosting</p>
+                <p className="mt-1 opacity-90">
+                  Open any project and click <strong>Publish</strong> to download a standalone ZIP (`dist/index.html` + `render.yaml`) and drop it onto free static tiers like Netlify Drop, Render Static Sites, Vercel Hobby, or GitHub Pages.
                 </p>
-              ) : (
-                <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                  {deployments.map((dep) => (
-                    <div key={dep.slug} className="flex items-center justify-between gap-3 py-3 text-xs">
-                      <div className="min-w-0 flex-1">
-                        <p className="font-semibold text-zinc-900 dark:text-white truncate">{dep.title}</p>
-                        <p className="font-mono text-[11px] text-zinc-500 truncate">{dep.url}</p>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <a
-                          href={dep.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-800 dark:text-blue-400 dark:hover:bg-zinc-900"
-                        >
-                          <span>Visit</span>
-                          <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                        </a>
-                        {onDeleteDeployment && (
-                          <button
-                            type="button"
-                            aria-label={`Unpublish ${dep.title}`}
-                            onClick={() => onDeleteDeployment(dep.slug)}
-                            className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-200 text-zinc-500 hover:border-red-200 hover:bg-red-50 hover:text-red-600 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-red-900 dark:hover:bg-red-950/60 dark:hover:text-red-400 cursor-pointer"
+              </div>
+
+              {deployments.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
+                    Previous Legacy Links
+                  </p>
+                  <div className="divide-y divide-zinc-200 dark:divide-zinc-800 rounded-xl border border-zinc-200 dark:border-zinc-800 px-3">
+                    {deployments.map((dep) => (
+                      <div key={dep.slug} className="flex items-center justify-between gap-3 py-2.5 text-xs">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-semibold text-zinc-900 dark:text-white truncate">{dep.title}</p>
+                          <p className="font-mono text-[11px] text-zinc-500 truncate">{dep.url}</p>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <a
+                            href={dep.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-800 dark:text-blue-400 dark:hover:bg-zinc-900"
                           >
-                            <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                          </button>
-                        )}
+                            <span>Visit</span>
+                            <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                          </a>
+                          {onDeleteDeployment && (
+                            <button
+                              type="button"
+                              aria-label={`Unpublish ${dep.title}`}
+                              onClick={() => onDeleteDeployment(dep.slug)}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-200 text-zinc-500 hover:border-red-200 hover:bg-red-50 hover:text-red-600 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-red-900 dark:hover:bg-red-950/60 dark:hover:text-red-400 cursor-pointer"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                            </button>
+                          )}
+                        </div>
                       </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {deployments.length === 0 && (
+                <div className="divide-y divide-zinc-200 dark:divide-zinc-800 rounded-xl border border-zinc-200 dark:border-zinc-800 text-xs">
+                  {FREE_STATIC_HOSTS.slice(0, 3).map((host) => (
+                    <div key={host.name} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                      <div>
+                        <p className="font-medium text-zinc-900 dark:text-white">{host.name}</p>
+                        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{host.badge}</p>
+                      </div>
+                      <a
+                        href={host.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-800 dark:text-blue-400 dark:hover:bg-zinc-900"
+                      >
+                        <span>Open</span>
+                        <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                      </a>
                     </div>
                   ))}
                 </div>

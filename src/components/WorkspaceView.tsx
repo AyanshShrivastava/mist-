@@ -479,7 +479,7 @@ export default function WorkspaceView({
             className="inline-flex h-10 items-center gap-1.5 rounded-xl mist-primary-gradient px-3 text-xs font-medium text-white shadow-sm transition-all whitespace-nowrap cursor-pointer"
           >
             <Globe className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>{project.isPublished ? 'Live' : 'Deploy'}</span>
+            <span>Publish</span>
           </button>
           <button
             type="button"
@@ -661,7 +661,7 @@ export default function WorkspaceView({
             className="inline-flex h-8 items-center gap-1.5 rounded-lg mist-primary-gradient px-3 text-xs font-medium text-white shadow-sm transition-all whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Globe className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>{project.isPublished ? 'Published' : 'Deploy'}</span>
+            <span>Publish</span>
           </button>
 
           <button
@@ -1197,15 +1197,14 @@ export default function WorkspaceView({
                     </span>
                   )}
                   {project.isPublished && project.publishedSlug && (
-                    <a
-                      href={`/${project.publishedSlug}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline dark:text-emerald-400"
+                    <button
+                      type="button"
+                      onClick={onOpenDeploy}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline dark:text-emerald-400 cursor-pointer"
                     >
                       <Check className="h-3 w-3" aria-hidden="true" />
-                      <span>/{project.publishedSlug}</span>
-                    </a>
+                      <span>Exported ({project.publishedSlug}.zip)</span>
+                    </button>
                   )}
                   <button
                     type="button"

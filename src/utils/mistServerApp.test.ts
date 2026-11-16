@@ -1218,3 +1218,76 @@ test('POST /api/ai/generate informs model of active masked key and repairs malfo
   }
 });
 
+test('Server blocks cross-site/cross-origin mutations, sets strict security headers, and exports zero-Cloud-Run standalone bundles', async () => {
+  const srv = await startTestServer();
+  try {
+    // 1. Security headers check on GET
+    const statusResp = await fetch(`${srv.baseUrl}/api/ai/status`);
+    assert.equal(statusResp.status, 200);
+    assert.equal(statusResp.headers.get('cross-origin-opener-policy'), 'same-origin-allow-popups');
+    assert.equal(statusResp.headers.get('x-permitted-cross-domain-policies'), 'none');
+    assert.equal(statusResp.headers.get('x-dns-prefetch-control'), 'off');
+
+    // 2. Cross-site mutation header blocked with 403
+    const crossSiteResp = await fetch(`${srv.baseUrl}/api/bundle`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Sec-Fetch-Site': 'cross-site',
+      },
+      body: JSON.stringify({ files: [] }),
+    });
+    assert.equal(crossSiteResp.status, 403);
+
+    // 3. Mismatched Origin vs Host header blocked with 403
+    const crossOriginResp = await fetch(`${srv.baseUrl}/api/bundle`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://evil-attacker.example',
+      },
+      body: JSON.stringify({ files: [] }),
+    });
+    assert.equal(crossOriginResp.status, 403);
+
+    // 4. Standalone bundle contains inlined vendor runtime and ZERO /vendor/preview-runtime.js, /api/app-ai, or inspector script
+    const bundleResp = await fetch(`${srv.baseUrl}/api/bundle`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Sec-Fetch-Site': 'same-origin',
+      },
+      body: JSON.stringify({
+        title: 'Offline Coffee Menu',
+        standaloneExport: true,
+        includeInspector: true,
+        enableAppAi: true,
+        files: [
+          {
+            id: 'f1',
+            path: 'src/App.tsx',
+            language: 'tsx',
+            content: 'export default function App() { return <main>Pour Over Menu</main>; }',
+          },
+          {
+            id: 'f2',
+            path: 'src/index.css',
+            language: 'css',
+            content: '@import "tailwindcss";\n',
+          },
+        ],
+      }),
+    });
+    assert.equal(bundleResp.status, 200);
+    const bundleJson = (await bundleResp.json()) as { html: string; bundleError?: string };
+    assert.equal(bundleJson.bundleError, undefined);
+    assert.ok(bundleJson.html.includes('__MIST_VENDOR__'));
+    assert.equal(bundleJson.html.includes('/vendor/preview-runtime.js'), false);
+    assert.equal(bundleJson.html.includes('/api/app-ai'), false);
+    assert.equal(bundleJson.html.includes('MIST_TOGGLE_INSPECTOR'), false);
+  } finally {
+    await srv.close();
+  }
+});
+
+
