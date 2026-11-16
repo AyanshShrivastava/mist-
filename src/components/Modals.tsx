@@ -367,7 +367,7 @@ export function ProvidersModal({
                       onClick={() => handleSelectGateway(gw.id)}
                       className={`min-h-[36px] rounded-xl border px-2.5 py-1.5 text-[11px] font-medium transition-all cursor-pointer ${
                         gatewayId === gw.id
-                          ? 'border-blue-600 bg-gradient-to-r from-blue-500/15 to-indigo-500/15 text-blue-700 dark:border-blue-500/70 dark:text-blue-300'
+                          ? 'border-blue-600 bg-gradient-to-r from-blue-500/15 to-pink-500/15 text-blue-700 dark:border-blue-500/70 dark:text-blue-300'
                           : 'border-zinc-200 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900'
                       }`}
                     >

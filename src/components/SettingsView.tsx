@@ -2,17 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
-  Bell,
-  BellOff,
-  BellRing,
-  Check,
   CheckCircle2,
-  Copy,
   Cpu,
   ExternalLink,
   Eye,
   EyeOff,
-  HelpCircle,
   KeyRound,
   Link2,
   Loader2,
@@ -21,7 +15,6 @@ import {
   Search,
   ShieldAlert,
   Sliders,
-  Sparkles,
   Sun,
   Tag,
   Terminal,
@@ -60,7 +53,6 @@ import {
 import MistLogo from './MistLogo';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
 import { maskApiKey } from '../utils/projectOps';
-import { usePushNotifications } from '../utils/usePushNotifications';
 
 interface SettingsViewProps {
   user: User | null;
@@ -159,49 +151,6 @@ export default function SettingsView({
     ok: boolean;
     message: string;
   } | null>(null);
-
-  const {
-    isSupported: isPushSupported,
-    permission: pushPermission,
-    isSubscribed: isPushSubscribed,
-    isLoading: isPushLoading,
-    vapidConfig,
-    error: pushError,
-    message: pushMessage,
-    enableNotifications,
-    disableNotifications,
-    sendTest: sendTestPush,
-  } = usePushNotifications(user);
-
-  const [freshVapidKeys, setFreshVapidKeys] = useState<{
-    publicKey: string;
-    privateKey: string;
-  } | null>(null);
-  const [isGeneratingVapid, setIsGeneratingVapid] = useState(false);
-  const [copiedKeyField, setCopiedKeyField] = useState<string | null>(null);
-  const [showAiStudioHelp, setShowAiStudioHelp] = useState(false);
-
-  const handleGenerateFreshVapid = async () => {
-    setIsGeneratingVapid(true);
-    try {
-      const res = await fetch('/api/notifications/keys/generate', { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        setFreshVapidKeys(data);
-        setShowAiStudioHelp(true);
-      }
-    } catch (err) {
-      console.warn('Failed to generate VAPID keys:', err);
-    } finally {
-      setIsGeneratingVapid(false);
-    }
-  };
-
-  const copyToClipboard = (text: string, field: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKeyField(field);
-    setTimeout(() => setCopiedKeyField(null), 2000);
-  };
 
   const catalogAbortRef = useRef<AbortController | null>(null);
   const catalogSeqRef = useRef(0);
@@ -699,7 +648,7 @@ export default function SettingsView({
                         onClick={() => handleSelectGateway(gw.id)}
                         className={`min-h-[38px] rounded-xl border px-2.5 py-1.5 text-[11px] font-medium transition-all cursor-pointer ${
                           gatewayId === gw.id
-                            ? 'border-blue-600 bg-gradient-to-r from-blue-500/15 to-indigo-500/15 text-blue-700 dark:border-blue-500/70 dark:text-blue-300'
+                            ? 'border-blue-600 bg-gradient-to-r from-blue-500/15 to-pink-500/15 text-blue-700 dark:border-blue-500/70 dark:text-blue-300'
                             : 'border-zinc-200 bg-white/60 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-800'
                         }`}
                       >
@@ -957,7 +906,7 @@ export default function SettingsView({
                         onClick={() => handleSelectSearchPreset(preset.id)}
                         className={`min-h-[38px] rounded-xl border px-2.5 py-1.5 text-[11px] font-medium transition-all cursor-pointer ${
                           searchProvider === preset.id
-                            ? 'border-blue-600 bg-gradient-to-r from-blue-500/15 to-sky-500/15 text-blue-700 dark:border-blue-500/70 dark:text-blue-300'
+                            ? 'border-blue-600 bg-gradient-to-r from-blue-500/15 to-fuchsia-500/15 text-blue-700 dark:border-blue-500/70 dark:text-blue-300'
                             : 'border-zinc-200 bg-white/60 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-800'
                         }`}
                       >
@@ -1193,7 +1142,7 @@ export default function SettingsView({
               className="mist-surface-card rounded-2xl border border-zinc-200/90 p-5 sm:p-6 dark:border-zinc-800/90"
             >
               <div className="flex items-start gap-3">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-sky-500 text-white shadow-sm">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-fuchsia-500 text-white shadow-sm">
                   <Terminal className="h-4 w-4" aria-hidden="true" />
                 </div>
                 <div>
@@ -1474,270 +1423,6 @@ export default function SettingsView({
                     <option value="tablet">Tablet (768px)</option>
                     <option value="mobile">Mobile (390px)</option>
                   </select>
-                </div>
-              </div>
-            </motion.section>
-
-            {/* Section 5: Web Push Notifications (VAPID) */}
-            <motion.section
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3, delay: 0.2 }}
-              aria-labelledby="settings-notifications-heading"
-              className="mist-surface-card rounded-2xl border border-zinc-200/90 p-5 sm:p-6 dark:border-zinc-800/90"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-600 to-purple-500 text-white shadow-sm">
-                    <Bell className="h-4 w-4" aria-hidden="true" />
-                  </div>
-                  <div>
-                    <h2
-                      id="settings-notifications-heading"
-                      className="font-display text-base font-semibold text-zinc-950 dark:text-white"
-                    >
-                      Web Push Notifications (VAPID)
-                    </h2>
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      Receive browser alerts when website generation or deployments complete.
-                    </p>
-                  </div>
-                </div>
-
-                <span
-                  className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
-                    isPushSubscribed
-                      ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
-                      : pushPermission === 'denied'
-                        ? 'bg-red-50 text-red-700 dark:bg-red-950/60 dark:text-red-300 border border-red-200 dark:border-red-800'
-                        : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700'
-                  }`}
-                >
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${
-                      isPushSubscribed
-                        ? 'bg-emerald-500 animate-pulse'
-                        : pushPermission === 'denied'
-                          ? 'bg-red-500'
-                          : 'bg-zinc-400'
-                    }`}
-                  />
-                  <span>
-                    {isPushSubscribed
-                      ? 'Subscribed'
-                      : pushPermission === 'denied'
-                        ? 'Permission Blocked'
-                        : 'Not Subscribed'}
-                  </span>
-                </span>
-              </div>
-
-              <div className="mt-4 space-y-4 text-xs">
-                {pushMessage && (
-                  <div className="flex items-center gap-2 rounded-xl border border-emerald-300 bg-emerald-50/90 p-3 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200">
-                    <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden="true" />
-                    <span>{pushMessage}</span>
-                  </div>
-                )}
-
-                {pushError && (
-                  <div className="flex items-center gap-2 rounded-xl border border-red-300 bg-red-50/90 p-3 text-red-900 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
-                    <ShieldAlert className="h-4 w-4 shrink-0" aria-hidden="true" />
-                    <span>{pushError}</span>
-                  </div>
-                )}
-
-                {/* Status & Actions */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-zinc-200/80 bg-zinc-50/80 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/70">
-                  <div>
-                    <p className="font-medium text-zinc-900 dark:text-zinc-100">
-                      Browser Push Status
-                    </p>
-                    <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                      {isPushSubscribed
-                        ? 'Active — you will receive desktop alerts on this device.'
-                        : pushPermission === 'denied'
-                          ? 'Notifications are blocked in your browser settings. Unblock to enable.'
-                          : 'Click enable to request permission and subscribe.'}
-                    </p>
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    {isPushSubscribed ? (
-                      <>
-                        <button
-                          type="button"
-                          disabled={isPushLoading}
-                          onClick={() => void sendTestPush()}
-                          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
-                        >
-                          {isPushLoading ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                          ) : (
-                            <BellRing className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-                          )}
-                          <span>Test Notification</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={isPushLoading}
-                          onClick={() => void disableNotifications()}
-                          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-100 hover:text-red-600 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-red-400 transition-colors cursor-pointer"
-                          title="Unsubscribe from notifications"
-                        >
-                          <BellOff className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span className="sr-only">Disable</span>
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={isPushLoading || pushPermission === 'denied' || !isPushSupported}
-                        onClick={() => void enableNotifications()}
-                        className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl mist-primary-gradient px-3.5 py-1.5 text-xs font-medium text-white shadow-sm disabled:opacity-50 transition-all cursor-pointer"
-                      >
-                        {isPushLoading ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                        ) : (
-                          <Bell className="h-3.5 w-3.5" aria-hidden="true" />
-                        )}
-                        <span>Enable Notifications</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* VAPID Details */}
-                <div className="rounded-xl border border-zinc-200/80 bg-white/70 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/50 space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium text-zinc-900 dark:text-zinc-100">
-                      Active VAPID Public Key
-                    </span>
-                    <span className="text-[10px] rounded px-1.5 py-0.5 bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 font-mono">
-                      {vapidConfig?.isGenerated ? 'Runtime Auto-Generated' : 'Configured from Environment'}
-                    </span>
-                  </div>
-
-                  <div className="relative">
-                    <input
-                      type="text"
-                      readOnly
-                      value={vapidConfig?.publicKey || 'Loading key...'}
-                      className="w-full rounded-lg border border-zinc-200 bg-zinc-50/80 pl-2.5 pr-8 py-1.5 font-mono text-[11px] text-zinc-700 select-all dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300"
-                    />
-                    {vapidConfig?.publicKey && (
-                      <button
-                        type="button"
-                        onClick={() => copyToClipboard(vapidConfig.publicKey, 'pubkey')}
-                        className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
-                        title="Copy Public Key"
-                      >
-                        {copiedKeyField === 'pubkey' ? (
-                          <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                        )}
-                      </button>
-                    )}
-                  </div>
-
-                  {vapidConfig?.subject && (
-                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                      Contact Subject: <code className="font-mono">{vapidConfig.subject}</code>
-                    </p>
-                  )}
-                </div>
-
-                {/* Google AI Studio Configuration Guide */}
-                <div className="rounded-xl border border-blue-200/80 bg-blue-50/60 p-3.5 dark:border-blue-900/50 dark:bg-blue-950/25 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5">
-                      <HelpCircle className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0" aria-hidden="true" />
-                      <span className="font-semibold text-blue-950 dark:text-blue-200">
-                        Where to add keys in Google AI Studio (mistdev.ai.studio)
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowAiStudioHelp((s) => !s)}
-                      className="text-[11px] text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-                    >
-                      {showAiStudioHelp ? 'Hide guide' : 'Show guide'}
-                    </button>
-                  </div>
-
-                  {showAiStudioHelp && (
-                    <div className="space-y-3 pt-2 text-[11px] leading-relaxed text-blue-950/90 dark:text-blue-200/90 border-t border-blue-200/60 dark:border-blue-900/60">
-                      <p>
-                        Mist is deployed on Google AI Studio at <code className="font-mono font-semibold">mistdev.ai.studio</code>.
-                        To provide permanent VAPID keys that persist across cloud container restarts:
-                      </p>
-                      <ol className="list-decimal pl-4 space-y-1">
-                        <li>
-                          Open your applet project in <strong>Google AI Studio</strong>.
-                        </li>
-                        <li>
-                          In the workspace sidebar or top settings menu, open the <strong>Secrets &amp; Environment Variables</strong> panel.
-                        </li>
-                        <li>
-                          Add the following key-value pairs:
-                          <div className="mt-1 font-mono text-[10px] space-y-0.5 bg-white/70 dark:bg-zinc-950/70 p-2 rounded-lg border border-blue-200 dark:border-blue-900">
-                            <div><strong>VAPID_PUBLIC_KEY</strong> = <em>your public key</em></div>
-                            <div><strong>VAPID_PRIVATE_KEY</strong> = <em>your private key</em></div>
-                            <div><strong>VAPID_SUBJECT</strong> = <em>mailto:admin@mistdev.ai.studio</em></div>
-                          </div>
-                        </li>
-                        <li>
-                          Save and deploy. Mist will automatically detect and load your environment keys on startup!
-                        </li>
-                      </ol>
-
-                      <div className="pt-1">
-                        <button
-                          type="button"
-                          disabled={isGeneratingVapid}
-                          onClick={() => void handleGenerateFreshVapid()}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-blue-300 bg-white/80 px-2.5 py-1 text-[11px] font-medium text-blue-800 hover:bg-white dark:border-blue-800 dark:bg-blue-900/40 dark:text-blue-200 transition-colors cursor-pointer"
-                        >
-                          {isGeneratingVapid ? (
-                            <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
-                          ) : (
-                            <Sparkles className="h-3 w-3 text-blue-500" aria-hidden="true" />
-                          )}
-                          <span>Generate Fresh Keypair for AI Studio</span>
-                        </button>
-                      </div>
-
-                      {freshVapidKeys && (
-                        <div className="rounded-lg bg-zinc-950 p-2.5 text-zinc-100 font-mono text-[10px] space-y-1.5 dark:bg-black border border-zinc-800">
-                          <div className="flex justify-between items-center text-zinc-400">
-                            <span>Ready to paste into AI Studio Secrets:</span>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                copyToClipboard(
-                                  `VAPID_PUBLIC_KEY="${freshVapidKeys.publicKey}"\nVAPID_PRIVATE_KEY="${freshVapidKeys.privateKey}"\nVAPID_SUBJECT="mailto:admin@mistdev.ai.studio"`,
-                                  'envSnippet',
-                                )
-                              }
-                              className="hover:text-white cursor-pointer"
-                            >
-                              {copiedKeyField === 'envSnippet' ? 'Copied!' : 'Copy All'}
-                            </button>
-                          </div>
-                          <div className="break-all select-all text-emerald-400">
-                            VAPID_PUBLIC_KEY={freshVapidKeys.publicKey}
-                          </div>
-                          <div className="break-all select-all text-amber-300">
-                            VAPID_PRIVATE_KEY={freshVapidKeys.privateKey}
-                          </div>
-                          <div className="break-all select-all text-sky-300">
-                            VAPID_SUBJECT=mailto:admin@mistdev.ai.studio
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </div>
               </div>
             </motion.section>

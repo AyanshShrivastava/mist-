@@ -56,6 +56,10 @@ import { maskApiKey } from '../utils/projectOps';
 import showcasePromptImg from '../assets/images/mist_showcase_prompt_1794824266440.jpg';
 import showcaseBuildImg from '../assets/images/mist_showcase_build_1794824267456.jpg';
 import showcaseLaunchImg from '../assets/images/mist_showcase_launch_1794824268004.jpg';
+import templateCoffeeImg from '../assets/images/template_coffee_roastery_1794659272127.jpg';
+import templateAudioImg from '../assets/images/template_audio_hardware_1794659272890.jpg';
+import templateArchitectImg from '../assets/images/template_architect_studio_1794659273332.jpg';
+import templateSkincareImg from '../assets/images/template_botanical_skincare_1794659273501.jpg';
 
 interface HomeViewProps {
   user: User | null;
@@ -449,212 +453,65 @@ export default function HomeView({
     </section>
   );
 
-  return (
-    <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] flex flex-col">
-      {/* Three-Zone Studio Header */}
-      <header className="sticky top-0 z-30 border-b border-zinc-200/80 bg-[#FAFAFA]/85 backdrop-blur-xl dark:border-zinc-800/80 dark:bg-[#09090B]/80 transition-colors">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-8 px-4 sm:px-6 h-15">
-          <a href="#top" className="focus:outline-none whitespace-nowrap shrink-0">
-            <MistLogo size="md" />
-          </a>
+  // ---- Rotating example prompts for the composer placeholder ----
+  const placeholderIdeas = useMemo(
+    () => [
+      'a Tokyo coffee roastery site with a brew calculator…',
+      'a neon 2D runner game with high scores…',
+      'a 3D product viewer for wireless headphones…',
+      'a portfolio for a landscape photographer…',
+      'a SaaS dashboard for tracking habits…',
+    ],
+    [],
+  );
+  const [placeholderIndex, setPlaceholderIndex] = useState(0);
+  const [placeholderChars, setPlaceholderChars] = useState(0);
+  useEffect(() => {
+    if (promptInput) return;
+    const full = placeholderIdeas[placeholderIndex];
+    const done = placeholderChars >= full.length;
+    const t = window.setTimeout(
+      () => {
+        if (done) {
+          setPlaceholderChars(0);
+          setPlaceholderIndex((i) => (i + 1) % placeholderIdeas.length);
+        } else {
+          setPlaceholderChars((c) => c + 1);
+        }
+      },
+      done ? 1800 : 38,
+    );
+    return () => window.clearTimeout(t);
+  }, [placeholderChars, placeholderIndex, placeholderIdeas, promptInput]);
+  const animatedPlaceholder = `Ask Mist to build ${placeholderIdeas[placeholderIndex].slice(0, placeholderChars)}`;
 
-          <nav
-            aria-label="Primary"
-            className="hidden md:flex items-center gap-6 text-sm font-medium text-zinc-600 dark:text-zinc-400"
-          >
-            <a
-              href="#projects"
-              className="hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0"
-            >
-              Projects
-            </a>
-            <button
-              type="button"
-              onClick={onOpenVoiceChat}
-              className="inline-flex items-center gap-1.5 hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Mic className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
-              <span>Voice Studio</span>
-            </button>
-            <button
-              type="button"
-              onClick={onOpenProviders}
-              className="inline-flex items-center gap-1.5 hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <KeyRound className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
-              <span>Models &amp; Keys</span>
-            </button>
-            <button
-              type="button"
-              onClick={onOpenDeployments}
-              className="inline-flex items-center gap-1.5 hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Globe className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" aria-hidden="true" />
-              <span>Free Hosting</span>
-            </button>
-            <button
-              type="button"
-              onClick={onOpenSettings}
-              className="inline-flex items-center gap-1.5 hover:text-zinc-950 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Settings className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Settings</span>
-            </button>
-          </nav>
+  const projectSearchRef = useRef<HTMLInputElement | null>(null);
+  const firstName = user ? user.displayName?.split(' ')[0] || user.email?.split('@')[0] || 'there' : '';
 
-          <div className="flex items-center gap-2 shrink-0">
-            <motion.button
-              type="button"
-              whileTap={{ scale: 0.94 }}
-              onClick={onToggleDarkMode}
-              aria-label={darkMode ? 'Switch to light studio' : 'Switch to dark studio'}
-              className="inline-flex h-10 w-10 sm:h-9 sm:w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white/80 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-            >
-              {darkMode ? (
-                <Sun className="h-4 w-4" aria-hidden="true" />
-              ) : (
-                <Moon className="h-4 w-4" aria-hidden="true" />
-              )}
-            </motion.button>
+  const focusComposer = (prompt?: string) => {
+    if (prompt !== undefined) {
+      setPromptInput(prompt);
+      setPromptValidationError(null);
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.setTimeout(() => promptInputRef.current?.focus(), 250);
+  };
 
-            <motion.button
-              type="button"
-              whileTap={{ scale: 0.96 }}
-              onClick={onOpenAccount}
-              className="inline-flex min-h-[40px] sm:min-h-[36px] items-center gap-2 rounded-xl bg-zinc-950 px-3.5 sm:px-4 py-2 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <UserIcon className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>{user ? user.displayName?.split(' ')[0] || 'Account' : 'Sign In'}</span>
-            </motion.button>
+  const themeButton = (
+    <button
+      type="button"
+      onClick={onToggleDarkMode}
+      aria-label={darkMode ? 'Switch to light theme' : 'Switch to dark theme'}
+      className="inline-flex h-9 w-9 items-center justify-center rounded-full text-zinc-600 hover:bg-zinc-900/5 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-white transition-colors cursor-pointer"
+    >
+      {darkMode ? <Sun className="h-4 w-4" aria-hidden="true" /> : <Moon className="h-4 w-4" aria-hidden="true" />}
+    </button>
+  );
 
-            <button
-              type="button"
-              aria-expanded={mobileMenuOpen}
-              aria-label="Toggle studio navigation menu"
-              onClick={() => setMobileMenuOpen((v) => !v)}
-              className="inline-flex md:hidden h-10 w-10 items-center justify-center rounded-xl border border-zinc-200 bg-white/80 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-            >
-              {mobileMenuOpen ? <X className="h-4 w-4" aria-hidden="true" /> : <Menu className="h-4 w-4" aria-hidden="true" />}
-            </button>
-          </div>
-        </div>
-
-        {/* Mobile Dropdown Navigation Drawer */}
-        <AnimatePresence initial={false}>
-          {mobileMenuOpen && (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-              className="md:hidden overflow-hidden border-t border-zinc-200/80 bg-white/95 dark:border-zinc-800/80 dark:bg-zinc-950/95 backdrop-blur-xl"
-            >
-              <div className="grid grid-cols-2 gap-2 p-3 text-xs font-medium">
-                <a
-                  href="#projects"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50/80 px-3.5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
-                >
-                  <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Projects ({projects.length})</span>
-                </a>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMobileMenuOpen(false);
-                    onOpenVoiceChat();
-                  }}
-                  className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50/80 px-3.5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer"
-                >
-                  <Mic className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-                  <span>Voice Studio</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMobileMenuOpen(false);
-                    onOpenProviders();
-                  }}
-                  className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50/80 px-3.5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer"
-                >
-                  <KeyRound className="h-3.5 w-3.5 text-indigo-500" aria-hidden="true" />
-                  <span>Models &amp; Keys</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMobileMenuOpen(false);
-                    onOpenDeployments();
-                  }}
-                  className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50/80 px-3.5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer"
-                >
-                  <Globe className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-                  <span>Free Hosting</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMobileMenuOpen(false);
-                    onOpenSettings();
-                  }}
-                  className="col-span-2 flex min-h-[44px] items-center justify-center gap-2 rounded-xl mist-primary-gradient text-white cursor-pointer"
-                >
-                  <Settings className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Open Studio Settings</span>
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </header>
-
-      <main id="top" className="flex-1">
-        {/* Hero & Interactive Studio Composer */}
-        <section className="mx-auto max-w-5xl px-4 sm:px-6 pt-6 pb-8 sm:pt-12 sm:pb-12">
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.34, ease: [0.16, 1, 0.3, 1] }}
-            className="text-center sm:text-left"
-          >
-            {user ? (
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
-                  Welcome back, {user.displayName?.split(' ')[0] || user.email} · {projects.length} saved {projects.length === 1 ? 'site' : 'sites'}
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setShowLoggedInTour((v) => !v)}
-                  className="text-xs font-medium text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white underline-offset-4 hover:underline cursor-pointer"
-                >
-                  {showLoggedInTour ? 'Hide Walkthrough' : 'How Mist Works'}
-                </button>
-              </div>
-            ) : (
-              <p className="inline-flex items-center gap-2 text-xs font-medium tracking-wide text-blue-600 dark:text-blue-400">
-                <span>Describe Idea</span>
-                <span aria-hidden="true">&rarr;</span>
-                <span>AI Builds Live</span>
-                <span aria-hidden="true">&rarr;</span>
-                <span>Download &amp; Host Free</span>
-              </p>
-            )}
-
-            <h1 className="mt-2 font-display text-[30px] sm:text-5xl lg:text-[52px] font-semibold tracking-tight leading-[1.08] text-zinc-950 dark:text-white [text-wrap:balance]">
-              Mist —{' '}
-              <span className="bg-gradient-to-r from-blue-600 via-indigo-500 to-sky-500 dark:from-blue-400 dark:via-indigo-300 dark:to-sky-400 bg-clip-text text-transparent">
-                Ideas into websites.
-              </span>
-            </h1>
-            <p className="mt-3 text-sm sm:text-base leading-relaxed text-zinc-600 dark:text-zinc-400 max-w-2xl mx-auto sm:mx-0">
-              {user
-                ? 'Pick a starting style below or describe anything in plain English. Publish downloads a standalone bundle ready for free no-card hosting.'
-                : 'Type a prompt or speak an idea, watch Mist build React apps, 2D games, or 3D scenes with your encrypted BYOK key, and export for free external hosting.'}
-            </p>
-          </motion.div>
-
+  const composerBlock = (
+    <>
           {/* Interactive One-Tap Builder Type Picker */}
-          <div className="mt-6 grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+          <div className="mt-10 grid grid-cols-2 lg:grid-cols-4 gap-2.5">
             {INTERACTIVE_MODES.map((mode) => {
               const Icon = mode.icon;
               const isSelected = selectedMode === mode.id;
@@ -672,10 +529,10 @@ export default function HomeView({
                     }
                     promptInputRef.current?.focus();
                   }}
-                  className={`flex flex-col items-start gap-1 rounded-xl border p-3 text-left transition-colors cursor-pointer ${
+                  className={`flex flex-col items-start gap-1 rounded-2xl border p-3.5 text-left transition-all duration-200 cursor-pointer ${
                     isSelected
-                      ? 'border-blue-500/80 bg-blue-50/75 dark:border-blue-500/60 dark:bg-blue-950/30'
-                      : 'border-zinc-200/90 bg-white/80 hover:bg-zinc-50 dark:border-zinc-800/90 dark:bg-zinc-900/70 dark:hover:bg-zinc-900'
+                      ? 'mist-gradient-border shadow-lg shadow-pink-500/10'
+                      : 'border-zinc-200/70 bg-white/70 backdrop-blur hover:bg-white hover:-translate-y-0.5 dark:border-zinc-800/80 dark:bg-zinc-900/60 dark:hover:bg-zinc-900'
                   }`}
                 >
                   <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-950 dark:text-white">
@@ -724,7 +581,7 @@ export default function HomeView({
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.36, delay: 0.04, ease: [0.16, 1, 0.3, 1] }}
-            className="mist-composer-shell mt-5 rounded-2xl border border-zinc-200/90 p-4 sm:p-5 dark:border-zinc-800/90 focus-within:border-blue-500/70 dark:focus-within:border-blue-500/60 transition-colors"
+            className="mist-composer-shell mt-5 border border-transparent p-5 sm:p-6 focus-within:border-pink-400/50 dark:focus-within:border-pink-500/40 transition-colors"
           >
             <label htmlFor="mist-prompt-input" className="sr-only">
               Describe the website you want to build
@@ -732,13 +589,19 @@ export default function HomeView({
             <textarea
               ref={promptInputRef}
               id="mist-prompt-input"
-              rows={4}
+              rows={3}
               value={promptInput}
               onChange={(e) => {
                 setPromptInput(e.target.value);
                 if (promptValidationError) setPromptValidationError(null);
               }}
-              placeholder="Describe what you want to create (e.g., Tokyo coffee shop, 2D runner game, or portfolio)..."
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  e.currentTarget.form?.requestSubmit();
+                }
+              }}
+              placeholder={animatedPlaceholder}
               className="w-full resize-none bg-transparent text-sm sm:text-base text-zinc-950 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500"
             />
 
@@ -750,7 +613,7 @@ export default function HomeView({
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -6 }}
                   aria-live="polite"
-                  className="mt-3 overflow-hidden rounded-xl border border-blue-500/30 bg-gradient-to-br from-blue-50/90 via-indigo-50/70 to-white p-3.5 text-xs dark:border-blue-500/30 dark:from-blue-950/35 dark:via-indigo-950/25 dark:to-zinc-900/90"
+                  className="mt-3 overflow-hidden rounded-xl border border-blue-500/30 bg-gradient-to-br from-blue-50/90 via-violet-50/70 to-white p-3.5 text-xs dark:border-blue-500/30 dark:from-blue-950/35 dark:via-indigo-950/25 dark:to-zinc-900/90"
                 >
                   <div className="relative h-1 w-full overflow-hidden rounded-full bg-blue-500/15 mb-3">
                     <div className="mist-shimmer-bar absolute inset-y-0 left-0 w-1/2 rounded-full mist-primary-gradient" />
@@ -981,7 +844,7 @@ export default function HomeView({
               <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between sm:justify-end gap-2 sm:gap-2.5 shrink-0">
                 {!user && (
                   <span className="text-center sm:text-right text-[11px] text-zinc-500 dark:text-zinc-400 whitespace-nowrap">
-                    Sign in to generate
+                    You'll sign in first, your prompt is kept
                   </span>
                 )}
                 <motion.button
@@ -1106,225 +969,288 @@ export default function HomeView({
               )}
             </AnimatePresence>
           </motion.form>
-        </section>
 
-        {/* Visual Walkthrough Reel (Always visible when signed out; toggleable when signed in) */}
-        {(!user || showLoggedInTour) && renderShowcaseWalkthrough()}
+    </>
+  );
 
-        {/* Saved Websites Management */}
-        <section
-          id="projects"
-          className="border-t border-zinc-200/80 bg-white/60 py-12 sm:py-14 dark:border-zinc-800/80 dark:bg-zinc-950/45 transition-colors"
-        >
-          <div className="mx-auto max-w-7xl px-4 sm:px-6">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+  const thumbGradient = (seed: string) => {
+    const palettes = [
+      'from-blue-500 via-violet-500 to-pink-500',
+      'from-orange-400 via-pink-500 to-violet-600',
+      'from-sky-400 via-blue-500 to-indigo-600',
+      'from-emerald-400 via-teal-500 to-sky-600',
+      'from-rose-400 via-fuchsia-500 to-violet-600',
+      'from-amber-400 via-orange-500 to-rose-500',
+    ];
+    let h = 0;
+    for (let i = 0; i < seed.length; i++) h = (Math.imul(h, 31) + seed.charCodeAt(i) * (i + 7)) >>> 0;
+    return palettes[h % palettes.length];
+  };
+
+  // ================= SIGNED-OUT: marketing landing =================
+  if (!user) {
+    const features = [
+      { icon: Mic, title: 'Talk it into existence', body: 'Describe your idea out loud in Voice Studio and watch Mist turn it into a working site.' },
+      { icon: KeyRound, title: 'Your keys, your models', body: 'Bring any OpenRouter or OpenAI-compatible model. Keys are stored encrypted in your account.' },
+      { icon: Layers, title: 'Click to edit', body: 'Select any element in the preview and change it visually, or ask the chat to refine it.' },
+      { icon: Globe, title: 'Real web research', body: 'Turn on web search and Mist cites live sources inside the sites it builds.' },
+      { icon: Gamepad2, title: 'Beyond websites', body: 'Build 2D canvas games and interactive Three.js 3D scenes from the same prompt box.' },
+      { icon: Download, title: 'Own the code', body: 'Download clean React + TypeScript source and host it free anywhere — no lock-in.' },
+    ];
+    const ideas = [
+      { img: templateCoffeeImg, title: 'Coffee roastery', tag: 'Hospitality', prompt: 'Minimalist Tokyo specialty coffee roastery landing page with single-origin menu, brew guide, and location details.' },
+      { img: templateAudioImg, title: 'Audio hardware', tag: 'Product', prompt: 'Premium audio hardware product page with specs, sound signature chart, and pre-order section.' },
+      { img: templateArchitectImg, title: 'Architecture studio', tag: 'Portfolio', prompt: 'Architecture studio portfolio with a project grid, case study pages, and contact form.' },
+      { img: templateSkincareImg, title: 'Botanical skincare', tag: 'Store', prompt: 'Botanical skincare brand store with product cards, ingredient glossary, and cart.' },
+    ];
+    return (
+      <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] flex flex-col">
+        <header className="sticky top-0 z-30 bg-[#fcfbf8]/75 backdrop-blur-xl dark:bg-[#0b0b0d]/70">
+          <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-6 px-4 sm:px-6">
+            <a href="#top" className="shrink-0 focus:outline-none"><MistLogo size="md" /></a>
+            <nav aria-label="Primary" className="hidden md:flex items-center gap-1 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+              {[['#ideas', 'Ideas'], ['#features', 'Features'], ['#how', 'How it works']].map(([href, label]) => (
+                <a key={href} href={href} className="rounded-full px-3.5 py-2 hover:bg-zinc-900/5 hover:text-zinc-950 dark:hover:bg-white/10 dark:hover:text-white transition-colors">{label}</a>
+              ))}
+            </nav>
+            <div className="flex items-center gap-2">
+              {themeButton}
+              <button type="button" onClick={onOpenAccount} className="hidden sm:inline-flex h-9 items-center rounded-full border border-zinc-300 px-4 text-sm font-medium text-zinc-800 hover:bg-white dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900 transition-colors cursor-pointer">Log in</button>
+              <button type="button" onClick={onOpenAccount} className="inline-flex h-9 items-center rounded-full bg-zinc-950 px-4 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200 transition-colors cursor-pointer">Get started</button>
+            </div>
+          </div>
+        </header>
+
+        <main id="top" className="flex-1">
+          <section className="mist-hero-aurora mx-auto max-w-4xl px-4 sm:px-6 pt-16 pb-24 sm:pt-28 sm:pb-32 text-center">
+            <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}>
+              <button type="button" onClick={onOpenVoiceChat} className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/80 py-1 pl-1 pr-3 text-xs font-medium text-zinc-700 shadow-sm backdrop-blur hover:bg-white dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-300 transition-colors cursor-pointer">
+                <span className="rounded-full mist-primary-gradient px-2 py-0.5 text-[10px] font-semibold text-white">New</span>
+                Build by voice in Voice Studio <ArrowRight className="h-3 w-3" aria-hidden="true" />
+              </button>
+              <h1 className="mt-6 font-display text-[40px] sm:text-6xl lg:text-7xl font-semibold leading-[1.02] text-zinc-950 dark:text-white [text-wrap:balance]">
+                Turn ideas into <span className="mist-gradient-text">websites</span>
+              </h1>
+              <p className="mx-auto mt-5 max-w-xl text-base sm:text-lg text-zinc-600 dark:text-zinc-400">
+                Describe it, watch Mist build it, then download the code and host it free.
+              </p>
+            </motion.div>
+            <div className="mt-10 text-left">{composerBlock}</div>
+          </section>
+
+          <section id="ideas" className="mx-auto max-w-7xl px-4 sm:px-6 py-20">
+            <div className="flex items-end justify-between gap-4">
               <div>
-                <h2 className="font-display text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white">
-                  Your Websites
-                </h2>
-                <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                  {user
-                    ? `Projects created for ${user.email}`
-                    : 'Sign in with Google to save projects and encrypted BYOK keys to your account.'}
-                </p>
-              </div>
-
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 sm:gap-3 w-full md:w-auto">
-                <div className="relative w-full sm:w-auto">
-                  <Search
-                    className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400"
-                    aria-hidden="true"
-                  />
-                  <input
-                    type="search"
-                    aria-label="Search projects"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Filter projects..."
-                    className="w-full sm:w-52 min-h-[44px] sm:min-h-[34px] rounded-xl border border-zinc-200 bg-white pl-8 pr-3 py-1.5 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
-                  />
-                </div>
-
-                <div className="grid grid-cols-3 sm:flex items-center gap-1 rounded-xl bg-zinc-100 p-1 dark:bg-zinc-900">
-                  {(['all', 'published', 'draft'] as const).map((tab) => (
-                    <button
-                      key={tab}
-                      type="button"
-                      onClick={() => setProjectFilter(tab)}
-                      className={`relative min-h-[36px] sm:min-h-0 rounded-lg px-3 py-1.5 sm:py-1 text-xs font-medium capitalize transition-colors cursor-pointer ${
-                        projectFilter === tab
-                          ? 'text-zinc-950 dark:text-white'
-                          : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white'
-                      }`}
-                    >
-                      {projectFilter === tab && (
-                        <motion.span
-                          layoutId="mist-project-filter-pill"
-                          transition={{ type: 'spring', bounce: 0.18, duration: 0.35 }}
-                          className="absolute inset-0 rounded-lg bg-white shadow-sm dark:bg-zinc-800"
-                        />
-                      )}
-                      <span className="relative z-10">{tab}</span>
-                    </button>
-                  ))}
-                </div>
+                <h2 className="font-display text-3xl sm:text-4xl font-semibold text-zinc-950 dark:text-white">Start from an idea</h2>
+                <p className="mt-2 text-zinc-600 dark:text-zinc-400">Tap one to drop its prompt into the box above.</p>
               </div>
             </div>
-
-            {filteredProjects.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-zinc-300 bg-white/85 p-8 sm:p-10 text-center dark:border-zinc-800 dark:bg-zinc-900/40">
-                <FolderOpen className="mx-auto h-7 w-7 text-zinc-400" aria-hidden="true" />
-                <h3 className="mt-3 font-display text-base font-semibold text-zinc-900 dark:text-zinc-100">
-                  {projects.length === 0 ? 'No websites created yet' : 'No matching websites'}
-                </h3>
-                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400 max-w-md mx-auto">
-                  {projects.length === 0
-                    ? 'Pick any mode above, describe an idea in the prompt composer, or open Voice Studio.'
-                    : 'Clear your search filter to view all saved websites.'}
-                </p>
-                {projects.length === 0 && (
-                  <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        window.scrollTo({ top: 0, behavior: 'smooth' });
-                        promptInputRef.current?.focus();
-                      }}
-                      className="inline-flex min-h-[42px] items-center gap-2 rounded-xl mist-primary-gradient px-4 py-2 text-xs font-medium text-white shadow-sm cursor-pointer"
-                    >
-                      <MistMark className="h-3.5 w-3.5" title="Start" />
-                      <span>Start from a Prompt</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onOpenVoiceChat}
-                      className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-medium text-zinc-800 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                    >
-                      <Mic className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-                      <span>Try Voice Chat</span>
-                    </button>
+            <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {ideas.map((idea) => (
+                <button key={idea.title} type="button" onClick={() => focusComposer(idea.prompt)} className="group overflow-hidden rounded-3xl border border-zinc-200/80 bg-white text-left shadow-sm hover:-translate-y-1 hover:shadow-xl dark:border-zinc-800 dark:bg-zinc-900 transition-all duration-300 cursor-pointer">
+                  <div className="aspect-[4/3] overflow-hidden"><img src={idea.img} alt="" loading="lazy" className="h-full w-full object-cover group-hover:scale-105 transition-transform duration-500" /></div>
+                  <div className="p-4">
+                    <p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">{idea.tag}</p>
+                    <p className="mt-1 font-semibold text-zinc-950 dark:text-white">{idea.title}</p>
                   </div>
-                )}
-              </div>
-            ) : (
-              <div className="divide-y divide-zinc-200 rounded-2xl border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900/75 overflow-hidden">
-                {filteredProjects.map((project, index) => (
-                  <motion.div
-                    key={project.id}
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.22, delay: Math.min(index * 0.03, 0.18) }}
-                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-5 py-4 hover:bg-zinc-50/80 dark:hover:bg-zinc-800/40 transition-colors"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => onOpenProject(project)}
-                          className="font-display text-sm font-semibold text-zinc-950 hover:text-blue-600 dark:text-white dark:hover:text-blue-400 truncate cursor-pointer"
-                        >
-                          {project.name}
-                        </button>
-                        <span className="text-xs text-zinc-400">·</span>
-                        <span className="inline-flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
-                          <FileCode2 className="h-3 w-3 opacity-70" aria-hidden="true" />
-                          <span>{project.files.length} files</span>
-                        </span>
-                        {project.isPublished && project.publishedSlug && (
-                          <>
-                            <span className="text-xs text-zinc-400">·</span>
-                            <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 dark:text-emerald-400">
-                              <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-                              <span>Exported ({project.publishedSlug}.zip)</span>
-                            </span>
-                          </>
-                        )}
-                      </div>
-                      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400 truncate">
-                        {project.description || project.prompt}
-                      </p>
-                    </div>
+                </button>
+              ))}
+            </div>
+          </section>
 
-                    <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => onOpenProject(project)}
-                        className="flex-1 sm:flex-initial min-h-[44px] sm:min-h-[36px] rounded-xl sm:rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer whitespace-nowrap"
-                      >
-                        Open Editor
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onPublishProject(project)}
-                        className="inline-flex min-h-[44px] sm:min-h-[36px] items-center gap-1.5 rounded-xl sm:rounded-lg mist-primary-gradient px-3 py-1.5 text-xs font-medium text-white shadow-sm cursor-pointer whitespace-nowrap"
-                      >
-                        <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Publish</span>
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Duplicate ${project.name}`}
-                        onClick={() => onDuplicateProject(project)}
-                        className="inline-flex min-h-[44px] min-w-[44px] sm:min-h-[36px] sm:min-w-[36px] items-center justify-center rounded-xl sm:rounded-lg border border-zinc-200 p-1.5 text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white transition-colors cursor-pointer"
-                      >
-                        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Delete ${project.name}`}
-                        onClick={() => onDeleteProject(project.id)}
-                        className="inline-flex min-h-[44px] min-w-[44px] sm:min-h-[36px] sm:min-w-[36px] items-center justify-center rounded-xl sm:rounded-lg border border-zinc-200 p-1.5 text-zinc-600 hover:border-red-200 hover:bg-red-50 hover:text-red-600 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-red-900 dark:hover:bg-red-950/60 dark:hover:text-red-400 transition-colors cursor-pointer"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      </button>
-                    </div>
-                  </motion.div>
-                ))}
-              </div>
-            )}
-          </div>
-        </section>
-      </main>
+          <section id="features" className="mx-auto max-w-7xl px-4 sm:px-6 py-20">
+            <h2 className="max-w-2xl font-display text-3xl sm:text-5xl font-semibold text-zinc-950 dark:text-white">One prompt box. A whole studio behind it.</h2>
+            <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {features.map(({ icon: Icon, title, body }) => (
+                <div key={title} className="mist-surface-card rounded-3xl p-6">
+                  <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl mist-primary-gradient text-white"><Icon className="h-5 w-5" aria-hidden="true" /></span>
+                  <h3 className="mt-5 text-lg font-semibold text-zinc-950 dark:text-white">{title}</h3>
+                  <p className="mt-1.5 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">{body}</p>
+                </div>
+              ))}
+            </div>
+          </section>
 
-      <footer className="border-t border-zinc-200/80 bg-white/75 py-6 dark:border-zinc-800/80 dark:bg-[#09090B]/90">
-        <div className="mx-auto flex max-w-7xl flex-col sm:flex-row items-center justify-between gap-4 px-4 sm:px-6 text-xs text-zinc-500 dark:text-zinc-400">
-          <div className="flex items-center gap-2.5 text-center sm:text-left">
+          <div id="how">{renderShowcaseWalkthrough()}</div>
+
+          <section className="mx-auto max-w-7xl px-4 sm:px-6 py-20">
+            <div className="relative overflow-hidden rounded-[2rem] bg-zinc-950 px-6 py-16 text-center sm:py-20">
+              <div aria-hidden="true" className="absolute inset-0 opacity-80 bg-[radial-gradient(60%_80%_at_50%_120%,#ec4899_0%,transparent_60%),radial-gradient(50%_60%_at_15%_100%,#f97316_0%,transparent_60%),radial-gradient(50%_60%_at_85%_100%,#3b82f6_0%,transparent_60%)]" />
+              <div className="relative">
+                <h2 className="font-display text-3xl sm:text-5xl font-semibold text-white">Ready to build?</h2>
+                <p className="mx-auto mt-3 max-w-md text-zinc-300">Free to start. Bring your own model key.</p>
+                <button type="button" onClick={() => focusComposer()} className="mt-8 inline-flex h-11 items-center gap-2 rounded-full bg-white px-6 text-sm font-semibold text-zinc-950 hover:bg-zinc-100 transition-colors cursor-pointer">
+                  Start building <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          </section>
+        </main>
+
+        <footer className="border-t border-zinc-200/70 py-8 dark:border-zinc-800/70">
+          <div className="mx-auto flex max-w-7xl flex-col sm:flex-row items-center justify-between gap-3 px-4 sm:px-6 text-sm text-zinc-500">
             <MistLogo size="sm" />
-            <span>— Ideas into websites. · {projects.length} {projects.length === 1 ? 'project' : 'projects'}</span>
+            <span>Ideas into websites.</span>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onOpenSettings}
-              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-            >
-              <Settings className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Settings</span>
-            </button>
-            <button
-              type="button"
-              onClick={onToggleDarkMode}
-              aria-label={darkMode ? 'Switch to light studio theme' : 'Switch to dark studio theme'}
-              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-            >
-              {darkMode ? (
-                <>
-                  <Sun className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Light Mode</span>
-                </>
-              ) : (
-                <>
-                  <Moon className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Dark Mode</span>
-                </>
-              )}
+        </footer>
+      </div>
+    );
+  }
+
+  // ================= SIGNED-IN: app dashboard =================
+  const navItems = [
+    { icon: MistMark, label: 'New project', onClick: () => focusComposer('') },
+    { icon: Search, label: 'Search', onClick: () => { document.getElementById('projects')?.scrollIntoView({ behavior: 'smooth' }); window.setTimeout(() => projectSearchRef.current?.focus(), 300); } },
+    { icon: Mic, label: 'Voice Studio', onClick: onOpenVoiceChat },
+    { icon: KeyRound, label: 'Models & Keys', onClick: onOpenProviders },
+    { icon: Globe, label: 'Hosting', onClick: onOpenDeployments },
+    { icon: Settings, label: 'Settings', onClick: onOpenSettings },
+  ];
+  const recent = [...projects].slice(0, 6);
+
+  return (
+    <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] lg:flex">
+      {/* Sidebar */}
+      <aside className="hidden lg:flex sticky top-0 h-screen w-64 shrink-0 flex-col gap-1 px-3 py-4">
+        <div className="px-2 pb-3"><MistLogo size="md" /></div>
+        {navItems.map(({ icon: Icon, label, onClick }) => (
+          <button key={label} type="button" onClick={onClick} className="flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-900/5 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white transition-colors cursor-pointer">
+            <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+            {label}
+          </button>
+        ))}
+        <p className="mt-6 px-3 pb-1 text-xs font-medium text-zinc-500">Recent</p>
+        <div className="flex-1 overflow-y-auto mist-scrollbar">
+          {recent.length === 0 ? (
+            <p className="px-3 text-xs text-zinc-500">Your projects will show up here.</p>
+          ) : (
+            recent.map((p) => (
+              <button key={p.id} type="button" onClick={() => onOpenProject(p)} className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-900/5 dark:text-zinc-300 dark:hover:bg-white/10 transition-colors cursor-pointer">
+                <span className={`h-5 w-5 shrink-0 rounded-md bg-gradient-to-br ${thumbGradient(p.id)}`} />
+                <span className="truncate">{p.name}</span>
+              </button>
+            ))
+          )}
+        </div>
+        <div className="flex items-center gap-1 border-t border-zinc-200/70 pt-3 dark:border-zinc-800/70">
+          <button type="button" onClick={onOpenAccount} className="flex flex-1 min-w-0 items-center gap-2.5 rounded-xl px-2 py-2 text-left hover:bg-zinc-900/5 dark:hover:bg-white/10 transition-colors cursor-pointer">
+            {user.photoURL ? (
+              <img src={user.photoURL} alt="" className="h-7 w-7 rounded-full" referrerPolicy="no-referrer" />
+            ) : (
+              <span className="flex h-7 w-7 items-center justify-center rounded-full mist-primary-gradient text-xs font-semibold text-white">{firstName.charAt(0).toUpperCase()}</span>
+            )}
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-medium">{user.displayName || firstName}</span>
+              <span className="block truncate text-[11px] text-zinc-500">{user.email}</span>
+            </span>
+          </button>
+          {themeButton}
+        </div>
+      </aside>
+
+      {/* Mobile top bar */}
+      <header className="lg:hidden sticky top-0 z-30 bg-[#fcfbf8]/80 backdrop-blur-xl dark:bg-[#0b0b0d]/75">
+        <div className="flex h-14 items-center justify-between px-4">
+          <MistLogo size="md" />
+          <div className="flex items-center gap-1">
+            {themeButton}
+            <button type="button" aria-expanded={mobileMenuOpen} aria-label="Toggle menu" onClick={() => setMobileMenuOpen((v) => !v)} className="inline-flex h-9 w-9 items-center justify-center rounded-full hover:bg-zinc-900/5 dark:hover:bg-white/10 cursor-pointer">
+              {mobileMenuOpen ? <X className="h-4 w-4" aria-hidden="true" /> : <Menu className="h-4 w-4" aria-hidden="true" />}
             </button>
           </div>
         </div>
-      </footer>
+        <AnimatePresence initial={false}>
+          {mobileMenuOpen && (
+            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+              <div className="grid grid-cols-2 gap-2 p-3">
+                {[...navItems, { icon: UserIcon, label: 'Account', onClick: onOpenAccount }].map(({ icon: Icon, label, onClick }) => (
+                  <button key={label} type="button" onClick={() => { setMobileMenuOpen(false); onClick(); }} className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-white/80 px-3 text-sm font-medium dark:border-zinc-800 dark:bg-zinc-900 cursor-pointer">
+                    <Icon className="h-4 w-4" aria-hidden="true" />{label}
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </header>
+
+      <main id="top" className="flex-1 min-w-0 lg:p-2">
+        <div className="min-h-full overflow-hidden lg:rounded-[1.75rem] lg:border lg:border-zinc-200/70 bg-[#fcfbf8] dark:bg-[#0f0f11] lg:dark:border-zinc-800/70">
+          <section className="mist-hero-aurora mx-auto max-w-3xl px-4 sm:px-6 pt-14 pb-20 sm:pt-24 sm:pb-28">
+            <motion.h1 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="text-center font-display text-3xl sm:text-5xl font-semibold text-zinc-950 dark:text-white [text-wrap:balance]">
+              What will you build, {firstName}?
+            </motion.h1>
+            <div className="mt-8">{composerBlock}</div>
+            <div className="mt-4 text-center">
+              <button type="button" onClick={() => setShowLoggedInTour((v) => !v)} className="text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-white underline-offset-4 hover:underline cursor-pointer">
+                {showLoggedInTour ? 'Hide walkthrough' : 'How Mist works'}
+              </button>
+            </div>
+          </section>
+
+          {showLoggedInTour && renderShowcaseWalkthrough()}
+
+          <section id="projects" className="px-3 pb-10 sm:px-6">
+            <div className="mx-auto max-w-7xl rounded-[1.75rem] border border-zinc-200/70 bg-white p-4 sm:p-6 dark:border-zinc-800/70 dark:bg-zinc-950/80">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="flex items-center gap-1 rounded-full bg-zinc-100 p-1 dark:bg-zinc-900">
+                  {([['all', 'All projects'], ['published', 'Published'], ['draft', 'Drafts']] as const).map(([tab, label]) => (
+                    <button key={tab} type="button" onClick={() => setProjectFilter(tab)} className={`relative rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors cursor-pointer ${projectFilter === tab ? 'text-zinc-950 dark:text-white' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-white'}`}>
+                      {projectFilter === tab && <motion.span layoutId="mist-project-filter-pill" transition={{ type: 'spring', bounce: 0.18, duration: 0.35 }} className="absolute inset-0 rounded-full bg-white shadow-sm dark:bg-zinc-800" />}
+                      <span className="relative z-10">{label}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" aria-hidden="true" />
+                  <input ref={projectSearchRef} type="search" aria-label="Search projects" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search projects" className="h-10 w-full md:w-64 rounded-full border border-zinc-200 bg-transparent pl-9 pr-4 text-sm placeholder:text-zinc-400 focus:border-pink-400 focus:outline-none dark:border-zinc-800" />
+                </div>
+              </div>
+
+              {filteredProjects.length === 0 ? (
+                <div className="mt-6 rounded-2xl border border-dashed border-zinc-300 p-10 text-center dark:border-zinc-800">
+                  <FolderOpen className="mx-auto h-7 w-7 text-zinc-400" aria-hidden="true" />
+                  <h3 className="mt-3 font-semibold text-zinc-900 dark:text-zinc-100">{projects.length === 0 ? 'No projects yet' : 'Nothing matches'}</h3>
+                  <p className="mt-1 text-sm text-zinc-500">{projects.length === 0 ? 'Describe an idea above to create your first one.' : 'Try a different search or tab.'}</p>
+                  {projects.length === 0 && (
+                    <button type="button" onClick={() => focusComposer()} className="mt-5 inline-flex h-10 items-center gap-2 rounded-full mist-primary-gradient px-5 text-sm font-medium text-white cursor-pointer">Start building</button>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {filteredProjects.map((project, index) => (
+                    <motion.div key={project.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, delay: Math.min(index * 0.03, 0.18) }} className="group">
+                      <button type="button" onClick={() => onOpenProject(project)} className="relative block aspect-[16/10] w-full overflow-hidden rounded-2xl border border-zinc-200/70 dark:border-zinc-800 cursor-pointer">
+                        <div className={`absolute inset-0 bg-gradient-to-br ${thumbGradient(project.id)} opacity-90 group-hover:scale-105 transition-transform duration-500`} />
+                        <span className="absolute inset-0 flex items-center justify-center font-display text-5xl font-semibold text-white/90">{project.name.charAt(0).toUpperCase()}</span>
+                        <span className="absolute left-3 top-3 rounded-full bg-black/30 px-2 py-0.5 text-[11px] font-medium text-white backdrop-blur">
+                          {project.isPublished ? 'Published' : 'Draft'}
+                        </span>
+                        <span className="absolute inset-x-3 bottom-3 translate-y-2 opacity-0 group-hover:translate-y-0 group-hover:opacity-100 rounded-full bg-white/95 py-2 text-center text-sm font-medium text-zinc-950 transition-all">Open editor</span>
+                      </button>
+                      <div className="mt-3 flex items-start justify-between gap-2 px-1">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium text-zinc-950 dark:text-white">{project.name}</p>
+                          <p className="truncate text-xs text-zinc-500">{project.files.length} files · {project.description || project.prompt}</p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-0.5 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
+                          <button type="button" aria-label={`Publish ${project.name}`} title="Publish (download)" onClick={() => onPublishProject(project)} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950 dark:hover:bg-zinc-800 dark:hover:text-white cursor-pointer"><Download className="h-4 w-4" aria-hidden="true" /></button>
+                          <button type="button" aria-label={`Duplicate ${project.name}`} title="Duplicate" onClick={() => onDuplicateProject(project)} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950 dark:hover:bg-zinc-800 dark:hover:text-white cursor-pointer"><Copy className="h-4 w-4" aria-hidden="true" /></button>
+                          <button type="button" aria-label={`Delete ${project.name}`} title="Delete" onClick={() => onDeleteProject(project.id)} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/60 cursor-pointer"><Trash2 className="h-4 w-4" aria-hidden="true" /></button>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </main>
     </div>
   );
 }
+
 
 function activeIncidentMatches(
   incident: ModelHealthIncident | null,

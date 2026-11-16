@@ -398,7 +398,7 @@ export default function VoiceChatModal({
             )}
 
             {/* Voice Capture Bar */}
-            <div className="mx-5 mt-4 flex items-center justify-between gap-4 rounded-xl border border-zinc-200 bg-gradient-to-r from-zinc-50 via-blue-50/40 to-indigo-50/40 px-4 py-3 dark:border-zinc-800 dark:from-zinc-900/80 dark:via-blue-950/20 dark:to-indigo-950/20">
+            <div className="mx-5 mt-4 flex items-center justify-between gap-4 rounded-xl border border-zinc-200 bg-gradient-to-r from-zinc-50 via-violet-50/40 to-pink-50/40 px-4 py-3 dark:border-zinc-800 dark:from-zinc-900/80 dark:via-blue-950/20 dark:to-indigo-950/20">
               <div className="flex items-center gap-2 min-w-0">
                 <div className="flex items-center gap-1 h-7" aria-hidden="true">
                   {[0.4, 0.75, 1, 0.85, 0.55].map((w, i) => (
@@ -458,7 +458,7 @@ export default function VoiceChatModal({
                   key={turn.id}
                   className={`rounded-xl px-3 py-2.5 leading-relaxed ${
                     turn.role === 'user'
-                      ? 'ml-8 bg-gradient-to-br from-blue-600/12 to-indigo-600/12 text-zinc-950 dark:text-zinc-100'
+                      ? 'ml-8 bg-gradient-to-br from-blue-600/12 to-pink-600/12 text-zinc-950 dark:text-zinc-100'
                       : 'mr-8 border border-zinc-200 bg-zinc-50 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200'
                   }`}
                 >

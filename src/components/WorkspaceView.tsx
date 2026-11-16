@@ -755,7 +755,7 @@ export default function WorkspaceView({
                     initial={{ opacity: 0, y: 6 }}
                     animate={{ opacity: 1, y: 0 }}
                     aria-live="polite"
-                    className="rounded-xl border border-blue-500/35 bg-gradient-to-br from-blue-50/90 to-indigo-50/60 p-3 text-xs dark:border-blue-500/30 dark:from-blue-950/35 dark:to-indigo-950/25"
+                    className="rounded-xl border border-blue-500/35 bg-gradient-to-br from-blue-50/90 to-pink-50/60 p-3 text-xs dark:border-blue-500/30 dark:from-blue-950/35 dark:to-indigo-950/25"
                   >
                     <div className="relative h-1 w-full overflow-hidden rounded-full bg-blue-500/15 mb-2.5">
                       <div className="mist-shimmer-bar absolute inset-y-0 left-0 w-1/2 rounded-full mist-primary-gradient" />
