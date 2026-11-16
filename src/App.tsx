@@ -9,6 +9,9 @@ import type {
   ProjectFile,
   SelectedVisualElement,
   StudioSettings,
+  WebSearchConfig,
+  WebSearchOutcome,
+  WebSearchSource,
 } from './types/mist';
 import type { ModelHealthIncident } from './utils/aiErrors';
 import {
@@ -16,6 +19,10 @@ import {
   normalizeProviderConfigToStudio,
   shouldEnableAppAi,
 } from './data/models';
+import {
+  DEFAULT_WEB_SEARCH_CONFIG,
+  normalizeWebSearchConfig,
+} from './data/webSearch';
 import {
   applyVisualPatchToFiles,
   buildExportManifest,
@@ -37,7 +44,6 @@ import {
   clearKnownCloudProjects,
   deleteProjectFromFirestore,
   listUserProjectsFromFirestore,
-  saveDeploymentToFirestore,
   saveProjectToFirestore,
   syncLocalProjectsToFirestore,
 } from './firebase/store';
@@ -54,6 +60,7 @@ import {
 
 const STORAGE_PROJECTS_KEY = 'mist_projects_v1';
 const STORAGE_PROVIDER_KEY = 'mist_provider_v1';
+const STORAGE_SEARCH_KEY = 'mist_search_v1';
 const STORAGE_SETTINGS_KEY = 'mist_settings_v1';
 const STORAGE_THEME_KEY = 'mist_theme_v1';
 
@@ -63,6 +70,7 @@ const DEFAULT_STUDIO_SETTINGS: StudioSettings = {
   defaultViewport: 'desktop',
   enableAppAi: false,
   appAiMode: 'on_request',
+  webSearchMode: 'auto',
 };
 
 function loadLocalProjects(): MistProject[] {
@@ -99,6 +107,29 @@ function persistProviderConfig(config: AiProviderConfig): void {
   }
 }
 
+function loadWebSearchConfig(): WebSearchConfig {
+  try {
+    const raw = localStorage.getItem(STORAGE_SEARCH_KEY);
+    if (raw) {
+      return normalizeWebSearchConfig(JSON.parse(raw) as Partial<WebSearchConfig>);
+    }
+  } catch {
+    // ignore
+  }
+  return { ...DEFAULT_WEB_SEARCH_CONFIG };
+}
+
+function persistWebSearchConfig(config: WebSearchConfig): void {
+  try {
+    const safeToPersist: WebSearchConfig = config.sessionOnlyKey
+      ? { ...config, apiKey: '' }
+      : config;
+    localStorage.setItem(STORAGE_SEARCH_KEY, JSON.stringify(safeToPersist));
+  } catch {
+    // ignore
+  }
+}
+
 function loadStudioSettings(): StudioSettings {
   try {
     const raw = localStorage.getItem(STORAGE_SETTINGS_KEY);
@@ -112,11 +143,18 @@ function loadStudioSettings(): StudioSettings {
           : parsed.enableAppAi === false
             ? 'off'
             : 'on_request';
+      const resolvedSearchMode =
+        parsed.webSearchMode === 'auto' ||
+        parsed.webSearchMode === 'on' ||
+        parsed.webSearchMode === 'off'
+          ? parsed.webSearchMode
+          : 'auto';
       return {
         ...DEFAULT_STUDIO_SETTINGS,
         ...parsed,
         appAiMode: resolvedMode,
         enableAppAi: resolvedMode === 'always',
+        webSearchMode: resolvedSearchMode,
       };
     }
     const legacyTheme = localStorage.getItem(STORAGE_THEME_KEY);
@@ -130,12 +168,23 @@ function loadStudioSettings(): StudioSettings {
 }
 
 interface SseStreamPayload {
-  type: 'phase' | 'file_start' | 'file_done' | 'progress' | 'complete' | 'error';
+  type:
+    | 'phase'
+    | 'search_start'
+    | 'search_results'
+    | 'search_error'
+    | 'file_start'
+    | 'file_done'
+    | 'progress'
+    | 'complete'
+    | 'error';
   phase?: string;
   path?: string;
   activeFile?: string;
   completedFiles?: string[];
   chars?: number;
+  queries?: string[];
+  sources?: WebSearchSource[];
   result?: Record<string, unknown>;
   error?: string;
   incident?: ModelHealthIncident;
@@ -203,6 +252,10 @@ export default function App() {
   const providerConfigRef = useRef(providerConfig);
   providerConfigRef.current = providerConfig;
 
+  const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig>(() => loadWebSearchConfig());
+  const webSearchConfigRef = useRef(webSearchConfig);
+  webSearchConfigRef.current = webSearchConfig;
+
   const [studioSettings, setStudioSettings] = useState<StudioSettings>(() => loadStudioSettings());
   const studioSettingsRef = useRef(studioSettings);
   studioSettingsRef.current = studioSettings;
@@ -236,6 +289,8 @@ export default function App() {
   const darkMode = studioSettings.theme === 'dark';
   const bundleTimerRef = useRef<number | null>(null);
   const cloudSaveTimerRef = useRef<number | null>(null);
+  const generateAbortRef = useRef<AbortController | null>(null);
+  const refineAbortRef = useRef<AbortController | null>(null);
 
   // Sync dark mode class on <html> + persist studioSettings
   useEffect(() => {
@@ -262,15 +317,26 @@ export default function App() {
     }
   }, [projects]);
 
-  // Fetch deployments & AI status on mount
-  const refreshDeployments = useCallback(async () => {
+  // Fetch deployments (authenticated per-user) & AI status
+  const refreshDeployments = useCallback(async (currentUser: User | null) => {
+    if (!currentUser) {
+      setDeployments([]);
+      return;
+    }
     try {
-      const resp = await fetch('/api/deployments');
+      const idToken = await currentUser.getIdToken();
+      const resp = await fetch('/api/deployments', {
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
       if (resp.ok) {
         const data = (await resp.json()) as { deployments?: DeploymentRecord[] };
         if (Array.isArray(data.deployments)) {
           setDeployments(data.deployments);
         }
+      } else {
+        setDeployments([]);
       }
     } catch {
       // ignore offline
@@ -278,7 +344,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void refreshDeployments();
     void (async () => {
       try {
         const resp = await fetch('/api/ai/status');
@@ -292,7 +357,7 @@ export default function App() {
         // ignore
       }
     })();
-  }, [refreshDeployments]);
+  }, []);
 
   // Bundle active project for live preview
   const runBundle = useCallback(async (project: MistProject) => {
@@ -365,6 +430,14 @@ export default function App() {
     [activeProjectId, user],
   );
 
+  const handleCancelGeneration = useCallback(() => {
+    generateAbortRef.current?.abort();
+  }, []);
+
+  const handleCancelRefine = useCallback(() => {
+    refineAbortRef.current?.abort();
+  }, []);
+
   // Core SSE streaming generation executor
   const executeGenerateWebsite = useCallback(
     async (prompt: string, currentUser: User) => {
@@ -382,6 +455,10 @@ export default function App() {
         studioSettingsRef.current.appAiMode,
       );
 
+      generateAbortRef.current?.abort();
+      const abortController = new AbortController();
+      generateAbortRef.current = abortController;
+
       setIsGenerating(true);
       setGenerationError(null);
       const startedAt = Date.now();
@@ -390,21 +467,39 @@ export default function App() {
         completedFiles: [],
         charsReceived: 0,
         startedAt,
+        searchState: 'idle',
       });
 
       try {
+        const idToken = await currentUser.getIdToken();
         const resp = await fetch('/api/ai/generate/stream', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
+          signal: abortController.signal,
           body: JSON.stringify({
             prompt,
             providerConfig: cfg,
             enableAppAi: enableAppAiForBuild,
+            searchConfig: webSearchConfigRef.current,
+            searchMode: studioSettingsRef.current.webSearchMode || 'auto',
           }),
         });
 
         if (!resp.ok) {
-          throw new Error(`Generation failed (${resp.status}).`);
+          const errPayload = (await resp.json().catch(() => ({}))) as {
+            error?: string;
+            incident?: ModelHealthIncident;
+          };
+          const err = new Error(
+            errPayload.incident?.message ||
+              errPayload.error ||
+              `Generation failed (${resp.status}).`,
+          ) as Error & { incident?: ModelHealthIncident };
+          err.incident = errPayload.incident;
+          throw err;
         }
 
         const data = (await consumeAiSseStream(resp, (ev) => {
@@ -415,12 +510,38 @@ export default function App() {
               charsReceived: 0,
               startedAt,
             };
+            if (ev.type === 'search_start') {
+              return {
+                ...base,
+                phase: ev.phase || 'Searching live web sources...',
+                searchState: 'searching',
+                searchQueries: ev.queries ?? base.searchQueries,
+                searchError: undefined,
+              };
+            }
+            if (ev.type === 'search_results') {
+              return {
+                ...base,
+                searchState: 'done',
+                searchQueries: ev.queries ?? base.searchQueries,
+                searchSources: ev.sources ?? base.searchSources,
+                searchError: undefined,
+              };
+            }
+            if (ev.type === 'search_error') {
+              return {
+                ...base,
+                searchState: 'failed',
+                searchQueries: ev.queries ?? base.searchQueries,
+                searchError: ev.error || 'Web search failed.',
+              };
+            }
             if (ev.type === 'phase') {
               return {
                 ...base,
                 phase: ev.phase || base.phase,
                 completedFiles: ev.completedFiles ?? base.completedFiles,
-                charsReceived: ev.chars ?? base.charsReceived,
+                charsReceived: ev.chars ? Math.max(base.charsReceived, ev.chars) : base.charsReceived,
               };
             }
             if (ev.type === 'file_start') {
@@ -455,6 +576,7 @@ export default function App() {
           projectName?: string;
           description?: string;
           summary?: string;
+          searchOutcome?: WebSearchOutcome;
           files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
         };
 
@@ -497,6 +619,7 @@ export default function App() {
                 `Generated ${data.files.length} files for ${data.projectName || 'your site'}.`,
               timestamp: now,
               changedFiles: data.files.map((f) => f.path),
+              searchOutcome: data.searchOutcome,
             },
           ],
         };
@@ -508,10 +631,20 @@ export default function App() {
           void saveProjectToFirestore(newProject, { isNew: true }).catch(() => {});
         }
       } catch (err) {
-        const withIncident = err as Error & { incident?: ModelHealthIncident };
-        if (withIncident.incident) setModelIncident(withIncident.incident);
-        setGenerationError(err instanceof Error ? err.message : 'Failed to generate website.');
+        if (
+          abortController.signal.aborted ||
+          (err instanceof Error && err.name === 'AbortError')
+        ) {
+          setGenerationError('Generation cancelled.');
+        } else {
+          const withIncident = err as Error & { incident?: ModelHealthIncident };
+          if (withIncident.incident) setModelIncident(withIncident.incident);
+          setGenerationError(err instanceof Error ? err.message : 'Failed to generate website.');
+        }
       } finally {
+        if (generateAbortRef.current === abortController) {
+          generateAbortRef.current = null;
+        }
         setIsGenerating(false);
         setAiStreamProgress(null);
       }
@@ -553,6 +686,7 @@ export default function App() {
                 defaultViewport: cloudPrefs.defaultViewport || prev.defaultViewport,
                 appAiMode: nextMode,
                 enableAppAi: nextMode === 'always',
+                webSearchMode: cloudPrefs.webSearchMode || prev.webSearchMode || 'auto',
               };
             });
           }
@@ -568,6 +702,7 @@ export default function App() {
                 ? cloudPrefs.enableAppAi
                 : studioSettingsRef.current.enableAppAi,
             appAiMode: cloudPrefs?.appAiMode || studioSettingsRef.current.appAiMode,
+            webSearchMode: cloudPrefs?.webSearchMode || studioSettingsRef.current.webSearchMode,
           });
 
           const cloudProjects = await listUserProjectsFromFirestore(firebaseUser.uid);
@@ -586,6 +721,8 @@ export default function App() {
           if (localOnly.length > 0) {
             await syncLocalProjectsToFirestore(localOnly, cloudIds);
           }
+
+          await refreshDeployments(firebaseUser);
         } catch {
           // Errors logged silently in firebase/client.ts
         }
@@ -595,10 +732,12 @@ export default function App() {
           pendingGeneratePromptRef.current = null;
           void executeGenerateWebsite(queued, firebaseUser);
         }
+      } else {
+        setDeployments([]);
       }
     });
     return unsub;
-  }, [executeGenerateWebsite]);
+  }, [executeGenerateWebsite, refreshDeployments]);
 
   // Require sign-in when clicking Generate Website on the front page
   const handleGenerateWebsite = (prompt: string) => {
@@ -637,6 +776,12 @@ export default function App() {
     selectedElement?: SelectedVisualElement | null,
   ) => {
     if (!activeProject) return;
+    if (!user) {
+      setRefineError('Sign in with Google before using AI refinement.');
+      setAuthPromptReason('Sign in with Google to use Mist AI refinement.');
+      setAccountOpen(true);
+      return;
+    }
     if (!providerConfig.apiKey?.trim()) {
       setRefineError(
         `Add your BYOK API key for ${providerConfig.name || 'your provider'} first.`,
@@ -651,6 +796,10 @@ export default function App() {
       activeProject.appAiEnabled ? true : undefined,
     );
 
+    refineAbortRef.current?.abort();
+    const abortController = new AbortController();
+    refineAbortRef.current = abortController;
+
     setIsRefining(true);
     setRefineError(null);
     const startedAt = Date.now();
@@ -659,12 +808,18 @@ export default function App() {
       completedFiles: [],
       charsReceived: 0,
       startedAt,
+      searchState: 'idle',
     });
 
     try {
+      const idToken = await user.getIdToken();
       const resp = await fetch('/api/ai/refine/stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        signal: abortController.signal,
         body: JSON.stringify({
           instruction,
           files: activeProject.files,
@@ -677,10 +832,22 @@ export default function App() {
               }
             : undefined,
           providerConfig,
+          searchConfig: webSearchConfigRef.current,
+          searchMode: studioSettingsRef.current.webSearchMode || 'auto',
         }),
       });
       if (!resp.ok) {
-        throw new Error(`Refinement failed (${resp.status}).`);
+        const errPayload = (await resp.json().catch(() => ({}))) as {
+          error?: string;
+          incident?: ModelHealthIncident;
+        };
+        const err = new Error(
+          errPayload.incident?.message ||
+            errPayload.error ||
+            `Refinement failed (${resp.status}).`,
+        ) as Error & { incident?: ModelHealthIncident };
+        err.incident = errPayload.incident;
+        throw err;
       }
 
       const data = (await consumeAiSseStream(resp, (ev) => {
@@ -691,12 +858,38 @@ export default function App() {
             charsReceived: 0,
             startedAt,
           };
+          if (ev.type === 'search_start') {
+            return {
+              ...base,
+              phase: ev.phase || 'Searching live web sources...',
+              searchState: 'searching',
+              searchQueries: ev.queries ?? base.searchQueries,
+              searchError: undefined,
+            };
+          }
+          if (ev.type === 'search_results') {
+            return {
+              ...base,
+              searchState: 'done',
+              searchQueries: ev.queries ?? base.searchQueries,
+              searchSources: ev.sources ?? base.searchSources,
+              searchError: undefined,
+            };
+          }
+          if (ev.type === 'search_error') {
+            return {
+              ...base,
+              searchState: 'failed',
+              searchQueries: ev.queries ?? base.searchQueries,
+              searchError: ev.error || 'Web search failed.',
+            };
+          }
           if (ev.type === 'phase') {
             return {
               ...base,
               phase: ev.phase || base.phase,
               completedFiles: ev.completedFiles ?? base.completedFiles,
-              charsReceived: ev.chars ?? base.charsReceived,
+              charsReceived: ev.chars ? Math.max(base.charsReceived, ev.chars) : base.charsReceived,
             };
           }
           if (ev.type === 'file_start') {
@@ -729,6 +922,7 @@ export default function App() {
         });
       })) as {
         summary?: string;
+        searchOutcome?: WebSearchOutcome;
         files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
       };
 
@@ -753,14 +947,25 @@ export default function App() {
             content: data.summary || 'Applied your refinement.',
             timestamp: now,
             changedFiles: changedPaths,
+            searchOutcome: data.searchOutcome,
           },
         ],
       }));
     } catch (err) {
-      const withIncident = err as Error & { incident?: ModelHealthIncident };
-      if (withIncident.incident) setModelIncident(withIncident.incident);
-      setRefineError(err instanceof Error ? err.message : 'Failed to apply refinement.');
+      if (
+        abortController.signal.aborted ||
+        (err instanceof Error && err.name === 'AbortError')
+      ) {
+        setRefineError('Refinement cancelled.');
+      } else {
+        const withIncident = err as Error & { incident?: ModelHealthIncident };
+        if (withIncident.incident) setModelIncident(withIncident.incident);
+        setRefineError(err instanceof Error ? err.message : 'Failed to apply refinement.');
+      }
     } finally {
+      if (refineAbortRef.current === abortController) {
+        refineAbortRef.current = null;
+      }
       setIsRefining(false);
       setAiStreamProgress(null);
     }
@@ -799,6 +1004,8 @@ export default function App() {
         activeProject.files.some((f) => /\/api\/app-ai|window\.mistAI/.test(f.content)),
     );
     try {
+      // Ensure the parent project document exists in Firestore before creating the deployment
+      await saveProjectToFirestore(activeProject);
       const idToken = await user.getIdToken();
       const resp = await fetch('/api/deployments', {
         method: 'POST',
@@ -832,17 +1039,8 @@ export default function App() {
         updatedAt: new Date().toISOString(),
       };
       updateActiveProject(() => deployedProject);
-
-      if (data.htmlBundle) {
-        await saveProjectToFirestore(deployedProject);
-        await saveDeploymentToFirestore({
-          slug: data.slug,
-          projectId: activeProject.id,
-          title: activeProject.name,
-          htmlBundle: data.htmlBundle,
-        });
-      }
-      await refreshDeployments();
+      await saveProjectToFirestore(deployedProject);
+      await refreshDeployments(user);
     } catch (err) {
       setDeployError(err instanceof Error ? err.message : 'Failed to publish deployment.');
     } finally {
@@ -864,7 +1062,7 @@ export default function App() {
           Authorization: `Bearer ${idToken}`,
         },
       });
-      await refreshDeployments();
+      await refreshDeployments(user);
     } catch {
       // ignore
     }
@@ -887,6 +1085,14 @@ export default function App() {
     }
   };
 
+  const handleSaveWebSearch = (rawNext: WebSearchConfig) => {
+    const next = normalizeWebSearchConfig(rawNext);
+    setWebSearchConfig(next);
+    setGenerationError(null);
+    setRefineError(null);
+    persistWebSearchConfig(next);
+  };
+
   const handleUpdateSettings = (partial: Partial<StudioSettings>) => {
     setStudioSettings((prev) => {
       const next: StudioSettings = {
@@ -906,6 +1112,7 @@ export default function App() {
           defaultViewport: next.defaultViewport,
           enableAppAi: next.enableAppAi,
           appAiMode: next.appAiMode,
+          webSearchMode: next.webSearchMode,
         }).catch(() => {});
       }
       return next;
@@ -950,10 +1157,12 @@ export default function App() {
           projects={projects}
           deployments={deployments}
           providerConfig={providerConfig}
+          webSearchConfig={webSearchConfig}
           studioSettings={studioSettings}
           modelIncident={modelIncident}
           onBack={() => setActivePage('home')}
           onSaveProvider={handleSaveProvider}
+          onSaveWebSearch={handleSaveWebSearch}
           onUpdateSettings={handleUpdateSettings}
           onIncident={setModelIncident}
           onSignIn={() => void handleGoogleSignIn()}
@@ -962,10 +1171,13 @@ export default function App() {
       ) : activeProject ? (
         <WorkspaceView
           key={activeProject.id}
+          user={user}
           project={activeProject}
           providerConfig={providerConfig}
           defaultViewMode={studioSettings.defaultViewMode}
           defaultViewport={studioSettings.defaultViewport}
+          webSearchMode={studioSettings.webSearchMode || 'auto'}
+          hasWebSearchKey={Boolean(webSearchConfig.apiKey?.trim())}
           modelIncident={modelIncident}
           bundledHtml={bundledHtml}
           bundleError={bundleError}
@@ -1013,6 +1225,8 @@ export default function App() {
             }))
           }
           onRefineWithAi={handleRefineWithAi}
+          onCancelRefine={handleCancelRefine}
+          onChangeWebSearchMode={(mode) => handleUpdateSettings({ webSearchMode: mode })}
           onOpenVoiceChat={() => setVoiceChatOpen(true)}
           onRebundle={() => void runBundle(activeProject)}
           onDuplicateProject={() => handleDuplicateProject(activeProject)}
@@ -1045,14 +1259,18 @@ export default function App() {
           generationError={generationError}
           darkMode={darkMode}
           appAiMode={studioSettings.appAiMode}
+          webSearchMode={studioSettings.webSearchMode || 'auto'}
+          hasWebSearchKey={Boolean(webSearchConfig.apiKey?.trim())}
           onChangeAppAiMode={(mode) =>
             handleUpdateSettings({ appAiMode: mode, enableAppAi: mode === 'always' })
           }
+          onChangeWebSearchMode={(mode) => handleUpdateSettings({ webSearchMode: mode })}
           onToggleDarkMode={() =>
             handleUpdateSettings({ theme: darkMode ? 'light' : 'dark' })
           }
           onSaveProvider={handleSaveProvider}
           onGenerate={handleGenerateWebsite}
+          onCancelGeneration={handleCancelGeneration}
           onOpenVoiceChat={() => setVoiceChatOpen(true)}
           onOpenProject={(project) => setActiveProjectId(project.id)}
           onDuplicateProject={handleDuplicateProject}
@@ -1060,7 +1278,7 @@ export default function App() {
           onOpenProviders={() => setProvidersOpen(true)}
           onOpenSettings={() => setActivePage('settings')}
           onOpenDeployments={() => {
-            void refreshDeployments();
+            void refreshDeployments(user);
             setDeploymentsListOpen(true);
           }}
           onOpenAccount={() => {
@@ -1072,6 +1290,7 @@ export default function App() {
 
       <ProvidersModal
         isOpen={providersOpen}
+        user={user}
         config={providerConfig}
         modelIncident={modelIncident}
         onClose={() => setProvidersOpen(false)}
@@ -1111,6 +1330,7 @@ export default function App() {
 
       <VoiceChatModal
         isOpen={voiceChatOpen}
+        user={user}
         mode={activeProject ? 'refine' : 'create'}
         projectName={activeProject?.name}
         providerConfig={providerConfig}

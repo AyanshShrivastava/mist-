@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -12,6 +12,7 @@ import {
   Loader2,
   LogOut,
   Moon,
+  Search,
   ShieldAlert,
   Sliders,
   Sun,
@@ -24,10 +25,16 @@ import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
   AppAiMode,
+  CatalogSource,
   DeploymentRecord,
   MistProject,
+  ModelCapabilities,
+  ModelVerificationResult,
   StudioSettings,
   ViewportSize,
+  WebSearchConfig,
+  WebSearchMode,
+  WebSearchProviderId,
   WorkspaceViewMode,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
@@ -39,6 +46,10 @@ import {
   type CustomGatewayId,
   type ModelCatalogItem,
 } from '../data/models';
+import {
+  normalizeWebSearchConfig,
+  WEB_SEARCH_PRESETS,
+} from '../data/webSearch';
 import MistLogo from './MistLogo';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
 
@@ -47,10 +58,12 @@ interface SettingsViewProps {
   projects: MistProject[];
   deployments: DeploymentRecord[];
   providerConfig: AiProviderConfig;
+  webSearchConfig: WebSearchConfig;
   studioSettings: StudioSettings;
   modelIncident: ModelHealthIncident | null;
   onBack: () => void;
   onSaveProvider: (next: AiProviderConfig) => void;
+  onSaveWebSearch: (next: WebSearchConfig) => void;
   onUpdateSettings: (partial: Partial<StudioSettings>) => void;
   onIncident: (incident: ModelHealthIncident | null) => void;
   onSignIn: () => void;
@@ -62,10 +75,12 @@ export default function SettingsView({
   projects,
   deployments,
   providerConfig,
+  webSearchConfig,
   studioSettings,
   modelIncident,
   onBack,
   onSaveProvider,
+  onSaveWebSearch,
   onUpdateSettings,
   onIncident,
   onSignIn,
@@ -89,12 +104,42 @@ export default function SettingsView({
   const [model, setModel] = useState<string>(normalizedInit.model);
   const [savedNotice, setSavedNotice] = useState(false);
 
+  const normalizedSearchInit = normalizeWebSearchConfig(webSearchConfig);
+  const [searchProvider, setSearchProvider] = useState<WebSearchProviderId>(
+    normalizedSearchInit.provider,
+  );
+  const [searchName, setSearchName] = useState<string>(
+    normalizedSearchInit.name || WEB_SEARCH_PRESETS[0].name,
+  );
+  const [searchBaseUrl, setSearchBaseUrl] = useState<string>(
+    normalizedSearchInit.baseUrl || WEB_SEARCH_PRESETS[0].baseUrl,
+  );
+  const [searchApiKey, setSearchApiKey] = useState<string>(normalizedSearchInit.apiKey || '');
+  const [searchSessionOnlyKey, setSearchSessionOnlyKey] = useState<boolean>(
+    Boolean(normalizedSearchInit.sessionOnlyKey),
+  );
+  const [searchMaxResults, setSearchMaxResults] = useState<number>(
+    normalizedSearchInit.maxResults || 5,
+  );
+  const [showSearchKey, setShowSearchKey] = useState(false);
+  const [searchSavedNotice, setSearchSavedNotice] = useState(false);
+  const [isTestingSearch, setIsTestingSearch] = useState(false);
+  const [searchTestResult, setSearchTestResult] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+  const searchTestAbortRef = useRef<AbortController | null>(null);
+
   const [liveModels, setLiveModels] = useState<ModelCatalogItem[] | null>(null);
-  const [isLiveCatalog, setIsLiveCatalog] = useState(false);
+  const [catalogSource, setCatalogSource] = useState<CatalogSource>('preset');
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
+  const [isOutdatedFallback, setIsOutdatedFallback] = useState(false);
   const [isLoadingCatalog, setIsLoadingCatalog] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogNote, setCatalogNote] = useState<string | null>(null);
 
   const [isTestingProvider, setIsTestingProvider] = useState(false);
+  const [verifiedModel, setVerifiedModel] = useState<ModelVerificationResult | null>(null);
   const [providerTestResult, setProviderTestResult] = useState<{
     ok: boolean;
     message: string;
@@ -106,6 +151,9 @@ export default function SettingsView({
     message: string;
   } | null>(null);
 
+  const catalogAbortRef = useRef<AbortController | null>(null);
+  const catalogSeqRef = useRef(0);
+
   useEffect(() => {
     const norm = normalizeProviderConfigToStudio(providerConfig);
     setGatewayId(detectGatewayFromBaseUrl(norm.baseUrl));
@@ -114,46 +162,95 @@ export default function SettingsView({
     setApiKey(norm.apiKey || '');
     setSessionOnlyKey(Boolean(norm.sessionOnlyKey));
     setModel(norm.model);
+    setVerifiedModel(null);
   }, [providerConfig]);
 
-  const loadCatalog = async (targetUrl: string, targetKey: string, forceRefresh = false) => {
-    const cleaned = targetUrl.trim();
-    if (!cleaned.startsWith('https://')) {
-      setLiveModels(null);
-      setIsLiveCatalog(false);
-      setCatalogNote(cleaned ? 'Enter an https:// URL to fetch live models.' : null);
-      return;
-    }
-    setIsLoadingCatalog(true);
-    try {
-      const res = await fetchLiveModelCatalog({
-        baseUrl: cleaned,
-        apiKey: targetKey,
-        forceRefresh,
-      });
-      setLiveModels(res.models);
-      setIsLiveCatalog(res.source === 'live');
-      setCatalogNote(res.note || null);
-    } catch (err) {
-      setIsLiveCatalog(false);
-      setCatalogNote(err instanceof Error ? err.message : 'Unable to refresh model catalog.');
-    } finally {
-      setIsLoadingCatalog(false);
-    }
-  };
+  useEffect(() => {
+    const normSearch = normalizeWebSearchConfig(webSearchConfig);
+    setSearchProvider(normSearch.provider);
+    setSearchName(normSearch.name || WEB_SEARCH_PRESETS[0].name);
+    setSearchBaseUrl(normSearch.baseUrl || '');
+    setSearchApiKey(normSearch.apiKey || '');
+    setSearchSessionOnlyKey(Boolean(normSearch.sessionOnlyKey));
+    setSearchMaxResults(normSearch.maxResults || 5);
+  }, [webSearchConfig]);
+
+  useEffect(() => {
+    return () => {
+      searchTestAbortRef.current?.abort();
+    };
+  }, []);
+
+  const loadCatalog = useCallback(
+    async (targetUrl: string, targetKey: string, forceRefresh = false) => {
+      catalogAbortRef.current?.abort();
+      const seq = ++catalogSeqRef.current;
+
+      const cleaned = targetUrl.trim();
+      if (!cleaned.startsWith('https://')) {
+        setLiveModels(null);
+        setCatalogSource('preset');
+        setLastRefreshedAt(null);
+        setIsOutdatedFallback(false);
+        setCatalogError(null);
+        setIsLoadingCatalog(false);
+        setCatalogNote(cleaned ? 'Enter an https:// URL to fetch live models.' : null);
+        return;
+      }
+
+      const controller = new AbortController();
+      catalogAbortRef.current = controller;
+      setIsLoadingCatalog(true);
+      setCatalogError(null);
+
+      try {
+        const idToken = user ? await user.getIdToken() : undefined;
+        if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
+        const res = await fetchLiveModelCatalog({
+          baseUrl: cleaned,
+          apiKey: targetKey,
+          forceRefresh,
+          idToken,
+          signal: controller.signal,
+        });
+        if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
+        setLiveModels(res.models);
+        setCatalogSource(res.source);
+        setLastRefreshedAt(res.fetchedAt);
+        setIsOutdatedFallback(Boolean(res.isOutdatedFallback));
+        setCatalogNote(res.note || null);
+      } catch (err) {
+        if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
+        setCatalogSource('preset');
+        setIsOutdatedFallback(true);
+        setCatalogError(err instanceof Error ? err.message : 'Unable to refresh model catalog.');
+      } finally {
+        if (seq === catalogSeqRef.current) {
+          setIsLoadingCatalog(false);
+        }
+      }
+    },
+    [user],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void loadCatalog(baseUrl, apiKey, false);
     }, 260);
-    return () => window.clearTimeout(timer);
-  }, [baseUrl, apiKey]);
+    return () => {
+      window.clearTimeout(timer);
+      catalogAbortRef.current?.abort();
+    };
+  }, [baseUrl, apiKey, loadCatalog]);
 
   const activeGateway =
     CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
-  const activeModelsList = liveModels && liveModels.length > 0 ? liveModels : activeGateway.models;
+  const activeModelsList = liveModels !== null ? liveModels : activeGateway.models;
 
   const handleSelectGateway = (nextGwId: CustomGatewayId) => {
+    catalogAbortRef.current?.abort();
+    catalogSeqRef.current += 1;
+    setIsLoadingCatalog(false);
     setGatewayId(nextGwId);
     const gw = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === nextGwId)!;
     setProviderName(gw.name);
@@ -163,9 +260,13 @@ export default function SettingsView({
       setBaseUrl('');
     }
     setLiveModels(null);
-    setIsLiveCatalog(false);
+    setCatalogSource('preset');
+    setLastRefreshedAt(null);
+    setIsOutdatedFallback(false);
+    setCatalogError(null);
     setCatalogNote(null);
-    setModel(gw.models[0].id);
+    setModel(gw.models[0]?.id || '');
+    setVerifiedModel(null);
     setProviderTestResult(null);
   };
 
@@ -174,9 +275,116 @@ export default function SettingsView({
     name: providerName.trim() || activeGateway.name || 'Custom Provider',
     baseUrl: baseUrl.trim(),
     apiKey: apiKey.trim(),
-    model: model.trim() || activeGateway.models[0].id,
+    model: model.trim(),
     sessionOnlyKey,
   });
+
+  const activeSearchPreset =
+    WEB_SEARCH_PRESETS.find((p) => p.id === searchProvider) || WEB_SEARCH_PRESETS[0];
+
+  const handleSelectSearchPreset = (nextProviderId: WebSearchProviderId) => {
+    const preset =
+      WEB_SEARCH_PRESETS.find((p) => p.id === nextProviderId) || WEB_SEARCH_PRESETS[0];
+    setSearchProvider(nextProviderId);
+    setSearchName(preset.name);
+    if (preset.baseUrl) {
+      setSearchBaseUrl(preset.baseUrl);
+    } else if (
+      nextProviderId === 'custom_json' &&
+      WEB_SEARCH_PRESETS.some((p) => p.baseUrl === searchBaseUrl)
+    ) {
+      setSearchBaseUrl('');
+    }
+    setSearchTestResult(null);
+  };
+
+  const buildSearchDraft = (): WebSearchConfig =>
+    normalizeWebSearchConfig({
+      provider: searchProvider,
+      name: searchName,
+      baseUrl: searchBaseUrl,
+      apiKey: searchApiKey,
+      sessionOnlyKey: searchSessionOnlyKey,
+      maxResults: searchMaxResults,
+    });
+
+  const handleApplyWebSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSaveWebSearch(buildSearchDraft());
+    setSearchSavedNotice(true);
+    window.setTimeout(() => setSearchSavedNotice(false), 1800);
+  };
+
+  const handleTestWebSearch = async () => {
+    const draft = buildSearchDraft();
+    if (!draft.apiKey?.trim()) {
+      setSearchTestResult({
+        ok: false,
+        message: 'Enter your Web Search API key before testing.',
+      });
+      return;
+    }
+    if (!draft.baseUrl?.trim()) {
+      setSearchTestResult({
+        ok: false,
+        message: 'Enter a valid https:// search endpoint URL.',
+      });
+      return;
+    }
+    if (!user) {
+      setSearchTestResult({
+        ok: false,
+        message: 'Sign in with Google first to test your live Web Search connection.',
+      });
+      return;
+    }
+
+    searchTestAbortRef.current?.abort();
+    const controller = new AbortController();
+    searchTestAbortRef.current = controller;
+    setIsTestingSearch(true);
+    setSearchTestResult(null);
+
+    try {
+      const idToken = await user.getIdToken();
+      const resp = await fetch('/api/search/test', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({ searchConfig: draft }),
+      });
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        verified?: boolean;
+        resultCount?: number;
+        error?: string;
+      };
+      if (!resp.ok || !data.ok) {
+        setSearchTestResult({
+          ok: false,
+          message: data.error || `Search test failed (${resp.status}).`,
+        });
+      } else {
+        setSearchTestResult({
+          ok: true,
+          message: `${draft.name} verified (${data.resultCount ?? 0} live source${
+            data.resultCount === 1 ? '' : 's'
+          } retrieved).`,
+        });
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      setSearchTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : 'Unable to reach Web Search service.',
+      });
+    } finally {
+      setIsTestingSearch(false);
+    }
+  };
 
   const handleApplyProvider = (e: React.FormEvent) => {
     e.preventDefault();
@@ -186,34 +394,62 @@ export default function SettingsView({
   };
 
   const handleTestProvider = async () => {
+    const draft = buildProviderDraft();
+    if (!draft.model) {
+      setProviderTestResult({ ok: false, message: 'Select or enter a model ID before testing.' });
+      return;
+    }
+    if (!user) {
+      setProviderTestResult({
+        ok: false,
+        message: 'Sign in with Google first to test your live BYOK connection.',
+      });
+      return;
+    }
+
     setIsTestingProvider(true);
     setProviderTestResult(null);
-    const draft = buildProviderDraft();
     try {
+      const idToken = await user.getIdToken();
       const resp = await fetch('/api/ai/test-provider', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
         body: JSON.stringify(draft),
       });
       const data = (await resp.json()) as {
         ok?: boolean;
+        verified?: boolean;
+        testedAt?: string;
+        capabilities?: Partial<ModelCapabilities>;
         error?: string;
         incident?: ModelHealthIncident;
       };
       if (!resp.ok || !data.ok) {
         if (data.incident) onIncident(data.incident);
+        setVerifiedModel(null);
         setProviderTestResult({
           ok: false,
           message: data.incident?.message || data.error || 'Connection test failed.',
         });
       } else {
         onIncident(null);
+        setVerifiedModel({
+          gatewayBaseUrl: draft.baseUrl || '',
+          model: draft.model,
+          verified: true,
+          testedAt: data.testedAt || new Date().toISOString(),
+          capabilities: data.capabilities,
+        });
         setProviderTestResult({
           ok: true,
-          message: `${draft.name} (${draft.model}) responded cleanly and is ready.`,
+          message: `${draft.name} (${draft.model}) responded cleanly and is verified.`,
         });
       }
     } catch (err) {
+      setVerifiedModel(null);
       setProviderTestResult({
         ok: false,
         message: err instanceof Error ? err.message : 'Unable to reach provider endpoint.',
@@ -224,12 +460,23 @@ export default function SettingsView({
   };
 
   const handleTestAppAiEndpoint = async () => {
+    if (!user) {
+      setAppAiTestOutput({
+        ok: false,
+        message: 'Sign in with Google first to test /api/app-ai.',
+      });
+      return;
+    }
     setIsTestingAppAi(true);
     setAppAiTestOutput(null);
     try {
+      const idToken = await user.getIdToken();
       const resp = await fetch('/api/app-ai', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
         body: JSON.stringify({
           prompt: 'Confirm live app AI endpoint works in 8 words or less.',
           providerConfig: buildProviderDraft(),
@@ -449,6 +696,7 @@ export default function SettingsView({
                       onChange={(e) => {
                         setBaseUrl(e.target.value);
                         setGatewayId(detectGatewayFromBaseUrl(e.target.value));
+                        setVerifiedModel(null);
                       }}
                       placeholder="https://openrouter.ai/api/v1"
                       className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
@@ -472,7 +720,10 @@ export default function SettingsView({
                       type={showKey ? 'text' : 'password'}
                       required
                       value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
+                      onChange={(e) => {
+                        setApiKey(e.target.value);
+                        setVerifiedModel(null);
+                      }}
                       placeholder={activeGateway.placeholder}
                       className="w-full rounded-xl border border-zinc-200 bg-white pl-3 pr-10 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
                     />
@@ -499,21 +750,30 @@ export default function SettingsView({
                   <div>
                     <div className="mb-1.5 flex items-center justify-between gap-2">
                       <span className="font-medium text-zinc-700 dark:text-zinc-300">
-                        Active Model ({activeModelsList.length} {isLiveCatalog ? 'live' : 'presets'} · Free &amp; Paid tagged)
+                        Active Model ({activeModelsList.length} {catalogSource})
                       </span>
                       <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                        Expand arrow to filter Free / Paid
+                        Expand to inspect catalog or enter custom ID
                       </span>
                     </div>
                     <ModelSelectorDropdown
                       provider="custom"
                       value={model}
-                      onChange={setModel}
+                      onChange={(nextModel) => {
+                        setModel(nextModel);
+                        setVerifiedModel(null);
+                        setProviderTestResult(null);
+                      }}
                       modelsOverride={activeModelsList}
                       gatewayLabel={providerName.trim() || activeGateway.name}
                       isLoadingCatalog={isLoadingCatalog}
-                      isLiveCatalog={isLiveCatalog}
+                      isLiveCatalog={catalogSource === 'live'}
+                      catalogSource={catalogSource}
+                      lastRefreshedAt={lastRefreshedAt}
+                      isOutdatedFallback={isOutdatedFallback}
+                      catalogError={catalogError}
                       catalogNote={catalogNote}
+                      verifiedModel={verifiedModel}
                       onRefreshCatalog={() => void loadCatalog(baseUrl, apiKey, true)}
                     />
                   </div>
@@ -586,6 +846,260 @@ export default function SettingsView({
                       className="w-full sm:w-auto min-h-[44px] sm:min-h-[40px] rounded-xl mist-primary-gradient px-4 py-2 font-medium text-white shadow-sm transition-all cursor-pointer"
                     >
                       Save Provider Settings
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </motion.section>
+
+            {/* Section 1B: Provider-Independent BYOK Web Search */}
+            <motion.section
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3, delay: 0.06 }}
+              aria-labelledby="settings-web-search-heading"
+              className="mist-surface-card rounded-2xl border border-zinc-200/90 p-5 sm:p-6 dark:border-zinc-800/90"
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-600 to-blue-600 text-white shadow-sm">
+                  <Search className="h-4 w-4" aria-hidden="true" />
+                </div>
+                <div>
+                  <h2
+                    id="settings-web-search-heading"
+                    className="font-display text-base font-semibold text-zinc-950 dark:text-white"
+                  >
+                    Web Search (Provider-Independent BYOK)
+                  </h2>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Retrieves verified live web results and citations for every connected AI model (OpenRouter, Groq, Gemini, NVIDIA, OpenAI, or Custom). Keys stay strictly on Mist&apos;s backend and are never exposed to generated websites or preview iframes.
+                  </p>
+                </div>
+              </div>
+
+              <form onSubmit={handleApplyWebSearch} className="mt-5 space-y-4 text-xs">
+                <div>
+                  <p className="mb-1.5 font-medium text-zinc-700 dark:text-zinc-300">
+                    Search Provider
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {WEB_SEARCH_PRESETS.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => handleSelectSearchPreset(preset.id)}
+                        className={`min-h-[38px] rounded-xl border px-2.5 py-1.5 text-[11px] font-medium transition-all cursor-pointer ${
+                          searchProvider === preset.id
+                            ? 'border-blue-600 bg-gradient-to-r from-blue-500/15 to-sky-500/15 text-blue-700 dark:border-blue-500/70 dark:text-blue-300'
+                            : 'border-zinc-200 bg-white/60 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                        }`}
+                      >
+                        {preset.name}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    {activeSearchPreset.description}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label
+                      htmlFor="settings-search-name"
+                      className="block font-medium text-zinc-700 dark:text-zinc-300"
+                    >
+                      Search Label
+                    </label>
+                    <input
+                      id="settings-search-name"
+                      type="text"
+                      value={searchName}
+                      onChange={(e) => setSearchName(e.target.value)}
+                      placeholder="Brave Search (LLM Context)"
+                      className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="settings-search-url"
+                      className="block font-medium text-zinc-700 dark:text-zinc-300"
+                    >
+                      Search Endpoint URL
+                    </label>
+                    <input
+                      id="settings-search-url"
+                      type="url"
+                      required
+                      value={searchBaseUrl}
+                      onChange={(e) => {
+                        setSearchBaseUrl(e.target.value);
+                        setSearchTestResult(null);
+                      }}
+                      placeholder="https://api.search.brave.com/res/v1/llm/context"
+                      className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="settings-search-key"
+                    className="block font-medium text-zinc-700 dark:text-zinc-300"
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <KeyRound className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+                      <span>{searchName.trim() || activeSearchPreset.name} API Key</span>
+                    </span>
+                  </label>
+                  <div className="relative mt-1.5">
+                    <input
+                      id="settings-search-key"
+                      type={showSearchKey ? 'text' : 'password'}
+                      value={searchApiKey}
+                      onChange={(e) => {
+                        setSearchApiKey(e.target.value);
+                        setSearchTestResult(null);
+                      }}
+                      placeholder={activeSearchPreset.placeholder}
+                      className="w-full rounded-xl border border-zinc-200 bg-white pl-3 pr-10 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
+                    />
+                    <button
+                      type="button"
+                      aria-label={showSearchKey ? 'Hide search API key' : 'Show search API key'}
+                      onClick={() => setShowSearchKey((v) => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
+                    >
+                      {showSearchKey ? (
+                        <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
+                    </button>
+                  </div>
+                  <label className="mt-2 flex items-center gap-2 text-[11px] text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={searchSessionOnlyKey}
+                      onChange={(e) => setSearchSessionOnlyKey(e.target.checked)}
+                      className="h-3.5 w-3.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-900"
+                    />
+                    <span>Keep search API key in memory only (session-only; never saved to storage)</span>
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label
+                      htmlFor="settings-search-default-mode"
+                      className="block font-medium text-zinc-700 dark:text-zinc-300"
+                    >
+                      Default Search Behavior
+                    </label>
+                    <select
+                      id="settings-search-default-mode"
+                      value={studioSettings.webSearchMode || 'auto'}
+                      onChange={(e) =>
+                        onUpdateSettings({
+                          webSearchMode: e.target.value as WebSearchMode,
+                        })
+                      }
+                      className="mt-1.5 w-full min-h-[38px] rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
+                    >
+                      <option value="auto">Auto (when current facts are needed)</option>
+                      <option value="on">Always On</option>
+                      <option value="off">Off</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="settings-search-max-results"
+                      className="block font-medium text-zinc-700 dark:text-zinc-300"
+                    >
+                      Max Sources per Query
+                    </label>
+                    <select
+                      id="settings-search-max-results"
+                      value={searchMaxResults}
+                      onChange={(e) => setSearchMaxResults(Number(e.target.value))}
+                      className="mt-1.5 w-full min-h-[38px] rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
+                    >
+                      <option value={3}>3 sources (fast &amp; compact)</option>
+                      <option value={5}>5 sources (balanced)</option>
+                      <option value={8}>8 sources (deep research)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {activeSearchPreset.steps && (
+                  <div className="rounded-xl border border-zinc-200/90 bg-zinc-50/90 p-3.5 space-y-2 dark:border-zinc-800 dark:bg-zinc-900/70">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-semibold text-zinc-900 dark:text-zinc-100">
+                        How to connect {activeSearchPreset.name}
+                      </p>
+                      {activeSearchPreset.portalUrl && (
+                        <a
+                          href={activeSearchPreset.portalUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 font-mono text-[11px] text-blue-600 hover:underline dark:text-blue-400"
+                        >
+                          <span>{activeSearchPreset.portalLabel}</span>
+                          <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                        </a>
+                      )}
+                    </div>
+                    <ol className="list-decimal pl-4 space-y-1 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
+                      {activeSearchPreset.steps.map((step, i) => (
+                        <li key={i}>{step}</li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                {searchTestResult && (
+                  <div
+                    role="status"
+                    className={`flex items-start gap-2 rounded-xl border p-3 ${
+                      searchTestResult.ok
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-900/70 dark:bg-emerald-950/40 dark:text-emerald-200'
+                        : 'border-red-300 bg-red-50 text-red-900 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-200'
+                    }`}
+                  >
+                    {searchTestResult.ok ? (
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                    ) : (
+                      <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                    )}
+                    <p className="text-[11px] leading-relaxed">{searchTestResult.message}</p>
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-2 border-t border-zinc-200/80 dark:border-zinc-800">
+                  <button
+                    type="button"
+                    disabled={isTestingSearch || !searchApiKey.trim() || !searchBaseUrl.trim()}
+                    onClick={() => void handleTestWebSearch()}
+                    className="inline-flex w-full sm:w-auto justify-center min-h-[44px] sm:min-h-[40px] items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-3.5 py-2 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                  >
+                    {isTestingSearch && (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    )}
+                    <span>{isTestingSearch ? 'Testing Search...' : 'Test Search Connection'}</span>
+                  </button>
+
+                  <div className="flex flex-col-reverse sm:flex-row sm:items-center gap-2.5">
+                    {searchSavedNotice && (
+                      <span className="text-center sm:text-left text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                        Saved
+                      </span>
+                    )}
+                    <button
+                      type="submit"
+                      className="w-full sm:w-auto min-h-[44px] sm:min-h-[40px] rounded-xl mist-primary-gradient px-4 py-2 font-medium text-white shadow-sm transition-all cursor-pointer"
+                    >
+                      Save Web Search Settings
                     </button>
                   </div>
                 </div>

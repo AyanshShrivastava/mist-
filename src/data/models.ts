@@ -1,4 +1,12 @@
-import type { AiProviderConfig, AiProviderId, AppAiMode, ModelBilling } from '../types/mist';
+import type {
+  AiProviderConfig,
+  AiProviderId,
+  AppAiMode,
+  CatalogSource,
+  ModelBilling,
+  ModelCapabilities,
+  ModelLifecycleStatus,
+} from '../types/mist';
 
 export interface ModelCatalogItem {
   id: string;
@@ -7,10 +15,13 @@ export interface ModelCatalogItem {
   tier: 'Default' | 'Fast' | 'Reasoning' | 'Pro' | 'Coding';
   billing: ModelBilling;
   billingLabel: string;
+  status: ModelLifecycleStatus;
+  capabilities: ModelCapabilities;
   contextLength?: number;
   pricingSummary?: string;
   isLiveFetched?: boolean;
   modality?: string;
+  supportedMethods?: string[];
 }
 
 export type CustomGatewayId = 'openrouter' | 'groq' | 'gemini_byok' | 'nvidia' | 'openai' | 'custom_url';
@@ -26,11 +37,33 @@ export interface CustomGatewayPreset {
   models: ModelCatalogItem[];
 }
 
+export const UNKNOWN_CAPABILITIES: ModelCapabilities = {
+  textGeneration: true,
+  jsonOutput: 'unknown',
+  streaming: 'unknown',
+  imageInput: 'unknown',
+  toolCalling: 'unknown',
+};
+
+export function createManualModelEntry(modelId: string): ModelCatalogItem {
+  return {
+    id: modelId,
+    label: modelId,
+    summary: 'Manually entered model ID — unverified until tested against the provider endpoint.',
+    tier: 'Default',
+    billing: 'unknown',
+    billingLabel: 'Unknown',
+    status: 'unverified',
+    capabilities: { ...UNKNOWN_CAPABILITIES },
+    isLiveFetched: false,
+  };
+}
+
 export const DEFAULT_BYOK_CONFIG: AiProviderConfig = {
   provider: 'custom',
   name: 'OpenRouter',
   baseUrl: 'https://openrouter.ai/api/v1',
-  model: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
+  model: 'openrouter/free',
   apiKey: '',
   sessionOnlyKey: false,
 };
@@ -46,138 +79,25 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
     steps: [
       'Open openrouter.ai/keys and sign in to your OpenRouter account.',
       'Click Create Key and paste your sk-or-... BYOK key below.',
-      'Browse the live OpenRouter catalog (automatically refreshed) — pick openrouter/free or any :free model without credits, or use Paid models if your account has credits.',
+      'Select from the live OpenRouter /models catalog (automatically fetched with actual pricing and capabilities).',
     ],
     models: [
       {
         id: 'openrouter/free',
         label: 'OpenRouter Free Auto-Router',
-        summary: 'Free — automatically routes to an available healthy free model',
+        summary: 'Fallback auto-router — refresh live catalog to inspect current free & paid models.',
         tier: 'Default',
         billing: 'free',
         billingLabel: 'Free',
-        contextLength: 200000,
+        status: 'active',
+        capabilities: {
+          textGeneration: true,
+          jsonOutput: 'unknown',
+          streaming: true,
+          imageInput: 'unknown',
+          toolCalling: 'unknown',
+        },
         pricingSummary: '$0 / Free',
-      },
-      {
-        id: 'nvidia/llama-3.3-nemotron-super-49b-v1:free',
-        label: 'NVIDIA Llama 3.3 Nemotron Super 49B',
-        summary: 'Free (:free) — strong coding, UI & multi-file layout synthesis',
-        tier: 'Default',
-        billing: 'free',
-        billingLabel: 'Free',
-        contextLength: 131072,
-        pricingSummary: '$0 / Free',
-      },
-      {
-        id: 'nvidia/nemotron-nano-9b-v2:free',
-        label: 'NVIDIA Nemotron Nano 9B v2',
-        summary: 'Free (:free) — fast compact UI & JSON synthesis',
-        tier: 'Fast',
-        billing: 'free',
-        billingLabel: 'Free',
-        contextLength: 131072,
-        pricingSummary: '$0 / Free',
-      },
-      {
-        id: 'deepseek/deepseek-chat-v3-0324:free',
-        label: 'DeepSeek V3 0324 (:free)',
-        summary: 'Free (:free) — sharp React, TypeScript & game loop code',
-        tier: 'Coding',
-        billing: 'free',
-        billingLabel: 'Free',
-        contextLength: 163840,
-        pricingSummary: '$0 / Free',
-      },
-      {
-        id: 'deepseek/deepseek-r1-0528:free',
-        label: 'DeepSeek R1 0528 (:free)',
-        summary: 'Free (:free) — step-by-step architecture & complex edits',
-        tier: 'Reasoning',
-        billing: 'free',
-        billingLabel: 'Free',
-        contextLength: 163840,
-        pricingSummary: '$0 / Free',
-      },
-      {
-        id: 'qwen/qwen3-coder:free',
-        label: 'Qwen 3 Coder (:free)',
-        summary: 'Free (:free) — purpose-built agentic web & Three.js coding',
-        tier: 'Coding',
-        billing: 'free',
-        billingLabel: 'Free',
-        contextLength: 262144,
-        pricingSummary: '$0 / Free',
-      },
-      {
-        id: 'qwen/qwen3-235b-a22b:free',
-        label: 'Qwen 3 235B A22B (:free)',
-        summary: 'Free (:free) — 235B MoE model for rich multi-file apps',
-        tier: 'Pro',
-        billing: 'free',
-        billingLabel: 'Free',
-        contextLength: 131072,
-        pricingSummary: '$0 / Free',
-      },
-      {
-        id: 'meta-llama/llama-4-maverick:free',
-        label: 'Llama 4 Maverick (:free)',
-        summary: 'Free (:free) — responsive frontend & component generation',
-        tier: 'Pro',
-        billing: 'free',
-        billingLabel: 'Free',
-        contextLength: 131072,
-        pricingSummary: '$0 / Free',
-      },
-      {
-        id: 'google/gemma-3-27b-it:free',
-        label: 'Gemma 3 27B (:free)',
-        summary: 'Free (:free) — fast open-weights UI iteration',
-        tier: 'Fast',
-        billing: 'free',
-        billingLabel: 'Free',
-        contextLength: 96000,
-        pricingSummary: '$0 / Free',
-      },
-      {
-        id: 'anthropic/claude-sonnet-4',
-        label: 'Claude Sonnet 4',
-        summary: 'Paid credits — flagship frontend craftsmanship & design',
-        tier: 'Pro',
-        billing: 'paid',
-        billingLabel: 'Paid',
-        contextLength: 200000,
-        pricingSummary: '$3.00/1M in · $15.00/1M out',
-      },
-      {
-        id: 'openai/gpt-4.1',
-        label: 'GPT-4.1',
-        summary: 'Paid credits — long-context multi-file React engineering',
-        tier: 'Coding',
-        billing: 'paid',
-        billingLabel: 'Paid',
-        contextLength: 1047576,
-        pricingSummary: '$2.00/1M in · $8.00/1M out',
-      },
-      {
-        id: 'openai/gpt-4o',
-        label: 'GPT-4o',
-        summary: 'Paid credits — versatile multimodal & web coding',
-        tier: 'Pro',
-        billing: 'paid',
-        billingLabel: 'Paid',
-        contextLength: 128000,
-        pricingSummary: '$2.50/1M in · $10.00/1M out',
-      },
-      {
-        id: 'google/gemini-2.5-pro',
-        label: 'Gemini 2.5 Pro (OpenRouter)',
-        summary: 'Paid credits — deep architectural planning & code synthesis',
-        tier: 'Pro',
-        billing: 'paid',
-        billingLabel: 'Paid',
-        contextLength: 1048576,
-        pricingSummary: '$1.25/1M in · $10.00/1M out',
       },
     ],
   },
@@ -191,100 +111,9 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
     steps: [
       'Sign in at console.groq.com/keys with your Groq account.',
       'Click Create API Key and paste the key starting with gsk_ below.',
-      'Groq includes rate-limited Free Tier quota on production models (and higher limits or extra models on Developer Paid accounts).',
+      'Mist fetches your active models live from /openai/v1/models (billing follows your Groq plan).',
     ],
-    models: [
-      {
-        id: 'llama-3.3-70b-versatile',
-        label: 'Llama 3.3 70B Versatile',
-        summary: 'Free Tier (rate-limited) / Paid — balanced 70B flagship on Groq LPUs',
-        tier: 'Default',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 131072,
-      },
-      {
-        id: 'openai/gpt-oss-120b',
-        label: 'GPT-OSS 120B (Groq)',
-        summary: 'Free Tier / Paid — 120B open-weight flagship with structured JSON support',
-        tier: 'Pro',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 131072,
-      },
-      {
-        id: 'openai/gpt-oss-20b',
-        label: 'GPT-OSS 20B (Groq)',
-        summary: 'Free Tier / Paid — fast 20B open-weight coder',
-        tier: 'Fast',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 131072,
-      },
-      {
-        id: 'meta-llama/llama-4-maverick-17b-128e-instruct',
-        label: 'Llama 4 Maverick 17B',
-        summary: 'Free Tier / Paid — 128-expert MoE for fast React & Canvas games',
-        tier: 'Pro',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 131072,
-      },
-      {
-        id: 'meta-llama/llama-4-scout-17b-16e-instruct',
-        label: 'Llama 4 Scout 17B',
-        summary: 'Free Tier / Paid — ultra-fast rapid refinement',
-        tier: 'Fast',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 131072,
-      },
-      {
-        id: 'qwen/qwen3-32b',
-        label: 'Qwen 3 32B',
-        summary: 'Free Tier / Paid — crisp modern React & TypeScript coding',
-        tier: 'Coding',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 131072,
-      },
-      {
-        id: 'groq/compound',
-        label: 'Groq Compound',
-        summary: 'Free Tier / Paid — compound reasoning system',
-        tier: 'Reasoning',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 131072,
-      },
-      {
-        id: 'moonshotai/kimi-k2-instruct',
-        label: 'Moonshot Kimi K2 Instruct',
-        summary: 'Paid / Developer Tier — strong long-context UI & game generation',
-        tier: 'Coding',
-        billing: 'paid',
-        billingLabel: 'Paid',
-        contextLength: 131072,
-      },
-      {
-        id: 'deepseek-r1-distill-llama-70b',
-        label: 'DeepSeek R1 Distill Llama 70B',
-        summary: 'Free Tier / Paid — distilled deep reasoning for logic & fixes',
-        tier: 'Reasoning',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 131072,
-      },
-      {
-        id: 'llama-3.1-8b-instant',
-        label: 'Llama 3.1 8B Instant',
-        summary: 'Free Tier — sub-second responses for light edits',
-        tier: 'Fast',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 131072,
-      },
-    ],
+    models: [],
   },
   {
     id: 'gemini_byok',
@@ -295,38 +124,10 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
     placeholder: 'AIza...',
     steps: [
       'Open Google AI Studio (aistudio.google.com/apikey) and create your own Gemini API key.',
-      'Paste your AIza... key below (your key stays BYOK and never uses server keys).',
-      'Pick a real Gemini model like gemini-2.5-flash or gemini-2.5-pro.',
+      'Paste your AIza... key below to load current Gemini models directly from Google /v1beta/models.',
+      'You can also enter any valid Gemini model ID manually (e.g. gemini-4-hydrogen) and test it directly.',
     ],
-    models: [
-      {
-        id: 'gemini-2.5-flash',
-        label: 'Gemini 2.5 Flash (BYOK)',
-        summary: 'Free Tier (w/ AI Studio key) / Paid — fast coding, Three.js & Canvas games',
-        tier: 'Default',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 1048576,
-      },
-      {
-        id: 'gemini-2.5-flash-lite',
-        label: 'Gemini 2.5 Flash-Lite (BYOK)',
-        summary: 'Free Tier (w/ AI Studio key) / Paid — lightweight ultra-fast edits',
-        tier: 'Fast',
-        billing: 'free',
-        billingLabel: 'Free Tier',
-        contextLength: 1048576,
-      },
-      {
-        id: 'gemini-2.5-pro',
-        label: 'Gemini 2.5 Pro (BYOK)',
-        summary: 'Paid / Limited Free — flagship reasoning & multi-file React systems',
-        tier: 'Pro',
-        billing: 'paid',
-        billingLabel: 'Paid',
-        contextLength: 1048576,
-      },
-    ],
+    models: [],
   },
   {
     id: 'nvidia',
@@ -337,35 +138,10 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
     placeholder: 'nvapi-...',
     steps: [
       'Visit build.nvidia.com and sign in to NVIDIA Developer.',
-      'Click Get API Key on any Nemotron model and copy the nvapi- key.',
-      'Use NVIDIA Nemotron models with NVIDIA trial credits or paid quota.',
+      'Click Get API Key and copy your nvapi- key.',
+      'Mist queries the live NVIDIA /models catalog when your key is present (provider billed).',
     ],
-    models: [
-      {
-        id: 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-        label: 'NVIDIA Nemotron Super 49B v1.5',
-        summary: 'Free Trial Credits — NVIDIA flagship reasoning & React coding',
-        tier: 'Default',
-        billing: 'free',
-        billingLabel: 'Free Trial',
-      },
-      {
-        id: 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
-        label: 'NVIDIA Nemotron Ultra 253B',
-        summary: 'Paid / Developer Credits — massive 253B reasoning flagship',
-        tier: 'Reasoning',
-        billing: 'paid',
-        billingLabel: 'Paid',
-      },
-      {
-        id: 'qwen/qwen3-235b-a22b',
-        label: 'Qwen 3 235B A22B (NIM)',
-        summary: 'Free Trial Credits — high-capacity MoE coder',
-        tier: 'Coding',
-        billing: 'free',
-        billingLabel: 'Free Trial',
-      },
-    ],
+    models: [],
   },
   {
     id: 'openai',
@@ -374,59 +150,22 @@ export const CUSTOM_GATEWAY_PRESETS: CustomGatewayPreset[] = [
     portalLabel: 'platform.openai.com/api-keys',
     portalUrl: 'https://platform.openai.com/api-keys',
     placeholder: 'sk-proj-...',
-    models: [
-      {
-        id: 'gpt-4.1',
-        label: 'GPT-4.1',
-        summary: 'Paid API — crisp coding & multi-file edits',
-        tier: 'Coding',
-        billing: 'paid',
-        billingLabel: 'Paid',
-        contextLength: 1047576,
-      },
-      {
-        id: 'gpt-4o-mini',
-        label: 'GPT-4o mini',
-        summary: 'Paid API — fast low-cost iteration',
-        tier: 'Fast',
-        billing: 'paid',
-        billingLabel: 'Paid',
-        contextLength: 128000,
-      },
-      {
-        id: 'o3-mini',
-        label: 'o3-mini',
-        summary: 'Paid API — deep reasoning & game physics',
-        tier: 'Reasoning',
-        billing: 'paid',
-        billingLabel: 'Paid',
-        contextLength: 200000,
-      },
+    steps: [
+      'Open platform.openai.com/api-keys and create a secret key.',
+      'Paste your OpenAI key to load your live /v1/models list (paid API usage).',
     ],
+    models: [],
   },
   {
     id: 'custom_url',
     name: 'Custom Endpoint',
     baseUrl: '',
     placeholder: 'sk-...',
-    models: [
-      {
-        id: 'Qwen/Qwen2.5-Coder-32B-Instruct',
-        label: 'Qwen2.5-Coder-32B-Instruct',
-        summary: 'OpenAI-compatible custom endpoint',
-        tier: 'Coding',
-        billing: 'free',
-        billingLabel: 'Custom',
-      },
-      {
-        id: 'gpt-4o-mini',
-        label: 'gpt-4o-mini',
-        summary: 'OpenAI-compatible endpoint',
-        tier: 'Fast',
-        billing: 'paid',
-        billingLabel: 'Paid',
-      },
+    steps: [
+      'Enter any HTTPS OpenAI-compatible Base URL and API key.',
+      'Mist attempts to fetch <Base URL>/models if supported; manually entered model IDs stay Unverified until tested.',
     ],
+    models: [],
   },
 ];
 
@@ -447,19 +186,19 @@ export const PROVIDER_CATALOG: Record<
   },
   openrouter: {
     name: 'OpenRouter',
-    shortDesc: 'Unified gateway with :free and paid models',
+    shortDesc: 'Live OpenRouter catalog with verified pricing',
     requiresUserKey: true,
     models: CUSTOM_GATEWAY_PRESETS[0].models,
   },
   groq: {
     name: 'Groq',
-    shortDesc: 'Ultra-fast LPU inference',
+    shortDesc: 'Live Groq /openai/v1/models endpoint',
     requiresUserKey: true,
     models: CUSTOM_GATEWAY_PRESETS[1].models,
   },
   gemini: {
     name: 'Gemini (BYOK)',
-    shortDesc: 'Your own Google AI Studio Gemini API key',
+    shortDesc: 'Official Gemini /v1beta/models catalog',
     requiresUserKey: true,
     models: CUSTOM_GATEWAY_PRESETS[2].models,
   },
@@ -475,58 +214,64 @@ export function detectGatewayFromBaseUrl(baseUrl?: string): CustomGatewayId {
   return 'custom_url';
 }
 
-export function normalizeProviderConfigToStudio(config: AiProviderConfig): AiProviderConfig {
+/**
+ * Preserves legitimate user-selected model IDs (such as gemini-4-hydrogen) without silently
+ * substituting them with legacy models. Only supplies a safe fallback when model is empty.
+ */
+export function normalizeProviderConfigToStudio(config?: AiProviderConfig): AiProviderConfig {
   const rawProvider = config?.provider;
   const sessionOnlyKey = Boolean(config?.sessionOnlyKey);
-  if (rawProvider === 'openrouter') {
+  const trimmedModel = typeof config?.model === 'string' ? config.model.trim() : '';
+
+  if (rawProvider === 'openrouter' && config) {
     return {
       provider: 'custom',
       name: config.name?.trim() || 'OpenRouter',
-      model: config.model || CUSTOM_GATEWAY_PRESETS[0].models[0].id,
+      model: trimmedModel || 'openrouter/free',
       apiKey: config.apiKey || '',
       baseUrl: config.baseUrl || 'https://openrouter.ai/api/v1',
       sessionOnlyKey,
     };
   }
-  if (rawProvider === 'groq') {
+  if (rawProvider === 'groq' && config) {
     return {
       provider: 'custom',
       name: config.name?.trim() || 'Groq',
-      model: config.model || CUSTOM_GATEWAY_PRESETS[1].models[0].id,
+      model: trimmedModel,
       apiKey: config.apiKey || '',
       baseUrl: config.baseUrl || 'https://api.groq.com/openai/v1',
       sessionOnlyKey,
     };
   }
-  if (rawProvider === 'gemini') {
-    const legacyBroken =
-      !config.model ||
-      config.model === 'gemini-4-hydrogen' ||
-      config.model === 'gemini-3.8-live';
+  if (rawProvider === 'gemini' && config) {
     return {
       provider: 'custom',
       name: config.name?.trim() || 'Gemini (BYOK)',
-      model: legacyBroken ? 'gemini-2.5-flash' : config.model,
+      model: trimmedModel,
       apiKey: config.apiKey || '',
       baseUrl: config.baseUrl || 'https://generativelanguage.googleapis.com/v1beta/openai',
       sessionOnlyKey,
     };
   }
 
-  const detected = detectGatewayFromBaseUrl(config?.baseUrl);
+  const baseUrl = config?.baseUrl ?? DEFAULT_BYOK_CONFIG.baseUrl;
+  const detected = detectGatewayFromBaseUrl(baseUrl);
   const preset = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === detected);
+  const defaultModelForBase =
+    detected === 'openrouter' ? 'openrouter/free' : preset?.models[0]?.id || '';
+
   return {
     provider: 'custom',
     name: config?.name?.trim() || (preset && preset.id !== 'custom_url' ? preset.name : 'Custom Provider'),
-    model: config?.model || DEFAULT_BYOK_CONFIG.model,
+    model: trimmedModel || (baseUrl === DEFAULT_BYOK_CONFIG.baseUrl ? DEFAULT_BYOK_CONFIG.model : defaultModelForBase),
     apiKey: config?.apiKey || '',
-    baseUrl: config?.baseUrl ?? DEFAULT_BYOK_CONFIG.baseUrl,
+    baseUrl,
     sessionOnlyKey,
   };
 }
 
 export function getDefaultModelForProvider(provider: AiProviderId): string {
-  return PROVIDER_CATALOG[provider]?.models[0]?.id || DEFAULT_BYOK_CONFIG.model;
+  return PROVIDER_CATALOG[provider]?.models[0]?.id || '';
 }
 
 export function getModelDisplayLabel(
@@ -534,6 +279,7 @@ export function getModelDisplayLabel(
   modelId: string,
   liveModels?: ModelCatalogItem[],
 ): string {
+  if (!modelId) return 'Select model';
   if (liveModels) {
     const inLive = liveModels.find((m) => m.id === modelId);
     if (inLive) return inLive.label;
@@ -553,6 +299,7 @@ export function findModelEntry(
   baseUrl?: string,
   liveModels?: ModelCatalogItem[],
 ): ModelCatalogItem | undefined {
+  if (!modelId) return undefined;
   if (liveModels) {
     const liveMatch = liveModels.find((item) => item.id === modelId);
     if (liveMatch) return liveMatch;
@@ -571,7 +318,6 @@ export function findModelEntry(
 
 /**
  * Detects whether a user's website prompt explicitly asks for live AI functionality inside the generated app.
- * Uses strict word-boundary patterns to avoid false positives on words like "train", "paint", or "detail".
  */
 export function promptRequestsAi(prompt: string): boolean {
   const cleaned = (prompt || '').trim();
@@ -601,39 +347,76 @@ export function shouldEnableAppAi(
 
 export interface LiveCatalogResponse {
   gateway: CustomGatewayId;
-  source: 'live' | 'preset';
+  source: CatalogSource;
   fetchedAt: string;
   models: ModelCatalogItem[];
+  isOutdatedFallback?: boolean;
   note?: string;
 }
 
 const clientCatalogCache = new Map<string, { expiresAt: number; data: LiveCatalogResponse }>();
 
+export function clearClientModelCatalogCache(): void {
+  clientCatalogCache.clear();
+}
+
 export async function fetchLiveModelCatalog(params: {
   baseUrl: string;
   apiKey?: string;
+  idToken?: string;
   forceRefresh?: boolean;
+  signal?: AbortSignal;
 }): Promise<LiveCatalogResponse> {
   const cleanUrl = (params.baseUrl || '').trim().replace(/\/+$/, '');
-  const hasKey = Boolean(params.apiKey?.trim());
+  const cleanKey = params.apiKey?.trim() || '';
+  const hasKey = Boolean(cleanKey);
   const cacheKey = `${cleanUrl}|${hasKey ? 'auth' : 'anon'}`;
 
   if (!params.forceRefresh) {
     const hit = clientCatalogCache.get(cacheKey);
     if (hit && hit.expiresAt > Date.now()) {
-      return hit.data;
+      return {
+        ...hit.data,
+        source: 'cached',
+      };
     }
   }
 
-  const resp = await fetch('/api/ai/models', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  if (params.signal?.aborted) {
+    const abortErr = new Error('Aborted');
+    abortErr.name = 'AbortError';
+    throw abortErr;
+  }
+
+  const gatewayId = detectGatewayFromBaseUrl(cleanUrl);
+  let resp: Response;
+  if (params.idToken) {
+    resp = await fetch('/api/ai/models', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.idToken}`,
+      },
+      body: JSON.stringify({
+        baseUrl: cleanUrl,
+        apiKey: cleanKey || undefined,
+        forceRefresh: Boolean(params.forceRefresh),
+      }),
+      signal: params.signal,
+    });
+  } else {
+    if (gatewayId !== 'openrouter') {
+      throw new Error('Sign in with Google to inspect live models on non-public gateways.');
+    }
+    const qs = new URLSearchParams({
       baseUrl: cleanUrl,
-      apiKey: params.apiKey?.trim() || undefined,
-      forceRefresh: Boolean(params.forceRefresh),
-    }),
-  });
+      forceRefresh: String(Boolean(params.forceRefresh)),
+    });
+    resp = await fetch(`/api/ai/models?${qs.toString()}`, {
+      method: 'GET',
+      signal: params.signal,
+    });
+  }
 
   if (!resp.ok) {
     const errPayload = (await resp.json().catch(() => ({}))) as { error?: string };
@@ -641,9 +424,11 @@ export async function fetchLiveModelCatalog(params: {
   }
 
   const data = (await resp.json()) as LiveCatalogResponse;
-  clientCatalogCache.set(cacheKey, {
-    expiresAt: Date.now() + 5 * 60 * 1000,
-    data,
-  });
+  if (data.source === 'live' || data.source === 'cached') {
+    clientCatalogCache.set(cacheKey, {
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      data,
+    });
+  }
   return data;
 }

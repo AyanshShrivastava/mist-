@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -21,8 +21,11 @@ import { AnimatePresence, motion } from 'motion/react';
 import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
+  CatalogSource,
   DeploymentRecord,
   MistProject,
+  ModelCapabilities,
+  ModelVerificationResult,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
 import { sanitizeSlug } from '../utils/projectOps';
@@ -39,6 +42,7 @@ import MistLogo from './MistLogo';
 
 interface ProvidersModalProps {
   isOpen: boolean;
+  user: User | null;
   config: AiProviderConfig;
   modelIncident?: ModelHealthIncident | null;
   onClose: () => void;
@@ -48,6 +52,7 @@ interface ProvidersModalProps {
 
 export function ProvidersModal({
   isOpen,
+  user,
   config,
   modelIncident,
   onClose,
@@ -67,6 +72,7 @@ export function ProvidersModal({
   const [showKey, setShowKey] = useState(false);
   const [model, setModel] = useState(normalizedInit.model);
   const [isTesting, setIsTesting] = useState(false);
+  const [verifiedModel, setVerifiedModel] = useState<ModelVerificationResult | null>(null);
   const [testResult, setTestResult] = useState<{
     ok: boolean;
     message: string;
@@ -74,9 +80,15 @@ export function ProvidersModal({
   } | null>(null);
 
   const [liveModels, setLiveModels] = useState<ModelCatalogItem[] | null>(null);
-  const [isLiveCatalog, setIsLiveCatalog] = useState(false);
+  const [catalogSource, setCatalogSource] = useState<CatalogSource>('preset');
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
+  const [isOutdatedFallback, setIsOutdatedFallback] = useState(false);
   const [isLoadingCatalog, setIsLoadingCatalog] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogNote, setCatalogNote] = useState<string | null>(null);
+
+  const catalogAbortRef = useRef<AbortController | null>(null);
+  const catalogSeqRef = useRef(0);
 
   useEffect(() => {
     if (isOpen) {
@@ -89,48 +101,83 @@ export function ProvidersModal({
       setModel(norm.model);
       setShowKey(false);
       setTestResult(null);
+      setVerifiedModel(null);
+      setCatalogError(null);
+    } else {
+      catalogAbortRef.current?.abort();
     }
   }, [isOpen, config]);
 
-  const loadCatalog = async (targetUrl: string, targetKey: string, forceRefresh = false) => {
-    const cleaned = targetUrl.trim();
-    if (!cleaned.startsWith('https://')) {
-      setLiveModels(null);
-      setIsLiveCatalog(false);
-      setCatalogNote(cleaned ? 'Enter an https:// URL to fetch live models.' : null);
-      return;
-    }
-    setIsLoadingCatalog(true);
-    try {
-      const res = await fetchLiveModelCatalog({
-        baseUrl: cleaned,
-        apiKey: targetKey,
-        forceRefresh,
-      });
-      setLiveModels(res.models);
-      setIsLiveCatalog(res.source === 'live');
-      setCatalogNote(res.note || null);
-    } catch (err) {
-      setIsLiveCatalog(false);
-      setCatalogNote(err instanceof Error ? err.message : 'Could not fetch live catalog.');
-    } finally {
-      setIsLoadingCatalog(false);
-    }
-  };
+  const loadCatalog = useCallback(
+    async (targetUrl: string, targetKey: string, forceRefresh = false) => {
+      catalogAbortRef.current?.abort();
+      const seq = ++catalogSeqRef.current;
+
+      const cleaned = targetUrl.trim();
+      if (!cleaned.startsWith('https://')) {
+        setLiveModels(null);
+        setCatalogSource('preset');
+        setLastRefreshedAt(null);
+        setIsOutdatedFallback(false);
+        setCatalogError(null);
+        setIsLoadingCatalog(false);
+        setCatalogNote(cleaned ? 'Enter an https:// URL to fetch live models.' : null);
+        return;
+      }
+
+      const controller = new AbortController();
+      catalogAbortRef.current = controller;
+      setIsLoadingCatalog(true);
+      setCatalogError(null);
+
+      try {
+        const idToken = user ? await user.getIdToken() : undefined;
+        if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
+        const res = await fetchLiveModelCatalog({
+          baseUrl: cleaned,
+          apiKey: targetKey,
+          forceRefresh,
+          idToken,
+          signal: controller.signal,
+        });
+        if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
+        setLiveModels(res.models);
+        setCatalogSource(res.source);
+        setLastRefreshedAt(res.fetchedAt);
+        setIsOutdatedFallback(Boolean(res.isOutdatedFallback));
+        setCatalogNote(res.note || null);
+      } catch (err) {
+        if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
+        setCatalogSource('preset');
+        setIsOutdatedFallback(true);
+        setCatalogError(err instanceof Error ? err.message : 'Could not fetch live catalog.');
+      } finally {
+        if (seq === catalogSeqRef.current) {
+          setIsLoadingCatalog(false);
+        }
+      }
+    },
+    [user],
+  );
 
   useEffect(() => {
     if (!isOpen) return;
     const timer = window.setTimeout(() => {
       void loadCatalog(baseUrl, apiKey, false);
     }, 260);
-    return () => window.clearTimeout(timer);
-  }, [isOpen, baseUrl, apiKey]);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isOpen, baseUrl, apiKey, loadCatalog]);
 
   const activeGateway =
     CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gatewayId) || CUSTOM_GATEWAY_PRESETS[0];
-  const activeModelsList = liveModels && liveModels.length > 0 ? liveModels : activeGateway.models;
+  const activeModelsList = liveModels !== null ? liveModels : activeGateway.models;
 
   const handleSelectGateway = (nextGwId: CustomGatewayId) => {
+    catalogAbortRef.current?.abort();
+    catalogSeqRef.current += 1;
+    setIsLoadingCatalog(false);
     setGatewayId(nextGwId);
     const gw = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === nextGwId)!;
     setProviderName(gw.name);
@@ -140,9 +187,13 @@ export function ProvidersModal({
       setBaseUrl('');
     }
     setLiveModels(null);
-    setIsLiveCatalog(false);
+    setCatalogSource('preset');
+    setLastRefreshedAt(null);
+    setIsOutdatedFallback(false);
+    setCatalogError(null);
     setCatalogNote(null);
-    setModel(gw.models[0].id);
+    setModel(gw.models[0]?.id || '');
+    setVerifiedModel(null);
     setTestResult(null);
   };
 
@@ -151,22 +202,41 @@ export function ProvidersModal({
     name: providerName.trim() || activeGateway.name || 'Custom Provider',
     baseUrl: baseUrl.trim(),
     apiKey: apiKey.trim(),
-    model: model.trim() || activeGateway.models[0].id,
+    model: model.trim(),
     sessionOnlyKey,
   });
 
   const handleTestConnection = async () => {
+    const draft = buildDraftConfig();
+    if (!draft.model) {
+      setTestResult({ ok: false, message: 'Select or enter a model ID before testing.' });
+      return;
+    }
+    if (!user) {
+      setTestResult({
+        ok: false,
+        message: 'Sign in with Google first to run live provider verification.',
+      });
+      return;
+    }
+
     setIsTesting(true);
     setTestResult(null);
-    const draft = buildDraftConfig();
     try {
+      const idToken = await user.getIdToken();
       const resp = await fetch('/api/ai/test-provider', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
         body: JSON.stringify(draft),
       });
       const data = (await resp.json()) as {
         ok?: boolean;
+        verified?: boolean;
+        testedAt?: string;
+        capabilities?: Partial<ModelCapabilities>;
         error?: string;
         incident?: ModelHealthIncident;
       };
@@ -174,6 +244,7 @@ export function ProvidersModal({
         if (data.incident) {
           onIncident?.(data.incident);
         }
+        setVerifiedModel(null);
         setTestResult({
           ok: false,
           message: data.incident?.message || data.error || 'Connection test failed.',
@@ -181,12 +252,26 @@ export function ProvidersModal({
         });
       } else {
         onIncident?.(null);
+        setVerifiedModel({
+          gatewayBaseUrl: draft.baseUrl || '',
+          model: draft.model,
+          verified: true,
+          testedAt: data.testedAt || new Date().toISOString(),
+          capabilities: data.capabilities,
+        });
+        const jsonCap =
+          data.capabilities?.jsonOutput === true
+            ? ' (JSON structured output supported)'
+            : data.capabilities?.jsonOutput === false
+              ? ' (text mode supported; json_object unsupported)'
+              : '';
         setTestResult({
           ok: true,
-          message: `${draft.name} (${draft.model}) connected cleanly and is ready.`,
+          message: `${draft.name} (${draft.model}) verified cleanly${jsonCap}.`,
         });
       }
     } catch (err) {
+      setVerifiedModel(null);
       setTestResult({
         ok: false,
         message: err instanceof Error ? err.message : 'Unable to reach provider endpoint.',
@@ -289,7 +374,6 @@ export function ProvidersModal({
                 </div>
               </div>
 
-              {/* Explicit Custom Name, Base URL, API Key fields */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label htmlFor="mist-provider-name" className="block font-medium text-zinc-700 dark:text-zinc-300">
@@ -324,6 +408,7 @@ export function ProvidersModal({
                     onChange={(e) => {
                       setBaseUrl(e.target.value);
                       setGatewayId(detectGatewayFromBaseUrl(e.target.value));
+                      setVerifiedModel(null);
                     }}
                     placeholder="https://openrouter.ai/api/v1"
                     className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
@@ -344,7 +429,10 @@ export function ProvidersModal({
                     type={showKey ? 'text' : 'password'}
                     required
                     value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
+                    onChange={(e) => {
+                      setApiKey(e.target.value);
+                      setVerifiedModel(null);
+                    }}
                     placeholder={activeGateway.placeholder}
                     className="w-full rounded-xl border border-zinc-200 bg-white pl-3 pr-10 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white"
                   />
@@ -372,18 +460,33 @@ export function ProvidersModal({
               <div>
                 <div className="mb-1.5 flex items-center justify-between">
                   <p className="font-medium text-zinc-700 dark:text-zinc-300">
-                    Model ({activeModelsList.length} {isLiveCatalog ? 'live' : 'presets'} · Free &amp; Paid tagged)
+                    Model ({activeModelsList.length}{' '}
+                    {catalogSource === 'live'
+                      ? 'live'
+                      : catalogSource === 'cached'
+                        ? 'cached'
+                        : 'presets'}
+                    )
                   </p>
                 </div>
                 <ModelSelectorDropdown
                   provider="custom"
                   value={model}
-                  onChange={setModel}
+                  onChange={(nextModel) => {
+                    setModel(nextModel);
+                    if (verifiedModel?.model !== nextModel.trim()) {
+                      setVerifiedModel(null);
+                    }
+                  }}
                   modelsOverride={activeModelsList}
                   gatewayLabel={providerName.trim() || activeGateway.name}
                   isLoadingCatalog={isLoadingCatalog}
-                  isLiveCatalog={isLiveCatalog}
+                  catalogSource={catalogSource}
+                  lastRefreshedAt={lastRefreshedAt}
+                  isOutdatedFallback={isOutdatedFallback}
+                  catalogError={catalogError}
                   catalogNote={catalogNote}
+                  verifiedModel={verifiedModel}
                   onRefreshCatalog={() => void loadCatalog(baseUrl, apiKey, true)}
                 />
               </div>
@@ -440,7 +543,7 @@ export function ProvidersModal({
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 pt-4 dark:border-zinc-800">
                 <button
                   type="button"
-                  disabled={isTesting || !apiKey.trim() || !baseUrl.trim()}
+                  disabled={isTesting || !apiKey.trim() || !baseUrl.trim() || !model.trim()}
                   onClick={() => void handleTestConnection()}
                   className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-zinc-200 px-3.5 py-2 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900 transition-colors cursor-pointer"
                 >

@@ -2,21 +2,28 @@ import crypto from 'node:crypto';
 import {
   CUSTOM_GATEWAY_PRESETS,
   detectGatewayFromBaseUrl,
+  UNKNOWN_CAPABILITIES,
   type CustomGatewayId,
   type ModelCatalogItem,
 } from '../data/models';
-import { assertSafeExternalUrl } from './serverSecurity';
+import type { CatalogSource, ModelCapabilities, ModelLifecycleStatus } from '../types/mist';
+import { safeFetchExternal, sanitizeErrorMessage, SecurityValidationError } from './serverSecurity';
 
 export interface ServerCatalogResult {
   gateway: CustomGatewayId;
-  source: 'live' | 'preset';
+  source: CatalogSource;
   fetchedAt: string;
   models: ModelCatalogItem[];
+  isOutdatedFallback?: boolean;
   note?: string;
 }
 
 const CATALOG_TTL_MS = 10 * 60 * 1000;
 const serverCatalogCache = new Map<string, { expiresAt: number; result: ServerCatalogResult }>();
+
+export function clearServerCatalogCache(): void {
+  serverCatalogCache.clear();
+}
 
 function formatPerMillionUsd(perTokenRaw?: string | number): string | null {
   if (perTokenRaw === undefined || perTokenRaw === null || perTokenRaw === '') return null;
@@ -72,20 +79,25 @@ function inferTierFromId(id: string): ModelCatalogItem['tier'] {
 export interface OpenRouterRawModel {
   id: string;
   name?: string;
+  description?: string;
   context_length?: number;
+  expiration_date?: string | null;
   architecture?: {
     modality?: string;
+    input_modalities?: string[];
     output_modalities?: string[];
   };
   pricing?: {
     prompt?: string | number;
     completion?: string | number;
   };
+  supported_parameters?: string[];
 }
 
 export function mapOpenRouterModels(rawList: OpenRouterRawModel[]): ModelCatalogItem[] {
   const mapped: ModelCatalogItem[] = [];
   const seen = new Set<string>();
+  const nowMs = Date.now();
 
   for (const item of rawList) {
     if (!item || typeof item.id !== 'string' || !item.id.trim()) continue;
@@ -103,22 +115,38 @@ export function mapOpenRouterModels(rawList: OpenRouterRawModel[]): ModelCatalog
     }
 
     seen.add(id);
-    const promptCost = Number(item.pricing?.prompt ?? NaN);
-    const completionCost = Number(item.pricing?.completion ?? NaN);
-    const isZeroPricing =
-      Number.isFinite(promptCost) &&
-      Number.isFinite(completionCost) &&
-      promptCost === 0 &&
-      completionCost === 0;
-    const isFree = id === 'openrouter/free' || id.endsWith(':free') || isZeroPricing;
+
+    const hasPromptPrice = item.pricing?.prompt !== undefined && item.pricing?.prompt !== null && item.pricing?.prompt !== '';
+    const hasCompletionPrice =
+      item.pricing?.completion !== undefined && item.pricing?.completion !== null && item.pricing?.completion !== '';
+    const promptCost = hasPromptPrice ? Number(item.pricing?.prompt) : NaN;
+    const completionCost = hasCompletionPrice ? Number(item.pricing?.completion) : NaN;
+    const hasNumericPricing = Number.isFinite(promptCost) && Number.isFinite(completionCost);
+
+    const isFree =
+      id === 'openrouter/free' ||
+      id.endsWith(':free') ||
+      (hasNumericPricing && promptCost === 0 && completionCost === 0);
+
+    const billing: ModelCatalogItem['billing'] = isFree
+      ? 'free'
+      : hasNumericPricing
+        ? 'paid'
+        : 'unknown';
+
+    const billingLabel =
+      billing === 'free' ? 'Free' : billing === 'paid' ? 'Paid' : 'Unknown';
 
     const inStr = formatPerMillionUsd(item.pricing?.prompt);
     const outStr = formatPerMillionUsd(item.pricing?.completion);
-    const pricingSummary = isFree
-      ? '$0 / Free'
-      : inStr && outStr
-        ? `${inStr} in · ${outStr} out`
-        : 'Paid per token';
+    const pricingSummary =
+      billing === 'free'
+        ? '$0 / Free'
+        : inStr && outStr
+          ? `${inStr} in · ${outStr} out`
+          : billing === 'paid'
+            ? 'Paid per token'
+            : 'Pricing not reported';
 
     const ctxLabel = item.context_length
       ? `${Math.round(item.context_length / 1000)}k ctx`
@@ -128,17 +156,50 @@ export function mapOpenRouterModels(rawList: OpenRouterRawModel[]): ModelCatalog
       .replace(/\s*\(free\)\s*$/i, '')
       .trim();
 
+    const params = Array.isArray(item.supported_parameters)
+      ? new Set(item.supported_parameters.map((p) => String(p).toLowerCase()))
+      : null;
+    const inputs = item.architecture?.input_modalities;
+
+    const capabilities: ModelCapabilities = {
+      textGeneration: true,
+      jsonOutput: params
+        ? params.has('response_format') || params.has('structured_outputs')
+        : 'unknown',
+      streaming: true,
+      imageInput: Array.isArray(inputs)
+        ? inputs.includes('image')
+        : modality.includes('image')
+          ? true
+          : 'unknown',
+      toolCalling: params ? params.has('tools') || params.has('tool_choice') : 'unknown',
+    };
+
+    const descLower = (item.description || '').toLowerCase();
+    const expMs = item.expiration_date ? Date.parse(item.expiration_date) : NaN;
+    let status: ModelLifecycleStatus = 'active';
+    if ((Number.isFinite(expMs) && expMs <= nowMs) || /\b(?:retired|discontinued|shut\s?down)\b/.test(descLower)) {
+      status = 'retired';
+    } else if (/\bdeprecated\b/.test(descLower) || id.toLowerCase().includes(':deprecated')) {
+      status = 'deprecated';
+    } else if (/\bpreview\b/.test(id.toLowerCase()) || /\bpreview\b/.test(cleanLabel.toLowerCase())) {
+      status = 'preview';
+    }
+
     mapped.push({
       id,
-      label: isFree && id.endsWith(':free') && !cleanLabel.includes(':free')
-        ? `${cleanLabel} (:free)`
-        : cleanLabel,
-      summary: [isFree ? 'Free' : 'Paid', pricingSummary !== '$0 / Free' ? pricingSummary : '', ctxLabel]
+      label:
+        isFree && id.endsWith(':free') && !cleanLabel.includes(':free')
+          ? `${cleanLabel} (:free)`
+          : cleanLabel,
+      summary: [billingLabel, pricingSummary !== '$0 / Free' ? pricingSummary : '', ctxLabel]
         .filter(Boolean)
         .join(' · '),
       tier: inferTierFromId(id),
-      billing: isFree ? 'free' : 'paid',
-      billingLabel: isFree ? 'Free' : 'Paid',
+      billing,
+      billingLabel,
+      status,
+      capabilities,
       contextLength: item.context_length,
       pricingSummary,
       isLiveFetched: true,
@@ -146,7 +207,7 @@ export function mapOpenRouterModels(rawList: OpenRouterRawModel[]): ModelCatalog
     });
   }
 
-  // Ensure openrouter/free auto-router exists at top if omitted
+  // Ensure openrouter/free router exists if API omitted it
   if (!seen.has('openrouter/free')) {
     const presetAuto = CUSTOM_GATEWAY_PRESETS[0].models.find((m) => m.id === 'openrouter/free');
     if (presetAuto) {
@@ -154,11 +215,26 @@ export function mapOpenRouterModels(rawList: OpenRouterRawModel[]): ModelCatalog
     }
   }
 
-  const priorityVendors = ['openrouter/free', 'nvidia/', 'deepseek/', 'qwen/', 'meta-llama/', 'google/', 'anthropic/', 'openai/'];
+  const priorityVendors = [
+    'openrouter/free',
+    'nvidia/',
+    'deepseek/',
+    'qwen/',
+    'meta-llama/',
+    'google/',
+    'anthropic/',
+    'openai/',
+  ];
+  const billingRank = (b: ModelCatalogItem['billing']) =>
+    b === 'free' ? 0 : b === 'paid' ? 1 : 2;
+  const statusRank = (s: ModelLifecycleStatus) =>
+    s === 'deprecated' || s === 'retired' ? 1 : 0;
+
   mapped.sort((a, b) => {
     if (a.id === 'openrouter/free') return -1;
     if (b.id === 'openrouter/free') return 1;
-    if (a.billing !== b.billing) return a.billing === 'free' ? -1 : 1;
+    if (statusRank(a.status) !== statusRank(b.status)) return statusRank(a.status) - statusRank(b.status);
+    if (billingRank(a.billing) !== billingRank(b.billing)) return billingRank(a.billing) - billingRank(b.billing);
     const aPri = priorityVendors.findIndex((p) => a.id.startsWith(p));
     const bPri = priorityVendors.findIndex((p) => b.id.startsWith(p));
     const aScore = aPri === -1 ? 99 : aPri;
@@ -175,19 +251,9 @@ export interface OpenAiCompatRawModel {
   active?: boolean;
   owned_by?: string;
   context_window?: number;
+  deprecated?: boolean;
+  status?: string;
 }
-
-const GROQ_FREE_TIER_PATTERNS = [
-  /^llama-3\.3-70b/i,
-  /^llama-3\.1-8b/i,
-  /^meta-llama\/llama-4-/i,
-  /^qwen\/qwen3-32b/i,
-  /^openai\/gpt-oss-/i,
-  /^groq\/compound/i,
-  /^deepseek-r1-distill-/i,
-  /^gemma2-/i,
-  /^allam-/i,
-];
 
 const GROQ_NON_CHAT_PATTERNS = [
   /whisper/i,
@@ -198,51 +264,58 @@ const GROQ_NON_CHAT_PATTERNS = [
   /safeguard/i,
 ];
 
+/**
+ * Maps live models returned from Groq /openai/v1/models without fabricating free-tier guesses.
+ * Groq's /models endpoint does not include billing metadata, so models are honestly marked
+ * "Provider billed" according to the user's Groq plan.
+ */
 export function mapGroqModels(rawList: OpenAiCompatRawModel[]): ModelCatalogItem[] {
-  const groqPreset = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === 'groq');
-  const presetMap = new Map(groqPreset?.models.map((m) => [m.id, m]) || []);
-
   const mapped: ModelCatalogItem[] = [];
   const seen = new Set<string>();
 
   for (const item of rawList) {
     if (!item || typeof item.id !== 'string' || !item.id.trim()) continue;
-    if (item.active === false) continue;
     const id = item.id.trim();
     if (seen.has(id)) continue;
     if (GROQ_NON_CHAT_PATTERNS.some((rx) => rx.test(id))) continue;
 
     seen.add(id);
-    const presetMatch = presetMap.get(id);
-    const isKnownFreeTier = GROQ_FREE_TIER_PATTERNS.some((rx) => rx.test(id));
-    const billing = presetMatch ? presetMatch.billing : isKnownFreeTier ? 'free' : 'paid';
-    const billingLabel = presetMatch
-      ? presetMatch.billingLabel
-      : billing === 'free'
-        ? 'Free Tier'
-        : 'Paid';
-    const ctx = item.context_window || presetMatch?.contextLength;
+    const ctx = typeof item.context_window === 'number' && item.context_window > 0 ? item.context_window : undefined;
+    const isRetired = item.active === false || item.status === 'retired';
+    const isDeprecated = Boolean(item.deprecated) || item.status === 'deprecated';
+    const isPreview = /\bpreview\b/i.test(id);
+    const status: ModelLifecycleStatus = isRetired
+      ? 'retired'
+      : isDeprecated
+        ? 'deprecated'
+        : isPreview
+          ? 'preview'
+          : 'active';
 
     mapped.push({
       id,
-      label: presetMatch?.label || id,
-      summary:
-        presetMatch?.summary ||
-        `${billing === 'free' ? 'Free Tier (rate-limited) / Paid' : 'Developer / Paid tier'}${ctx ? ` · ${Math.round(ctx / 1000)}k ctx` : ''}`,
-      tier: presetMatch?.tier || inferTierFromId(id),
-      billing,
-      billingLabel,
+      label: id,
+      summary: [
+        isRetired ? 'Unavailable (inactive on Groq)' : 'Provider billed (Groq plan limits apply)',
+        item.owned_by ? `by ${item.owned_by}` : '',
+        ctx ? `${Math.round(ctx / 1000)}k ctx` : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      tier: inferTierFromId(id),
+      billing: 'provider_billed',
+      billingLabel: 'Provider billed',
+      status,
+      capabilities: { ...UNKNOWN_CAPABILITIES },
       contextLength: ctx,
       isLiveFetched: true,
     });
   }
 
   mapped.sort((a, b) => {
-    if (a.billing !== b.billing) return a.billing === 'free' ? -1 : 1;
-    const aKnown = presetMap.has(a.id) ? 0 : 1;
-    const bKnown = presetMap.has(b.id) ? 0 : 1;
-    if (aKnown !== bKnown) return aKnown - bKnown;
-    return a.label.localeCompare(b.label);
+    const rank = (s: ModelLifecycleStatus) => (s === 'active' || s === 'preview' ? 0 : 1);
+    if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
+    return a.id.localeCompare(b.id);
   });
 
   return mapped;
@@ -252,14 +325,25 @@ export interface GeminiRawModel {
   id?: string;
   name?: string;
   displayName?: string;
+  description?: string;
+  version?: string;
   inputTokenLimit?: number;
+  outputTokenLimit?: number;
   supportedGenerationMethods?: string[];
 }
 
-export function mapGeminiModels(rawList: GeminiRawModel[]): ModelCatalogItem[] {
-  const geminiPreset = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === 'gemini_byok');
-  const presetMap = new Map(geminiPreset?.models.map((m) => [m.id, m]) || []);
+const KNOWN_DEPRECATED_GEMINI_PATTERNS = [
+  /^gemini-1\.0-/i,
+  /^gemini-1\.5-/i,
+  /^gemini-2\.0-flash-exp$/i,
+  /^gemini-2\.5-pro$/i,
+];
 
+/**
+ * Maps official Gemini /v1beta/models metadata without name-based billing guesses or replacing valid new IDs
+ * such as gemini-4-hydrogen. Checks supportedGenerationMethods and official description metadata.
+ */
+export function mapGeminiModels(rawList: GeminiRawModel[]): ModelCatalogItem[] {
   const mapped: ModelCatalogItem[] = [];
   const seen = new Set<string>();
 
@@ -281,43 +365,136 @@ export function mapGeminiModels(rawList: GeminiRawModel[]): ModelCatalogItem[] {
     ) {
       continue;
     }
-    if (
-      Array.isArray(item.supportedGenerationMethods) &&
-      !item.supportedGenerationMethods.includes('generateContent')
-    ) {
+
+    const methods = Array.isArray(item.supportedGenerationMethods)
+      ? item.supportedGenerationMethods
+      : [];
+    if (methods.length > 0 && !methods.includes('generateContent')) {
       continue;
     }
 
     seen.add(id);
-    const preset = presetMap.get(id);
-    const isPaidOnly =
-      lower.includes('pro') || lower.includes('ultra') || lower.includes('deep-research');
-    const billing = preset?.billing || (isPaidOnly ? 'paid' : 'free');
-    const billingLabel = preset?.billingLabel || (billing === 'free' ? 'Free Tier' : 'Paid');
-    const ctx = item.inputTokenLimit || preset?.contextLength;
+
+    const descLower = (item.description || '').toLowerCase();
+    const isRetired = /\b(?:retired|discontinued|turned down|shut down|no longer supported)\b/.test(descLower);
+    const isDeprecated =
+      /\b(?:deprecated|legacy)\b/.test(descLower) ||
+      KNOWN_DEPRECATED_GEMINI_PATTERNS.some((rx) => rx.test(id));
+    const isPreview =
+      /\b(?:preview|experimental)\b/.test(lower) || /\b(?:preview|experimental)\b/.test(descLower);
+
+    const status: ModelLifecycleStatus = isRetired
+      ? 'retired'
+      : isDeprecated
+        ? 'deprecated'
+        : isPreview
+          ? 'preview'
+          : 'active';
+
+    const capabilities: ModelCapabilities = {
+      textGeneration: methods.length === 0 ? true : methods.includes('generateContent'),
+      streaming: methods.length > 0 ? methods.includes('streamGenerateContent') : 'unknown',
+      jsonOutput: 'unknown',
+      imageInput: 'unknown',
+      toolCalling: 'unknown',
+    };
+
+    const ctx =
+      typeof item.inputTokenLimit === 'number' && item.inputTokenLimit > 0
+        ? item.inputTokenLimit
+        : undefined;
 
     mapped.push({
       id,
-      label: preset?.label || item.displayName || id,
-      summary:
-        preset?.summary ||
-        `${billing === 'free' ? 'Free Tier (AI Studio) / Paid' : 'Paid / Limited Free'}${ctx ? ` · ${Math.round(ctx / 1000)}k ctx` : ''}`,
-      tier: preset?.tier || inferTierFromId(id),
-      billing,
-      billingLabel,
+      label: item.displayName || id,
+      summary: [
+        status === 'deprecated'
+          ? 'Deprecated / legacy Gemini model'
+          : status === 'retired'
+            ? 'Retired model'
+            : 'Provider billed (depends on AI Studio / Cloud project tier)',
+        ctx ? `${Math.round(ctx / 1000)}k in ctx` : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      tier: inferTierFromId(id),
+      billing: 'provider_billed',
+      billingLabel: 'Provider billed',
+      status,
+      capabilities,
       contextLength: ctx,
+      supportedMethods: methods.length > 0 ? methods : undefined,
       isLiveFetched: true,
     });
   }
 
   mapped.sort((a, b) => {
-    if (a.billing !== b.billing) return a.billing === 'free' ? -1 : 1;
-    const a25 = a.id.includes('2.5') ? 0 : 1;
-    const b25 = b.id.includes('2.5') ? 0 : 1;
-    if (a25 !== b25) return a25 - b25;
+    const statusWeight = (s: ModelLifecycleStatus) =>
+      s === 'active' ? 0 : s === 'preview' ? 1 : s === 'deprecated' ? 2 : 3;
+    if (statusWeight(a.status) !== statusWeight(b.status)) {
+      return statusWeight(a.status) - statusWeight(b.status);
+    }
     return a.id.localeCompare(b.id);
   });
 
+  return mapped;
+}
+
+export function mapGenericOpenAiCompatModels(
+  rawList: OpenAiCompatRawModel[],
+  gateway: CustomGatewayId,
+  providerDisplayName: string,
+): ModelCatalogItem[] {
+  const mapped: ModelCatalogItem[] = [];
+  const seen = new Set<string>();
+
+  for (const item of rawList) {
+    if (!item || typeof item.id !== 'string' || !item.id.trim()) continue;
+    const id = item.id.trim();
+    if (seen.has(id)) continue;
+    if (gateway === 'openai' && !/^(gpt-|o1|o3|o4|chatgpt-)/i.test(id)) continue;
+    seen.add(id);
+
+    const isRetired = item.active === false || item.status === 'retired';
+    const isDeprecated = Boolean(item.deprecated) || item.status === 'deprecated';
+    const isPreview = /\bpreview\b/i.test(id);
+    const status: ModelLifecycleStatus = isRetired
+      ? 'retired'
+      : isDeprecated
+        ? 'deprecated'
+        : isPreview
+          ? 'preview'
+          : 'active';
+
+    const billing: ModelCatalogItem['billing'] =
+      gateway === 'openai' ? 'paid' : gateway === 'nvidia' ? 'provider_billed' : 'unknown';
+    const billingLabel =
+      billing === 'paid' ? 'Paid' : billing === 'provider_billed' ? 'Provider billed' : 'Unknown';
+
+    const ctx =
+      typeof item.context_window === 'number' && item.context_window > 0 ? item.context_window : undefined;
+
+    mapped.push({
+      id,
+      label: id,
+      summary: [
+        `Live model from ${providerDisplayName}`,
+        billingLabel,
+        ctx ? `${Math.round(ctx / 1000)}k ctx` : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      tier: inferTierFromId(id),
+      billing,
+      billingLabel,
+      status,
+      capabilities: { ...UNKNOWN_CAPABILITIES },
+      contextLength: ctx,
+      isLiveFetched: true,
+    });
+  }
+
+  mapped.sort((a, b) => a.id.localeCompare(b.id));
   return mapped;
 }
 
@@ -325,13 +502,14 @@ export async function fetchGatewayModelsCatalog(params: {
   baseUrl: string;
   apiKey?: string;
   forceRefresh?: boolean;
+  signal?: AbortSignal;
+  fetchImpl?: typeof fetch;
+  skipDnsLookup?: boolean;
 }): Promise<ServerCatalogResult> {
   const cleanBase = (params.baseUrl || '').trim().replace(/\/+$/, '');
   const cleanKey = (params.apiKey || '').trim();
   const gateway = detectGatewayFromBaseUrl(cleanBase);
   const preset = CUSTOM_GATEWAY_PRESETS.find((g) => g.id === gateway) || CUSTOM_GATEWAY_PRESETS[5];
-
-  await assertSafeExternalUrl(cleanBase);
 
   const keyHash = cleanKey
     ? crypto.createHash('sha256').update(cleanKey).digest('hex').slice(0, 12)
@@ -341,162 +519,190 @@ export async function fetchGatewayModelsCatalog(params: {
   if (!params.forceRefresh) {
     const cached = serverCatalogCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
-      return cached.result;
+      return {
+        ...cached.result,
+        source: 'cached',
+      };
     }
   }
 
   const fetchedAt = new Date().toISOString();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
 
-  try {
-    if (gateway === 'openrouter') {
-      const headers: Record<string, string> = { Accept: 'application/json' };
-      if (cleanKey) headers.Authorization = `Bearer ${cleanKey}`;
-      const resp = await fetch('https://openrouter.ai/api/v1/models', {
+  if (gateway === 'openrouter') {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (cleanKey) headers.Authorization = `Bearer ${cleanKey}`;
+    try {
+      const resp = await safeFetchExternal('https://openrouter.ai/api/v1/models', {
         headers,
-        signal: controller.signal,
+        timeoutMs: 12000,
+        parentSignal: params.signal,
+        fetchImpl: params.fetchImpl,
+        skipDnsLookup: params.skipDnsLookup,
       });
       if (!resp.ok) {
-        throw new Error(`OpenRouter models catalog returned HTTP ${resp.status}.`);
+        throw new Error(`OpenRouter /models returned HTTP ${resp.status}.`);
       }
       const json = (await resp.json()) as { data?: OpenRouterRawModel[] };
-      const mapped = Array.isArray(json.data) ? mapOpenRouterModels(json.data) : preset.models;
+      const mapped = Array.isArray(json.data) ? mapOpenRouterModels(json.data) : [];
+      if (mapped.length === 0) {
+        return {
+          gateway,
+          source: 'preset',
+          fetchedAt,
+          isOutdatedFallback: true,
+          models: preset.models,
+          note: 'OpenRouter returned an empty catalog; showing fallback preset (may be outdated).',
+        };
+      }
       const result: ServerCatalogResult = {
         gateway,
         source: 'live',
         fetchedAt,
-        models: mapped.length > 0 ? mapped : preset.models,
+        models: mapped,
       };
       serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
       return result;
+    } catch (err) {
+      if (err instanceof SecurityValidationError) throw err;
+      throw new SecurityValidationError(
+        502,
+        `OpenRouter catalog unreachable (${sanitizeErrorMessage(err)}). Retry or use the fallback openrouter/free preset.`,
+      );
     }
+  }
 
-    if (gateway === 'groq') {
-      if (!cleanKey) {
-        return {
-          gateway,
-          source: 'preset',
-          fetchedAt,
-          models: preset.models,
-          note: 'Showing verified Groq presets. Add your gsk_ API key to load your live account model list.',
-        };
-      }
-      const resp = await fetch('https://api.groq.com/openai/v1/models', {
-        headers: {
-          Authorization: `Bearer ${cleanKey}`,
-          Accept: 'application/json',
-        },
-        signal: controller.signal,
-      });
-      if (!resp.ok) {
-        throw new Error(`Groq models catalog returned HTTP ${resp.status}.`);
-      }
-      const json = (await resp.json()) as { data?: OpenAiCompatRawModel[] };
-      const mapped = Array.isArray(json.data) ? mapGroqModels(json.data) : preset.models;
-      const result: ServerCatalogResult = {
-        gateway,
-        source: mapped.length > 0 ? 'live' : 'preset',
-        fetchedAt,
-        models: mapped.length > 0 ? mapped : preset.models,
-      };
-      serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
-      return result;
-    }
-
-    if (gateway === 'gemini_byok') {
-      if (!cleanKey) {
-        return {
-          gateway,
-          source: 'preset',
-          fetchedAt,
-          models: preset.models,
-          note: 'Showing verified Gemini BYOK presets. Add your AIza... key to fetch live Gemini models.',
-        };
-      }
-      const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
-        headers: {
-          'x-goog-api-key': cleanKey,
-          Accept: 'application/json',
-        },
-        signal: controller.signal,
-      });
-      if (!resp.ok) {
-        throw new Error(`Gemini models catalog returned HTTP ${resp.status}.`);
-      }
-      const json = (await resp.json()) as { models?: GeminiRawModel[] };
-      const mapped = Array.isArray(json.models) ? mapGeminiModels(json.models) : preset.models;
-      const result: ServerCatalogResult = {
-        gateway,
-        source: mapped.length > 0 ? 'live' : 'preset',
-        fetchedAt,
-        models: mapped.length > 0 ? mapped : preset.models,
-      };
-      serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
-      return result;
-    }
-
-    // Generic OpenAI-compatible gateway (NVIDIA, OpenAI, Custom URL)
+  if (gateway === 'groq') {
     if (!cleanKey) {
       return {
         gateway,
         source: 'preset',
         fetchedAt,
-        models: preset.models,
-        note: 'Showing preset catalog. Add your API key to query this endpoint live.',
+        models: [],
+        note: 'Add your Groq API key (gsk_...) and refresh to load live models from /openai/v1/models.',
       };
     }
-
-    const modelsEndpoint = cleanBase.endsWith('/chat/completions')
-      ? cleanBase.replace(/\/chat\/completions$/, '/models')
-      : `${cleanBase}/models`;
-    const resp = await fetch(modelsEndpoint, {
+    const resp = await safeFetchExternal('https://api.groq.com/openai/v1/models', {
       headers: {
         Authorization: `Bearer ${cleanKey}`,
         Accept: 'application/json',
       },
-      signal: controller.signal,
+      timeoutMs: 10000,
+      parentSignal: params.signal,
+      fetchImpl: params.fetchImpl,
+      skipDnsLookup: params.skipDnsLookup,
     });
     if (!resp.ok) {
+      throw new SecurityValidationError(resp.status >= 400 ? resp.status : 502, `Groq /openai/v1/models returned HTTP ${resp.status}.`);
+    }
+    const json = (await resp.json()) as { data?: OpenAiCompatRawModel[] };
+    const mapped = Array.isArray(json.data) ? mapGroqModels(json.data) : [];
+    const result: ServerCatalogResult = {
+      gateway,
+      source: 'live',
+      fetchedAt,
+      models: mapped,
+      note: mapped.length === 0 ? 'Groq returned 0 eligible chat models for this key.' : undefined,
+    };
+    serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
+    return result;
+  }
+
+  if (gateway === 'gemini_byok') {
+    if (!cleanKey) {
       return {
         gateway,
         source: 'preset',
         fetchedAt,
-        models: preset.models,
-        note: `Endpoint /models returned ${resp.status}; showing preset models.`,
+        models: [],
+        note: 'Add your Gemini API key (AIza...) to load live models from /v1beta/models, or type a custom model ID.',
       };
     }
-
-    const json = (await resp.json()) as { data?: Array<{ id?: string; owned_by?: string }> };
-    const presetMap = new Map(preset.models.map((m) => [m.id, m]));
-    const liveList: ModelCatalogItem[] = [];
-    const seen = new Set<string>();
-    for (const item of json.data || []) {
-      const id = String(item.id || '').trim();
-      if (!id || seen.has(id)) continue;
-      if (gateway === 'openai' && !/^(gpt-|o1|o3|o4|chatgpt-)/i.test(id)) continue;
-      seen.add(id);
-      const match = presetMap.get(id);
-      liveList.push({
-        id,
-        label: match?.label || id,
-        summary: match?.summary || `Live model from ${preset.name}`,
-        tier: match?.tier || inferTierFromId(id),
-        billing: match?.billing || (gateway === 'openai' ? 'paid' : 'free'),
-        billingLabel: match?.billingLabel || (gateway === 'openai' ? 'Paid' : 'API'),
-        isLiveFetched: true,
-      });
+    const resp = await safeFetchExternal('https://generativelanguage.googleapis.com/v1beta/models?pageSize=100', {
+      headers: {
+        'x-goog-api-key': cleanKey,
+        Accept: 'application/json',
+      },
+      timeoutMs: 10000,
+      parentSignal: params.signal,
+      fetchImpl: params.fetchImpl,
+      skipDnsLookup: params.skipDnsLookup,
+    });
+    if (!resp.ok) {
+      throw new SecurityValidationError(
+        resp.status >= 400 ? resp.status : 502,
+        `Gemini /v1beta/models returned HTTP ${resp.status}.`,
+      );
     }
-
+    const json = (await resp.json()) as { models?: GeminiRawModel[] };
+    const mapped = Array.isArray(json.models) ? mapGeminiModels(json.models) : [];
     const result: ServerCatalogResult = {
       gateway,
-      source: liveList.length > 0 ? 'live' : 'preset',
+      source: 'live',
       fetchedAt,
-      models: liveList.length > 0 ? liveList : preset.models,
+      models: mapped,
+      note: mapped.length === 0 ? 'Gemini API returned 0 generateContent models for this key.' : undefined,
     };
     serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
     return result;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  // Generic OpenAI-compatible gateway (NVIDIA, OpenAI, Custom URL)
+  if (!cleanBase) {
+    return {
+      gateway,
+      source: 'preset',
+      fetchedAt,
+      models: [],
+      note: 'Enter an HTTPS Base URL to inspect available models.',
+    };
+  }
+
+  if (!cleanKey) {
+    return {
+      gateway,
+      source: 'preset',
+      fetchedAt,
+      models: [],
+      note: `Add your ${preset.name} API key to query /models live, or type a custom model ID manually (marked Unverified until tested).`,
+    };
+  }
+
+  const modelsEndpoint = cleanBase.endsWith('/chat/completions')
+    ? cleanBase.replace(/\/chat\/completions$/, '/models')
+    : `${cleanBase}/models`;
+
+  const resp = await safeFetchExternal(modelsEndpoint, {
+    headers: {
+      Authorization: `Bearer ${cleanKey}`,
+      Accept: 'application/json',
+    },
+    timeoutMs: 10000,
+    parentSignal: params.signal,
+    fetchImpl: params.fetchImpl,
+    skipDnsLookup: params.skipDnsLookup,
+  });
+  if (!resp.ok) {
+    throw new SecurityValidationError(
+      resp.status >= 400 ? resp.status : 502,
+      `${preset.name} /models returned HTTP ${resp.status}. Enter a model ID manually and run Test Connection.`,
+    );
+  }
+
+  const json = (await resp.json()) as { data?: OpenAiCompatRawModel[] };
+  const liveList = Array.isArray(json.data)
+    ? mapGenericOpenAiCompatModels(json.data, gateway, preset.name)
+    : [];
+
+  const result: ServerCatalogResult = {
+    gateway,
+    source: 'live',
+    fetchedAt,
+    models: liveList,
+    note:
+      liveList.length === 0
+        ? `${preset.name} /models returned an empty list. Enter a custom model ID below and test it.`
+        : undefined,
+  };
+  serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
+  return result;
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
@@ -30,8 +30,10 @@ import type {
   AiProviderConfig,
   AiStreamProgress,
   AppAiMode,
+  CatalogSource,
   DeploymentRecord,
   MistProject,
+  WebSearchMode,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
 import {
@@ -57,10 +59,14 @@ interface HomeViewProps {
   generationError: string | null;
   darkMode: boolean;
   appAiMode: AppAiMode;
+  webSearchMode: WebSearchMode;
+  hasWebSearchKey: boolean;
   onChangeAppAiMode: (mode: AppAiMode) => void;
+  onChangeWebSearchMode: (mode: WebSearchMode) => void;
   onToggleDarkMode: () => void;
   onSaveProvider: (next: AiProviderConfig) => void;
   onGenerate: (prompt: string) => void;
+  onCancelGeneration: () => void;
   onOpenVoiceChat: () => void;
   onOpenProject: (project: MistProject) => void;
   onDuplicateProject: (project: MistProject) => void;
@@ -109,10 +115,14 @@ export default function HomeView({
   generationError,
   darkMode,
   appAiMode,
+  webSearchMode,
+  hasWebSearchKey,
   onChangeAppAiMode,
+  onChangeWebSearchMode,
   onToggleDarkMode,
   onSaveProvider,
   onGenerate,
+  onCancelGeneration,
   onOpenVoiceChat,
   onOpenProject,
   onDuplicateProject,
@@ -130,70 +140,78 @@ export default function HomeView({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [liveModels, setLiveModels] = useState<ModelCatalogItem[] | null>(null);
-  const [isLiveCatalog, setIsLiveCatalog] = useState(false);
+  const [catalogSource, setCatalogSource] = useState<CatalogSource>('preset');
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
+  const [isOutdatedFallback, setIsOutdatedFallback] = useState(false);
   const [isLoadingCatalog, setIsLoadingCatalog] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogNote, setCatalogNote] = useState<string | undefined>(undefined);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const catalogAbortRef = useRef<AbortController | null>(null);
+  const catalogSeqRef = useRef(0);
 
-  const loadQuickCatalog = async (forceRefresh = false) => {
-    const cleanUrl = (providerConfig.baseUrl || '').trim();
-    if (!cleanUrl) {
-      setLiveModels(null);
-      setIsLiveCatalog(false);
-      setCatalogNote('Enter a custom endpoint URL in Models & Keys to fetch models.');
-      return;
-    }
-    setIsLoadingCatalog(true);
-    try {
-      const res = await fetchLiveModelCatalog({
-        baseUrl: cleanUrl,
-        apiKey: providerConfig.apiKey,
-        forceRefresh,
-      });
-      setLiveModels(res.models);
-      setIsLiveCatalog(res.source === 'live');
-      setCatalogNote(res.note);
-    } catch (err) {
-      setIsLiveCatalog(false);
-      setCatalogNote(err instanceof Error ? err.message : 'Showing preset catalog.');
-    } finally {
-      setIsLoadingCatalog(false);
-    }
-  };
+  const loadQuickCatalog = useCallback(
+    async (forceRefresh = false) => {
+      catalogAbortRef.current?.abort();
+      const seq = ++catalogSeqRef.current;
+
+      const cleanUrl = (providerConfig.baseUrl || '').trim();
+      if (!cleanUrl) {
+        setLiveModels(null);
+        setCatalogSource('preset');
+        setLastRefreshedAt(null);
+        setIsOutdatedFallback(false);
+        setCatalogError(null);
+        setIsLoadingCatalog(false);
+        setCatalogNote('Enter a custom endpoint URL in Models & Keys to fetch models.');
+        return;
+      }
+
+      const controller = new AbortController();
+      catalogAbortRef.current = controller;
+      setIsLoadingCatalog(true);
+      setCatalogError(null);
+
+      try {
+        const idToken = user ? await user.getIdToken() : undefined;
+        if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
+        const res = await fetchLiveModelCatalog({
+          baseUrl: cleanUrl,
+          apiKey: providerConfig.apiKey,
+          forceRefresh,
+          idToken,
+          signal: controller.signal,
+        });
+        if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
+        setLiveModels(res.models);
+        setCatalogSource(res.source);
+        setLastRefreshedAt(res.fetchedAt);
+        setIsOutdatedFallback(Boolean(res.isOutdatedFallback));
+        setCatalogNote(res.note);
+      } catch (err) {
+        if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
+        setCatalogSource('preset');
+        setIsOutdatedFallback(true);
+        setCatalogError(err instanceof Error ? err.message : 'Unable to refresh catalog.');
+      } finally {
+        if (seq === catalogSeqRef.current) {
+          setIsLoadingCatalog(false);
+        }
+      }
+    },
+    [providerConfig.baseUrl, providerConfig.apiKey, user],
+  );
 
   useEffect(() => {
-    if (!quickModelOpen) return;
-    let active = true;
-    const cleanUrl = (providerConfig.baseUrl || '').trim();
-    if (!cleanUrl) {
-      setLiveModels(null);
-      setIsLiveCatalog(false);
+    if (!quickModelOpen) {
+      catalogAbortRef.current?.abort();
       return;
     }
-    setIsLoadingCatalog(true);
-    void fetchLiveModelCatalog({
-      baseUrl: cleanUrl,
-      apiKey: providerConfig.apiKey,
-      forceRefresh: false,
-    })
-      .then((res) => {
-        if (!active) return;
-        setLiveModels(res.models);
-        setIsLiveCatalog(res.source === 'live');
-        setCatalogNote(res.note);
-      })
-      .catch((err) => {
-        if (!active) return;
-        setIsLiveCatalog(false);
-        setCatalogNote(err instanceof Error ? err.message : 'Showing preset catalog.');
-      })
-      .finally(() => {
-        if (active) setIsLoadingCatalog(false);
-      });
+    void loadQuickCatalog(false);
     return () => {
-      active = false;
+      catalogAbortRef.current?.abort();
     };
-  }, [quickModelOpen, providerConfig.baseUrl, providerConfig.apiKey]);
+  }, [quickModelOpen, loadQuickCatalog]);
 
   useEffect(() => {
     if (!isGenerating || !streamProgress) {
@@ -245,7 +263,9 @@ export default function HomeView({
   );
   const providerDisplayName = providerConfig.name?.trim() || activeGateway.name;
   const hasApiKey = Boolean(providerConfig.apiKey?.trim());
-  const providerLabel = `${providerDisplayName} · ${currentModelMeta?.label || providerConfig.model}`;
+  const providerLabel = `${providerDisplayName} · ${
+    providerConfig.model ? currentModelMeta?.label || providerConfig.model : 'Select model'
+  }`;
   const appAiActiveForPrompt = shouldEnableAppAi(promptInput, appAiMode);
 
   return (
@@ -528,10 +548,57 @@ export default function HomeView({
                           : streamProgress.phase}
                       </span>
                     </div>
-                    <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400 tabular-nums shrink-0">
-                      {elapsedSeconds}s · {Math.max(1, Math.round(streamProgress.charsReceived / 1024))} KB
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400 tabular-nums">
+                        {elapsedSeconds}s
+                        {streamProgress.charsReceived > 0
+                          ? ` · ${Math.max(1, Math.round(streamProgress.charsReceived / 1024))} KB`
+                          : ''}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={onCancelGeneration}
+                        className="rounded-lg border border-zinc-300/80 bg-white/90 px-2 py-0.5 text-[11px] font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
+
+                  {streamProgress.searchState && streamProgress.searchState !== 'idle' && (
+                    <div className="mt-2 rounded-lg border border-zinc-200/80 bg-white/80 px-2.5 py-2 text-[11px] dark:border-zinc-800 dark:bg-zinc-950/60">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="inline-flex items-center gap-1.5 font-medium text-zinc-800 dark:text-zinc-200">
+                          {streamProgress.searchState === 'searching' ? (
+                            <Loader2 className="h-3 w-3 animate-spin text-blue-500" aria-hidden="true" />
+                          ) : streamProgress.searchState === 'failed' ? (
+                            <AlertTriangle className="h-3 w-3 text-amber-500" aria-hidden="true" />
+                          ) : (
+                            <Globe className="h-3 w-3 text-emerald-500" aria-hidden="true" />
+                          )}
+                          <span>
+                            {streamProgress.searchState === 'searching'
+                              ? 'Searching live web sources...'
+                              : streamProgress.searchState === 'failed'
+                                ? 'Web search failed'
+                                : `Retrieved ${streamProgress.searchSources?.length ?? 0} verified web source${
+                                    (streamProgress.searchSources?.length ?? 0) === 1 ? '' : 's'
+                                  }`}
+                          </span>
+                        </span>
+                      </div>
+                      {streamProgress.searchQueries && streamProgress.searchQueries.length > 0 && (
+                        <p className="mt-1 font-mono text-[10px] text-zinc-500 dark:text-zinc-400 truncate">
+                          {streamProgress.searchQueries.join(' · ')}
+                        </p>
+                      )}
+                      {streamProgress.searchError && (
+                        <p className="mt-1 text-[10px] text-amber-700 dark:text-amber-300">
+                          {streamProgress.searchError}
+                        </p>
+                      )}
+                    </div>
+                  )}
 
                   {streamProgress.completedFiles.length > 0 && (
                     <div className="mt-2.5 flex flex-wrap gap-2 text-[11px]">
@@ -600,7 +667,11 @@ export default function HomeView({
                         className={`hidden sm:inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${
                           currentModelMeta.billing === 'free'
                             ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                            : 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                            : currentModelMeta.billing === 'paid'
+                              ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                              : currentModelMeta.billing === 'provider_billed'
+                                ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300'
+                                : 'bg-zinc-500/15 text-zinc-700 dark:text-zinc-300'
                         }`}
                       >
                         {currentModelMeta.billingLabel}
@@ -650,6 +721,44 @@ export default function HomeView({
                     </option>
                   </select>
                 </label>
+
+                <label className="col-span-2 sm:col-span-1 inline-flex min-h-[38px] sm:min-h-[34px] items-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-2.5 text-[11px] font-medium text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+                  <Globe
+                    className={`h-3.5 w-3.5 shrink-0 ${
+                      webSearchMode === 'on'
+                        ? 'text-blue-600 dark:text-blue-400'
+                        : webSearchMode === 'auto'
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : 'text-zinc-400'
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <select
+                    aria-label="Search Web mode"
+                    value={webSearchMode}
+                    onChange={(e) => onChangeWebSearchMode(e.target.value as WebSearchMode)}
+                    className="bg-transparent text-[11px] font-medium text-zinc-700 dark:text-zinc-200 focus:outline-none cursor-pointer"
+                  >
+                    <option value="auto" className="bg-white dark:bg-zinc-900">
+                      Search: Auto
+                    </option>
+                    <option value="on" className="bg-white dark:bg-zinc-900">
+                      Search: On
+                    </option>
+                    <option value="off" className="bg-white dark:bg-zinc-900">
+                      Search: Off
+                    </option>
+                  </select>
+                </label>
+                {webSearchMode === 'on' && !hasWebSearchKey && (
+                  <button
+                    type="button"
+                    onClick={onOpenSettings}
+                    className="col-span-2 sm:col-span-1 inline-flex min-h-[34px] items-center justify-center rounded-xl border border-amber-300/80 bg-amber-50 px-2.5 text-[11px] font-medium text-amber-800 hover:bg-amber-100 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300 cursor-pointer whitespace-nowrap"
+                  >
+                    Configure Search Key
+                  </button>
+                )}
               </div>
 
               <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-between sm:justify-end gap-2 sm:gap-3 shrink-0">
@@ -701,15 +810,22 @@ export default function HomeView({
                           <button
                             key={gw.id}
                             type="button"
-                            onClick={() =>
+                            onClick={() => {
+                              catalogAbortRef.current?.abort();
+                              catalogSeqRef.current += 1;
+                              setLiveModels(null);
+                              setCatalogSource('preset');
+                              setLastRefreshedAt(null);
+                              setIsOutdatedFallback(false);
+                              setCatalogError(null);
                               onSaveProvider({
                                 ...providerConfig,
                                 provider: 'custom',
                                 name: gw.name,
                                 baseUrl: gw.baseUrl || providerConfig.baseUrl || '',
-                                model: gw.models[0].id,
-                              })
-                            }
+                                model: gw.models[0]?.id || '',
+                              });
+                            }}
                             className={`min-h-[28px] rounded-lg border px-2.5 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
                               activeGatewayId === gw.id
                                 ? 'border-blue-500/70 bg-blue-500/10 text-blue-700 dark:text-blue-300'
@@ -733,12 +849,14 @@ export default function HomeView({
                     <ModelSelectorDropdown
                       provider="custom"
                       value={providerConfig.model}
-                      modelsOverride={
-                        liveModels && liveModels.length > 0 ? liveModels : activeGateway.models
-                      }
+                      modelsOverride={liveModels !== null ? liveModels : activeGateway.models}
                       gatewayLabel={providerDisplayName}
                       isLoadingCatalog={isLoadingCatalog}
-                      isLiveCatalog={isLiveCatalog}
+                      isLiveCatalog={catalogSource === 'live'}
+                      catalogSource={catalogSource}
+                      lastRefreshedAt={lastRefreshedAt}
+                      isOutdatedFallback={isOutdatedFallback}
+                      catalogError={catalogError}
                       catalogNote={catalogNote}
                       onRefreshCatalog={() => void loadQuickCatalog(true)}
                       compact

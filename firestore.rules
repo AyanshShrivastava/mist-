@@ -51,6 +51,7 @@ service cloud.firestore {
         && (!('defaultViewport' in data) || (data.defaultViewport in ['desktop', 'tablet', 'mobile']))
         && (!('enableAppAi' in data) || (data.enableAppAi is bool))
         && (!('appAiMode' in data) || (data.appAiMode in ['on_request', 'always', 'off']))
+        && (!('webSearchMode' in data) || (data.webSearchMode in ['auto', 'on', 'off']))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -111,7 +112,7 @@ service cloud.firestore {
         && data.title.size() <= 120
         && data.htmlBundle is string
         && data.htmlBundle.size() >= 1
-        && data.htmlBundle.size() <= 500000
+        && data.htmlBundle.size() <= 900000
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -128,7 +129,7 @@ service cloud.firestore {
         && incoming().keys().hasOnly([
           'uid', 'email', 'displayName', 'photoURL', 'preferredProvider',
           'preferredModel', 'theme', 'defaultViewMode', 'defaultViewport',
-          'enableAppAi', 'appAiMode', 'createdAt', 'updatedAt'
+          'enableAppAi', 'appAiMode', 'webSearchMode', 'createdAt', 'updatedAt'
         ])
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
@@ -142,7 +143,7 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'displayName', 'photoURL', 'preferredProvider',
           'preferredModel', 'theme', 'defaultViewMode', 'defaultViewport',
-          'enableAppAi', 'appAiMode', 'email', 'updatedAt'
+          'enableAppAi', 'appAiMode', 'webSearchMode', 'email', 'updatedAt'
         ]);
       allow delete: if isValidId(userId) && isOwner(userId);
     }

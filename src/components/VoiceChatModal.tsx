@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import type { User } from 'firebase/auth';
 import type { AiProviderConfig } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
 import { MistMark } from './MistLogo';
@@ -25,6 +26,7 @@ interface VoiceTurn {
 
 interface VoiceChatModalProps {
   isOpen: boolean;
+  user: User | null;
   mode: 'create' | 'refine';
   projectName?: string;
   providerConfig: AiProviderConfig;
@@ -47,6 +49,7 @@ interface SpeechRecognitionInstance extends EventTarget {
 
 export default function VoiceChatModal({
   isOpen,
+  user,
   mode,
   projectName,
   providerConfig,
@@ -151,6 +154,11 @@ export default function VoiceChatModal({
       setTurns(nextHistory);
       setIncident(null);
 
+      if (!user) {
+        setVoiceNote('Sign in with Google to receive live AI suggestions, or apply your voice note directly below.');
+        return;
+      }
+
       if (!providerConfig.apiKey?.trim()) {
         setVoiceNote('Add your BYOK API key to receive spoken AI suggestions, or build directly from your voice note below.');
         return;
@@ -158,9 +166,13 @@ export default function VoiceChatModal({
 
       setIsThinking(true);
       try {
+        const idToken = await user.getIdToken();
         const resp = await fetch('/api/ai/voice-turn', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
           body: JSON.stringify({
             messages: nextHistory.map((t) => ({ role: t.role, content: t.text })),
             mode,
@@ -194,7 +206,7 @@ export default function VoiceChatModal({
         setIsThinking(false);
       }
     },
-    [mode, projectName, providerConfig, onIncident, speakText],
+    [user, mode, projectName, providerConfig, onIncident, speakText],
   );
 
   const toggleMicrophone = () => {

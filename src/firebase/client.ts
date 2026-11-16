@@ -21,7 +21,13 @@ import {
   type DocumentSnapshot,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import type { AiProviderId, AppAiMode, ViewportSize, WorkspaceViewMode } from '../types/mist';
+import type {
+  AiProviderId,
+  AppAiMode,
+  ViewportSize,
+  WebSearchMode,
+  WorkspaceViewMode,
+} from '../types/mist';
 
 export interface UserProfilePreferences {
   preferredProvider?: AiProviderId;
@@ -31,6 +37,7 @@ export interface UserProfilePreferences {
   defaultViewport?: ViewportSize;
   enableAppAi?: boolean;
   appAiMode?: AppAiMode;
+  webSearchMode?: WebSearchMode;
 }
 
 const app = initializeApp(firebaseConfig);
@@ -211,6 +218,10 @@ export async function fetchUserProfilePreferences(
         data.appAiMode === 'on_request' || data.appAiMode === 'always' || data.appAiMode === 'off'
           ? (data.appAiMode as AppAiMode)
           : undefined,
+      webSearchMode:
+        data.webSearchMode === 'auto' || data.webSearchMode === 'on' || data.webSearchMode === 'off'
+          ? (data.webSearchMode as WebSearchMode)
+          : undefined,
     };
   } catch (error) {
     if (isOfflineFirestoreError(error)) return null;
@@ -245,6 +256,7 @@ export async function syncUserProfile(
       if (prefs?.defaultViewport) prefFields.defaultViewport = prefs.defaultViewport;
       if (typeof prefs?.enableAppAi === 'boolean') prefFields.enableAppAi = prefs.enableAppAi;
       if (prefs?.appAiMode) prefFields.appAiMode = prefs.appAiMode;
+      if (prefs?.webSearchMode) prefFields.webSearchMode = prefs.webSearchMode;
 
       try {
         await user.getIdToken();

@@ -31,6 +31,7 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
   AiStreamProgress,
@@ -38,19 +39,24 @@ import type {
   SelectedVisualElement,
   ViewportSize,
   VisualElementPatch,
+  WebSearchMode,
   WorkspaceViewMode,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
 import { detectGatewayFromBaseUrl, findModelEntry } from '../data/models';
 import CodeEditor from './CodeEditor';
 import VisualInspector from './VisualInspector';
+import SearchSourcesCard from './SearchSourcesCard';
 import MistLogo, { MistMark } from './MistLogo';
 
 interface WorkspaceViewProps {
+  user: User | null;
   project: MistProject;
   providerConfig: AiProviderConfig;
   defaultViewMode?: WorkspaceViewMode;
   defaultViewport?: ViewportSize;
+  webSearchMode: WebSearchMode;
+  hasWebSearchKey: boolean;
   modelIncident: ModelHealthIncident | null;
   bundledHtml: string;
   bundleError: string | null;
@@ -65,6 +71,8 @@ interface WorkspaceViewProps {
   onDeleteFile: (path: string) => void;
   onCommitVisualPatch: (patch: VisualElementPatch) => void;
   onRefineWithAi: (instruction: string, element?: SelectedVisualElement | null) => void;
+  onCancelRefine: () => void;
+  onChangeWebSearchMode: (mode: WebSearchMode) => void;
   onOpenVoiceChat: () => void;
   onRebundle: () => void;
   onDuplicateProject: () => void;
@@ -82,10 +90,13 @@ const REFINEMENT_SUGGESTIONS = [
 ];
 
 export default function WorkspaceView({
+  user,
   project,
   providerConfig,
   defaultViewMode = 'preview',
   defaultViewport = 'desktop',
+  webSearchMode,
+  hasWebSearchKey,
   modelIncident,
   bundledHtml,
   bundleError,
@@ -100,6 +111,8 @@ export default function WorkspaceView({
   onDeleteFile,
   onCommitVisualPatch,
   onRefineWithAi,
+  onCancelRefine,
+  onChangeWebSearchMode,
   onOpenVoiceChat,
   onRebundle,
   onDuplicateProject,
@@ -155,6 +168,8 @@ export default function WorkspaceView({
   const [refineElapsed, setRefineElapsed] = useState(0);
 
   const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const sessionTokenRef = useRef<string | null>(null);
+  sessionTokenRef.current = sessionToken;
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   const hasAppAi = Boolean(
@@ -162,32 +177,44 @@ export default function WorkspaceView({
       project.files.some((f) => /\/api\/app-ai|window\.mistAI/.test(f.content)),
   );
 
-  // Mint an ephemeral session token ONLY when the project uses App AI and a BYOK key exists.
-  // Never pass raw BYOK API keys into iframe postMessage or iframe state.
+  // Mint an authenticated ephemeral session token ONLY in the trusted parent frame
+  // when App AI is used and a BYOK key + signed-in user exist.
+  // Never pass sessionToken or raw BYOK keys into the opaque sandbox iframe.
   useEffect(() => {
     const cleanKey = (providerConfig.apiKey || '').trim();
-    if (!hasAppAi || !cleanKey) {
+    if (!hasAppAi || !cleanKey || !user) {
       setSessionToken(null);
       return;
     }
 
     let cancelled = false;
     let mintedToken: string | null = null;
+    let bearerHeader = '';
 
-    void fetch('/api/ai/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ providerConfig }),
-    })
+    void user
+      .getIdToken()
+      .then((idToken) => {
+        if (cancelled) return null;
+        bearerHeader = `Bearer ${idToken}`;
+        return fetch('/api/ai/session', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: bearerHeader,
+          },
+          body: JSON.stringify({ providerConfig }),
+        });
+      })
       .then(async (resp) => {
-        if (!resp.ok) return null;
+        if (!resp || !resp.ok) return null;
         return (await resp.json()) as { token?: string };
       })
       .then((data) => {
         if (cancelled) {
-          if (data?.token) {
+          if (data?.token && bearerHeader) {
             void fetch(`/api/ai/session/${encodeURIComponent(data.token)}`, {
               method: 'DELETE',
+              headers: { Authorization: bearerHeader },
               keepalive: true,
             }).catch(() => {});
           }
@@ -204,14 +231,15 @@ export default function WorkspaceView({
 
     return () => {
       cancelled = true;
-      if (mintedToken) {
+      if (mintedToken && bearerHeader) {
         void fetch(`/api/ai/session/${encodeURIComponent(mintedToken)}`, {
           method: 'DELETE',
+          headers: { Authorization: bearerHeader },
           keepalive: true,
         }).catch(() => {});
       }
     };
-  }, [hasAppAi, providerConfig]);
+  }, [hasAppAi, providerConfig, user]);
 
   useEffect(() => {
     if (!isRefining || !streamProgress) {
@@ -234,17 +262,122 @@ export default function WorkspaceView({
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
+      const iframeWindow = iframeRef.current?.contentWindow;
+      if (!iframeWindow || event.source !== iframeWindow) return;
       if (!event.data || typeof event.data !== 'object') return;
-      if (event.data.type === 'MIST_SELECT_ELEMENT') {
-        setSelectedElement(event.data.payload as SelectedVisualElement);
-        if (window.innerWidth < 768) {
-          setMobileInspectorOpen(true);
+
+      const msg = event.data as {
+        type?: unknown;
+        requestId?: unknown;
+        payload?: unknown;
+      };
+
+      if (msg.type === 'MIST_SELECT_ELEMENT') {
+        const p = msg.payload as Partial<SelectedVisualElement> | undefined;
+        if (
+          p &&
+          typeof p.mistId === 'string' &&
+          typeof p.tagName === 'string' &&
+          typeof p.textContent === 'string' &&
+          typeof p.className === 'string' &&
+          p.styles &&
+          typeof p.styles === 'object'
+        ) {
+          setSelectedElement(p as SelectedVisualElement);
+          if (window.innerWidth < 768) {
+            setMobileInspectorOpen(true);
+          }
         }
+        return;
+      }
+
+      if (msg.type === 'MIST_APP_AI_REQUEST' && typeof msg.requestId === 'string') {
+        const reqId = msg.requestId;
+        const bodyObj =
+          msg.payload && typeof msg.payload === 'object'
+            ? (msg.payload as Record<string, unknown>)
+            : {};
+
+        void (async () => {
+          try {
+            if (!hasAppAi) {
+              throw new Error('Live App AI is disabled for this project.');
+            }
+            if (!user) {
+              throw new Error('Sign in with Google in Mist before using App AI in preview.');
+            }
+            const idToken = await user.getIdToken();
+            const token = sessionTokenRef.current;
+            const requestBody: Record<string, unknown> = {
+              prompt: typeof bodyObj.prompt === 'string' ? bodyObj.prompt : undefined,
+              messages: Array.isArray(bodyObj.messages) ? bodyObj.messages : undefined,
+              systemInstruction:
+                typeof bodyObj.systemInstruction === 'string'
+                  ? bodyObj.systemInstruction
+                  : undefined,
+              jsonMode: Boolean(bodyObj.jsonMode),
+            };
+            if (token) {
+              requestBody.sessionToken = token;
+            } else {
+              requestBody.providerConfig = providerConfig;
+            }
+
+            const resp = await fetch('/api/app-ai', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${idToken}`,
+              },
+              body: JSON.stringify(requestBody),
+            });
+            const data = (await resp.json()) as {
+              text?: string;
+              provider?: string;
+              model?: string;
+              error?: string;
+              incident?: ModelHealthIncident;
+            };
+            if (!resp.ok || !data.text) {
+              iframeRef.current?.contentWindow?.postMessage(
+                {
+                  type: 'MIST_APP_AI_RESPONSE',
+                  requestId: reqId,
+                  ok: false,
+                  error: data.incident?.message || data.error || 'App AI request failed.',
+                },
+                '*',
+              );
+              return;
+            }
+            iframeRef.current?.contentWindow?.postMessage(
+              {
+                type: 'MIST_APP_AI_RESPONSE',
+                requestId: reqId,
+                ok: true,
+                text: data.text,
+                provider: data.provider,
+                model: data.model,
+              },
+              '*',
+            );
+          } catch (err) {
+            iframeRef.current?.contentWindow?.postMessage(
+              {
+                type: 'MIST_APP_AI_RESPONSE',
+                requestId: reqId,
+                ok: false,
+                error: err instanceof Error ? err.message : 'App AI relay failed.',
+              },
+              '*',
+            );
+          }
+        })();
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, []);
+  }, [hasAppAi, providerConfig, user]);
 
   const syncBridgeToIframe = () => {
     const win = iframeRef.current?.contentWindow;
@@ -255,9 +388,8 @@ export default function WorkspaceView({
       );
       win.postMessage(
         {
-          type: 'MIST_SET_BYOK_SESSION',
+          type: 'MIST_SET_APP_AI_STATE',
           payload: {
-            token: hasAppAi ? sessionToken : null,
             appAiEnabled: hasAppAi,
           },
         },
@@ -268,7 +400,7 @@ export default function WorkspaceView({
 
   useEffect(() => {
     syncBridgeToIframe();
-  }, [viewMode, mobilePane, sessionToken, hasAppAi]);
+  }, [viewMode, mobilePane, hasAppAi]);
 
   const handleIframeLoad = () => {
     syncBridgeToIframe();
@@ -489,10 +621,14 @@ export default function WorkspaceView({
                 className={`rounded px-1 py-0.2 text-[10px] font-semibold ${
                   currentModelMeta.billing === 'free'
                     ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                    : 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                    : currentModelMeta.billing === 'paid'
+                      ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                      : currentModelMeta.billing === 'provider_billed'
+                        ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300'
+                        : 'bg-zinc-500/15 text-zinc-700 dark:text-zinc-300'
                 }`}
               >
-                {currentModelMeta.billing === 'free' ? 'Free' : 'Paid'}
+                {currentModelMeta.billingLabel}
               </span>
             )}
           </button>
@@ -597,7 +733,10 @@ export default function WorkspaceView({
                     <p className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mb-1">
                       {msg.role === 'user' ? 'You' : 'Mist'}
                     </p>
-                    <p>{msg.content}</p>
+                    <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+                    {msg.role === 'assistant' && msg.searchOutcome && (
+                      <SearchSourcesCard outcome={msg.searchOutcome} compact />
+                    )}
                     {msg.changedFiles && msg.changedFiles.length > 0 && (
                       <p className="mt-2 font-mono text-[11px] text-blue-600 dark:text-blue-400">
                         Updated: {msg.changedFiles.join(', ')}
@@ -626,10 +765,48 @@ export default function WorkspaceView({
                             : streamProgress.phase}
                         </span>
                       </span>
-                      <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 tabular-nums shrink-0">
-                        {refineElapsed}s
-                      </span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 tabular-nums">
+                          {refineElapsed}s
+                        </span>
+                        <button
+                          type="button"
+                          onClick={onCancelRefine}
+                          className="rounded border border-zinc-300/80 bg-white/90 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     </div>
+
+                    {streamProgress.searchState && streamProgress.searchState !== 'idle' && (
+                      <div className="mt-2 rounded-lg border border-zinc-200/80 bg-white/80 px-2 py-1.5 text-[11px] dark:border-zinc-800 dark:bg-zinc-950/60">
+                        <span className="inline-flex items-center gap-1.5 font-medium text-zinc-800 dark:text-zinc-200">
+                          {streamProgress.searchState === 'searching' ? (
+                            <Loader2 className="h-3 w-3 animate-spin text-blue-500" aria-hidden="true" />
+                          ) : streamProgress.searchState === 'failed' ? (
+                            <AlertTriangle className="h-3 w-3 text-amber-500" aria-hidden="true" />
+                          ) : (
+                            <Globe className="h-3 w-3 text-emerald-500" aria-hidden="true" />
+                          )}
+                          <span>
+                            {streamProgress.searchState === 'searching'
+                              ? 'Searching live web sources...'
+                              : streamProgress.searchState === 'failed'
+                                ? 'Web search failed'
+                                : `Retrieved ${streamProgress.searchSources?.length ?? 0} verified source${
+                                    (streamProgress.searchSources?.length ?? 0) === 1 ? '' : 's'
+                                  }`}
+                          </span>
+                        </span>
+                        {streamProgress.searchError && (
+                          <p className="mt-0.5 text-[10px] text-amber-700 dark:text-amber-300">
+                            {streamProgress.searchError}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
                     {streamProgress.completedFiles.length > 0 && (
                       <div className="mt-2 space-y-1 font-mono text-[11px]">
                         {streamProgress.completedFiles.map((filePath) => (
@@ -709,6 +886,47 @@ export default function WorkspaceView({
                     {refineValidationError || refineError}
                   </p>
                 )}
+
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <label className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+                    <Globe
+                      className={`h-3 w-3 shrink-0 ${
+                        webSearchMode === 'on'
+                          ? 'text-blue-600 dark:text-blue-400'
+                          : webSearchMode === 'auto'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : 'text-zinc-400'
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <select
+                      aria-label="Refinement Search Web mode"
+                      value={webSearchMode}
+                      onChange={(e) => onChangeWebSearchMode(e.target.value as WebSearchMode)}
+                      className="bg-transparent text-[11px] font-medium text-zinc-700 dark:text-zinc-200 focus:outline-none cursor-pointer"
+                    >
+                      <option value="auto" className="bg-white dark:bg-zinc-900">
+                        Search: Auto
+                      </option>
+                      <option value="on" className="bg-white dark:bg-zinc-900">
+                        Search: On
+                      </option>
+                      <option value="off" className="bg-white dark:bg-zinc-900">
+                        Search: Off
+                      </option>
+                    </select>
+                  </label>
+
+                  {webSearchMode === 'on' && !hasWebSearchKey && (
+                    <button
+                      type="button"
+                      onClick={onOpenSettings}
+                      className="text-[10px] font-medium text-amber-700 hover:underline dark:text-amber-300 cursor-pointer"
+                    >
+                      Add Search Key
+                    </button>
+                  )}
+                </div>
 
                 <label htmlFor="mist-refine-input" className="sr-only">
                   Refine website with AI
@@ -885,7 +1103,7 @@ export default function WorkspaceView({
                     ref={iframeRef}
                     title="Mist Live Website Preview"
                     srcDoc={bundledHtml}
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
+                    sandbox="allow-scripts allow-forms allow-modals allow-popups"
                     onLoad={handleIframeLoad}
                     className="h-full w-full border-0 bg-white"
                   />
@@ -956,7 +1174,7 @@ export default function WorkspaceView({
                       ref={iframeRef}
                       title="Mist Live Website Preview"
                       srcDoc={bundledHtml}
-                      sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
+                      sandbox="allow-scripts allow-forms allow-modals allow-popups"
                       onLoad={handleIframeLoad}
                       className="h-full w-full border-0 bg-white"
                     />
@@ -1093,10 +1311,14 @@ export default function WorkspaceView({
                         className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
                           currentModelMeta.billing === 'free'
                             ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                            : 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                            : currentModelMeta.billing === 'paid'
+                              ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                              : currentModelMeta.billing === 'provider_billed'
+                                ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300'
+                                : 'bg-zinc-500/15 text-zinc-700 dark:text-zinc-300'
                         }`}
                       >
-                        {currentModelMeta.billing === 'free' ? 'Free' : 'Paid'}
+                        {currentModelMeta.billingLabel}
                       </span>
                     )}
                   </button>

@@ -26,6 +26,8 @@ export function redactSecrets(input: string): string {
   if (!input) return '';
   return input
     .replace(/Bearer\s+[A-Za-z0-9._\-+=]+/gi, 'Bearer [REDACTED]')
+    .replace(/X-Subscription-Token\s*[:=]\s*[^\s,;]+/gi, 'X-Subscription-Token: [REDACTED]')
+    .replace(/\b(BSA[A-Za-z0-9_-]{8,})/g, 'BSA[REDACTED]')
     .replace(/\b(sk-or-v1-[A-Za-z0-9_-]{8,})/g, 'sk-or-v1-[REDACTED]')
     .replace(/\b(sk-proj-[A-Za-z0-9_-]{8,})/g, 'sk-proj-[REDACTED]')
     .replace(/\b(sk-[A-Za-z0-9_-]{12,})/g, 'sk-[REDACTED]')
@@ -33,7 +35,7 @@ export function redactSecrets(input: string): string {
     .replace(/\b(AIza[0-9A-Za-z_-]{12,})/g, 'AIza[REDACTED]')
     .replace(/\b(nvapi-[A-Za-z0-9_-]{8,})/g, 'nvapi-[REDACTED]')
     .replace(/\b(mist_sess_[A-Za-z0-9_-]{8,})/g, 'mist_sess_[REDACTED]')
-    .replace(/([?&](?:key|api_key|token)=)[^&\s]+/gi, '$1[REDACTED]');
+    .replace(/((?:[?&]|\b)(?:key|api_key|token|subscription_token)=)[^&\s,;]+/gi, '$1[REDACTED]');
 }
 
 export function classifyModelError(params: {

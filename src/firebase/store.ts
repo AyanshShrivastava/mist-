@@ -9,6 +9,7 @@ import {
   updateDoc,
   where,
   writeBatch,
+  type DocumentReference,
   type Timestamp,
 } from 'firebase/firestore';
 import {
@@ -22,6 +23,29 @@ import {
 } from './client';
 import type { MistProject, ProjectFile, ProjectSyncRecord } from '../types/mist';
 import { createSafeId } from '../utils/projectOps';
+
+import { chunkOperations, FIRESTORE_SAFE_BATCH_LIMIT } from './batchOps';
+
+export { chunkOperations, FIRESTORE_SAFE_BATCH_LIMIT };
+
+type BatchWriteOp =
+  | { type: 'set'; ref: DocumentReference; data: Record<string, unknown> }
+  | { type: 'delete'; ref: DocumentReference };
+
+async function commitChunkedBatchOps(ops: BatchWriteOp[]): Promise<void> {
+  const chunks = chunkOperations(ops, FIRESTORE_SAFE_BATCH_LIMIT);
+  for (const chunk of chunks) {
+    const batch = writeBatch(db);
+    for (const op of chunk) {
+      if (op.type === 'delete') {
+        batch.delete(op.ref);
+      } else {
+        batch.set(op.ref, op.data);
+      }
+    }
+    await batch.commit();
+  }
+}
 
 const knownCloudProjects = new Set<string>();
 const syncRecords = new Map<string, ProjectSyncRecord>();
@@ -279,10 +303,10 @@ export async function saveProjectToFirestore(
           await setDoc(projectRef, payload);
           knownCloudProjects.add(project.id);
 
-          const batch = writeBatch(db);
-          for (const file of project.files) {
-            const fileRef = doc(db, 'projects', project.id, 'files', file.id);
-            batch.set(fileRef, {
+          const createOps: BatchWriteOp[] = project.files.map((file) => ({
+            type: 'set',
+            ref: doc(db, 'projects', project.id, 'files', file.id),
+            data: {
               id: file.id,
               projectId: project.id,
               ownerId: user.uid,
@@ -290,9 +314,9 @@ export async function saveProjectToFirestore(
               language: file.language,
               content: file.content.slice(0, 200000),
               updatedAt: serverTimestamp(),
-            });
-          }
-          await batch.commit();
+            },
+          }));
+          await commitChunkedBatchOps(createOps);
           setProjectSyncRecord({
             projectId: project.id,
             state: 'synced',
@@ -328,25 +352,31 @@ export async function saveProjectToFirestore(
         }
         const currentFileIds = new Set(project.files.map((f) => f.id));
 
-        const batch = writeBatch(db);
+        const ops: BatchWriteOp[] = [];
         for (const oldId of existingFileIds) {
           if (!currentFileIds.has(oldId)) {
-            batch.delete(doc(db, 'projects', project.id, 'files', oldId));
+            ops.push({
+              type: 'delete',
+              ref: doc(db, 'projects', project.id, 'files', oldId),
+            });
           }
         }
         for (const file of project.files) {
-          const fileRef = doc(db, 'projects', project.id, 'files', file.id);
-          batch.set(fileRef, {
-            id: file.id,
-            projectId: project.id,
-            ownerId: user.uid,
-            path: file.path.slice(0, 256),
-            language: file.language,
-            content: file.content.slice(0, 200000),
-            updatedAt: serverTimestamp(),
+          ops.push({
+            type: 'set',
+            ref: doc(db, 'projects', project.id, 'files', file.id),
+            data: {
+              id: file.id,
+              projectId: project.id,
+              ownerId: user.uid,
+              path: file.path.slice(0, 256),
+              language: file.language,
+              content: file.content.slice(0, 200000),
+              updatedAt: serverTimestamp(),
+            },
           });
         }
-        await batch.commit();
+        await commitChunkedBatchOps(ops);
         setProjectSyncRecord({
           projectId: project.id,
           state: 'synced',
@@ -394,12 +424,14 @@ export async function deleteProjectFromFirestore(projectId: string): Promise<voi
     const filesSnap = await getDocs(
       query(collection(db, 'projects', projectId, 'files'), where('ownerId', '==', user.uid)),
     );
-    const batch = writeBatch(db);
-    for (const fileDoc of filesSnap.docs) {
-      batch.delete(fileDoc.ref);
-    }
-    batch.delete(doc(db, 'projects', projectId));
-    await batch.commit();
+    // Delete all subcollection files first, then delete the parent project document LAST
+    // so Firestore Master Gate exists(/projects/{projectId}) remains valid across every batch chunk.
+    const ops: BatchWriteOp[] = filesSnap.docs.map((fileDoc) => ({
+      type: 'delete',
+      ref: fileDoc.ref,
+    }));
+    ops.push({ type: 'delete', ref: doc(db, 'projects', projectId) });
+    await commitChunkedBatchOps(ops);
   } catch (error) {
     if (isOfflineFirestoreError(error)) {
       return;
@@ -430,14 +462,14 @@ export async function saveDeploymentToFirestore(params: {
         ownerId: user.uid,
         projectId: params.projectId,
         title: params.title.slice(0, 120),
-        htmlBundle: params.htmlBundle.slice(0, 500000),
+        htmlBundle: params.htmlBundle.slice(0, 900000),
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
     } else {
       await updateDoc(ref, {
         title: params.title.slice(0, 120),
-        htmlBundle: params.htmlBundle.slice(0, 500000),
+        htmlBundle: params.htmlBundle.slice(0, 900000),
         updatedAt: serverTimestamp(),
       });
     }

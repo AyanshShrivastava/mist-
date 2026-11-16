@@ -7,12 +7,45 @@ export interface ProjectFile {
   content: string;
 }
 
+export type WebSearchProviderId = 'brave_llm_context' | 'brave_web' | 'custom_json';
+export type WebSearchMode = 'auto' | 'on' | 'off';
+
+export interface WebSearchConfig {
+  provider: WebSearchProviderId;
+  name?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  sessionOnlyKey?: boolean;
+  maxResults?: number;
+}
+
+export interface WebSearchSource {
+  id: string;
+  title: string;
+  url: string;
+  publishedDate?: string;
+  snippet: string;
+  hostname?: string;
+}
+
+export interface WebSearchOutcome {
+  status: 'performed' | 'skipped' | 'no_results' | 'failed' | 'cancelled';
+  queries: string[];
+  sources: WebSearchSource[];
+  citedIds?: string[];
+  warning?: string;
+  error?: string;
+  searchedAt?: string;
+  providerName?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: string;
   changedFiles?: string[];
+  searchOutcome?: WebSearchOutcome;
 }
 
 export interface MistProject {
@@ -32,8 +65,26 @@ export interface MistProject {
 
 export type AiProviderId = 'custom' | 'openrouter' | 'groq' | 'gemini';
 export type PrimaryProviderId = 'custom';
-export type ModelBilling = 'free' | 'paid';
+export type ModelBilling = 'free' | 'paid' | 'unknown' | 'provider_billed';
+export type ModelLifecycleStatus = 'active' | 'preview' | 'deprecated' | 'retired' | 'unverified';
+export type CatalogSource = 'live' | 'cached' | 'preset';
 export type AppAiMode = 'on_request' | 'always' | 'off';
+
+export interface ModelCapabilities {
+  textGeneration: boolean;
+  jsonOutput: boolean | 'unknown';
+  streaming: boolean | 'unknown';
+  imageInput: boolean | 'unknown';
+  toolCalling: boolean | 'unknown';
+}
+
+export interface ModelVerificationResult {
+  gatewayBaseUrl: string;
+  model: string;
+  verified: boolean;
+  testedAt: string;
+  capabilities?: Partial<ModelCapabilities>;
+}
 
 export interface AiProviderConfig {
   provider: AiProviderId;
@@ -50,6 +101,10 @@ export interface AiStreamProgress {
   completedFiles: string[];
   charsReceived: number;
   startedAt: number;
+  searchState?: 'idle' | 'searching' | 'done' | 'failed';
+  searchQueries?: string[];
+  searchSources?: WebSearchSource[];
+  searchError?: string;
 }
 
 export interface ProjectSyncRecord {
@@ -107,4 +162,5 @@ export interface StudioSettings {
   defaultViewport: ViewportSize;
   enableAppAi: boolean;
   appAiMode: AppAiMode;
+  webSearchMode?: WebSearchMode;
 }

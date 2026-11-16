@@ -65,6 +65,11 @@
           "enum": ["on_request", "always", "off"],
           "description": "Controls when generated websites include live /api/app-ai features"
         },
+        "webSearchMode": {
+          "type": "string",
+          "enum": ["auto", "on", "off"],
+          "description": "Default Web Search behavior (auto, on, or off); never stores search API keys"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -208,7 +213,7 @@
         "htmlBundle": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 500000
+          "maxLength": 900000
         },
         "createdAt": {
           "type": "string",
