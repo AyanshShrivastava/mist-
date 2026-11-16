@@ -65,7 +65,7 @@ export default function CodeEditor({
         </div>
 
         <div className="flex items-center gap-2 pl-2 shrink-0">
-          <span className="text-[11px] font-mono text-zinc-500 tabular-nums">
+          <span className="hidden sm:inline text-[11px] font-mono text-zinc-500 tabular-nums">
             {lines.length} lines
           </span>
           <button
@@ -92,7 +92,7 @@ export default function CodeEditor({
       <div className="relative flex flex-1 overflow-auto mist-scrollbar">
         <div
           aria-hidden="true"
-          className="select-none border-r border-zinc-800/80 bg-[#0F0F12] px-3 py-4 text-right font-mono text-xs leading-6 text-zinc-600 tabular-nums"
+          className="select-none border-r border-zinc-800/80 bg-[#0F0F12] px-3 pt-4 pb-16 text-right font-mono text-xs leading-6 text-zinc-600 tabular-nums"
         >
           {lines.map((_, i) => (
             <div key={i}>{i + 1}</div>
@@ -103,7 +103,7 @@ export default function CodeEditor({
           spellCheck={false}
           value={activeFile.content}
           onChange={(e) => onChangeFileContent(activeFile.path, e.target.value)}
-          className="flex-1 resize-none bg-transparent p-4 font-mono text-xs leading-6 text-zinc-100 focus:outline-none whitespace-pre overflow-x-auto"
+          className="flex-1 resize-none bg-transparent p-4 pb-16 font-mono text-xs leading-6 text-zinc-100 focus:outline-none whitespace-pre overflow-x-auto"
         />
       </div>
     </div>

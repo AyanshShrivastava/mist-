@@ -11,6 +11,7 @@ export interface WebSearchPreset {
   baseUrl: string;
   placeholder: string;
   description: string;
+  requiresApiKey?: boolean;
   portalUrl?: string;
   portalLabel?: string;
   steps?: string[];
@@ -18,12 +19,29 @@ export interface WebSearchPreset {
 
 export const WEB_SEARCH_PRESETS: WebSearchPreset[] = [
   {
+    id: 'duckduckgo',
+    name: 'DuckDuckGo (Free · No Key)',
+    baseUrl: 'https://html.duckduckgo.com/html/',
+    placeholder: 'No API key required',
+    requiresApiKey: false,
+    description:
+      'Free web search powered by DuckDuckGo — works out of the box with no API key or account. Queries DuckDuckGo HTML search with automatic Instant Answer fallback.',
+    portalUrl: 'https://duckduckgo.com',
+    portalLabel: 'duckduckgo.com',
+    steps: [
+      'Select DuckDuckGo (Free · No Key) — no API key or signup is required.',
+      'Set Search Web to Auto or On on the prompt bar or editor refinement bar.',
+      'Optional: switch to Brave Search if you prefer an authenticated API key quota.',
+    ],
+  },
+  {
     id: 'brave_llm_context',
     name: 'Brave Search (LLM Context)',
     baseUrl: 'https://api.search.brave.com/res/v1/llm/context',
     placeholder: 'BSA...',
+    requiresApiKey: true,
     description:
-      'Purpose-built for AI agents — returns ranked web sources and pre-extracted page chunks with real URLs and dates.',
+      'Optional BYOK API key — returns ranked web sources and pre-extracted page chunks with real URLs and dates.',
     portalUrl: 'https://api-dashboard.search.brave.com',
     portalLabel: 'api-dashboard.search.brave.com',
     steps: [
@@ -37,8 +55,9 @@ export const WEB_SEARCH_PRESETS: WebSearchPreset[] = [
     name: 'Brave Web Search',
     baseUrl: 'https://api.search.brave.com/res/v1/web/search',
     placeholder: 'BSA...',
+    requiresApiKey: true,
     description:
-      'Standard Brave Web Search REST endpoint returning web results, descriptions, extra snippets, and page dates.',
+      'Optional BYOK Brave Web Search REST endpoint returning web results, descriptions, extra snippets, and page dates.',
     portalUrl: 'https://api-dashboard.search.brave.com',
     portalLabel: 'api-dashboard.search.brave.com',
     steps: [
@@ -51,15 +70,16 @@ export const WEB_SEARCH_PRESETS: WebSearchPreset[] = [
     name: 'Custom Search Endpoint',
     baseUrl: '',
     placeholder: 'Bearer token or API key...',
+    requiresApiKey: true,
     description:
       'Any HTTPS JSON search proxy accepting POST { query, count } and returning { results: [{ title, url, snippet, publishedDate }] }.',
   },
 ];
 
 export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
-  provider: 'brave_llm_context',
-  name: 'Brave Search (LLM Context)',
-  baseUrl: 'https://api.search.brave.com/res/v1/llm/context',
+  provider: 'duckduckgo',
+  name: 'DuckDuckGo (Free · No Key)',
+  baseUrl: 'https://html.duckduckgo.com/html/',
   apiKey: '',
   sessionOnlyKey: false,
   maxResults: 5,
@@ -69,9 +89,12 @@ export function normalizeWebSearchConfig(
   raw?: Partial<WebSearchConfig> | null,
 ): WebSearchConfig {
   const provider: WebSearchProviderId =
-    raw?.provider === 'brave_web' || raw?.provider === 'custom_json'
+    raw?.provider === 'brave_llm_context' ||
+    raw?.provider === 'brave_web' ||
+    raw?.provider === 'custom_json' ||
+    raw?.provider === 'duckduckgo'
       ? raw.provider
-      : 'brave_llm_context';
+      : 'duckduckgo';
   const preset =
     WEB_SEARCH_PRESETS.find((p) => p.id === provider) || WEB_SEARCH_PRESETS[0];
 
@@ -94,6 +117,15 @@ export function normalizeWebSearchConfig(
     sessionOnlyKey: Boolean(raw?.sessionOnlyKey),
     maxResults,
   };
+}
+
+export function webSearchConfigReady(raw?: Partial<WebSearchConfig> | null): boolean {
+  const normalized = normalizeWebSearchConfig(raw);
+  const preset = WEB_SEARCH_PRESETS.find((p) => p.id === normalized.provider);
+  if (preset && preset.requiresApiKey === false) {
+    return Boolean(normalized.baseUrl?.trim());
+  }
+  return Boolean(normalized.apiKey?.trim());
 }
 
 /**

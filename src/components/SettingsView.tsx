@@ -317,7 +317,8 @@ export default function SettingsView({
 
   const handleTestWebSearch = async () => {
     const draft = buildSearchDraft();
-    if (!draft.apiKey?.trim()) {
+    const requiresKey = activeSearchPreset.requiresApiKey !== false;
+    if (requiresKey && !draft.apiKey?.trim()) {
       setSearchTestResult({
         ok: false,
         message: 'Enter your Web Search API key before testing.',
@@ -869,10 +870,10 @@ export default function SettingsView({
                     id="settings-web-search-heading"
                     className="font-display text-base font-semibold text-zinc-950 dark:text-white"
                   >
-                    Web Search (Provider-Independent BYOK)
+                    Web Search (Free DuckDuckGo + Optional BYOK)
                   </h2>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    Retrieves verified live web results and citations for every connected AI model (OpenRouter, Groq, Gemini, NVIDIA, OpenAI, or Custom). Keys stay strictly on Mist&apos;s backend and are never exposed to generated websites or preview iframes.
+                    Retrieves live web results and citations for every connected AI model (OpenRouter, Groq, Gemini, NVIDIA, OpenAI, or Custom). DuckDuckGo works free with zero API keys, or switch to Brave Search / Custom Endpoint with your own key.
                   </p>
                 </div>
               </div>
@@ -882,7 +883,7 @@ export default function SettingsView({
                   <p className="mb-1.5 font-medium text-zinc-700 dark:text-zinc-300">
                     Search Provider
                   </p>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {WEB_SEARCH_PRESETS.map((preset) => (
                       <button
                         key={preset.id}
@@ -916,7 +917,7 @@ export default function SettingsView({
                       type="text"
                       value={searchName}
                       onChange={(e) => setSearchName(e.target.value)}
-                      placeholder="Brave Search (LLM Context)"
+                      placeholder="DuckDuckGo (Free · No Key)"
                       className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
                     />
                   </div>
@@ -936,57 +937,64 @@ export default function SettingsView({
                         setSearchBaseUrl(e.target.value);
                         setSearchTestResult(null);
                       }}
-                      placeholder="https://api.search.brave.com/res/v1/llm/context"
+                      placeholder="https://html.duckduckgo.com/html/"
                       className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
                     />
                   </div>
                 </div>
 
-                <div>
-                  <label
-                    htmlFor="settings-search-key"
-                    className="block font-medium text-zinc-700 dark:text-zinc-300"
-                  >
-                    <span className="inline-flex items-center gap-1.5">
-                      <KeyRound className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
-                      <span>{searchName.trim() || activeSearchPreset.name} API Key</span>
-                    </span>
-                  </label>
-                  <div className="relative mt-1.5">
-                    <input
-                      id="settings-search-key"
-                      type={showSearchKey ? 'text' : 'password'}
-                      value={searchApiKey}
-                      onChange={(e) => {
-                        setSearchApiKey(e.target.value);
-                        setSearchTestResult(null);
-                      }}
-                      placeholder={activeSearchPreset.placeholder}
-                      className="w-full rounded-xl border border-zinc-200 bg-white pl-3 pr-10 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
-                    />
-                    <button
-                      type="button"
-                      aria-label={showSearchKey ? 'Hide search API key' : 'Show search API key'}
-                      onClick={() => setShowSearchKey((v) => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
-                    >
-                      {showSearchKey ? (
-                        <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
-                      ) : (
-                        <Eye className="h-3.5 w-3.5" aria-hidden="true" />
-                      )}
-                    </button>
+                {activeSearchPreset.requiresApiKey === false ? (
+                  <div className="flex items-center gap-2 rounded-xl border border-emerald-200/90 bg-emerald-50/70 px-3 py-2.5 text-[11px] text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200">
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                    <span>No API key required — DuckDuckGo queries run directly from Mist&apos;s backend.</span>
                   </div>
-                  <label className="mt-2 flex items-center gap-2 text-[11px] text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={searchSessionOnlyKey}
-                      onChange={(e) => setSearchSessionOnlyKey(e.target.checked)}
-                      className="h-3.5 w-3.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-900"
-                    />
-                    <span>Keep search API key in memory only (session-only; never saved to storage)</span>
-                  </label>
-                </div>
+                ) : (
+                  <div>
+                    <label
+                      htmlFor="settings-search-key"
+                      className="block font-medium text-zinc-700 dark:text-zinc-300"
+                    >
+                      <span className="inline-flex items-center gap-1.5">
+                        <KeyRound className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
+                        <span>{searchName.trim() || activeSearchPreset.name} API Key</span>
+                      </span>
+                    </label>
+                    <div className="relative mt-1.5">
+                      <input
+                        id="settings-search-key"
+                        type={showSearchKey ? 'text' : 'password'}
+                        value={searchApiKey}
+                        onChange={(e) => {
+                          setSearchApiKey(e.target.value);
+                          setSearchTestResult(null);
+                        }}
+                        placeholder={activeSearchPreset.placeholder}
+                        className="w-full rounded-xl border border-zinc-200 bg-white pl-3 pr-10 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-white"
+                      />
+                      <button
+                        type="button"
+                        aria-label={showSearchKey ? 'Hide search API key' : 'Show search API key'}
+                        onClick={() => setShowSearchKey((v) => !v)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
+                      >
+                        {showSearchKey ? (
+                          <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+                        ) : (
+                          <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+                        )}
+                      </button>
+                    </div>
+                    <label className="mt-2 flex items-center gap-2 text-[11px] text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={searchSessionOnlyKey}
+                        onChange={(e) => setSearchSessionOnlyKey(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-900"
+                      />
+                      <span>Keep search API key in memory only (session-only; never saved to storage)</span>
+                    </label>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
@@ -1079,7 +1087,11 @@ export default function SettingsView({
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-2 border-t border-zinc-200/80 dark:border-zinc-800">
                   <button
                     type="button"
-                    disabled={isTestingSearch || !searchApiKey.trim() || !searchBaseUrl.trim()}
+                    disabled={
+                      isTestingSearch ||
+                      !searchBaseUrl.trim() ||
+                      (activeSearchPreset.requiresApiKey !== false && !searchApiKey.trim())
+                    }
                     onClick={() => void handleTestWebSearch()}
                     className="inline-flex w-full sm:w-auto justify-center min-h-[44px] sm:min-h-[40px] items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-3.5 py-2 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                   >

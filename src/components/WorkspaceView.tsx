@@ -156,12 +156,8 @@ export default function WorkspaceView({
   const [showNewFileInput, setShowNewFileInput] = useState(false);
   const [newFileError, setNewFileError] = useState<string | null>(null);
   const [titleSavedToast, setTitleSavedToast] = useState(false);
-  const [mobilePane, setMobilePane] = useState<'preview' | 'ai' | 'visual' | 'code'>(
-    defaultViewMode === 'visual'
-      ? 'visual'
-      : defaultViewMode === 'code'
-        ? 'code'
-        : 'preview',
+  const [activePane, setActivePane] = useState<'chat' | 'preview'>(() =>
+    typeof window !== 'undefined' && window.innerWidth < 1024 ? 'preview' : 'chat',
   );
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
@@ -284,7 +280,7 @@ export default function WorkspaceView({
           typeof p.styles === 'object'
         ) {
           setSelectedElement(p as SelectedVisualElement);
-          if (window.innerWidth < 768) {
+          if (window.innerWidth < 1024) {
             setMobileInspectorOpen(true);
           }
         }
@@ -400,7 +396,7 @@ export default function WorkspaceView({
 
   useEffect(() => {
     syncBridgeToIframe();
-  }, [viewMode, mobilePane, hasAppAi]);
+  }, [viewMode, activePane, hasAppAi]);
 
   const handleIframeLoad = () => {
     syncBridgeToIframe();
@@ -441,6 +437,9 @@ export default function WorkspaceView({
     setNewFilePath('');
     setShowNewFileInput(false);
     setViewMode((prev) => (prev === 'preview' ? 'code' : prev));
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+      setActivePane('preview');
+    }
   };
 
   const iframeWidthClass =
@@ -450,17 +449,10 @@ export default function WorkspaceView({
         ? 'w-[768px]'
         : 'w-full';
 
-  const handleSelectMobilePane = (pane: 'preview' | 'ai' | 'visual' | 'code') => {
-    setMobilePane(pane);
-    if (pane === 'preview') setViewMode('preview');
-    if (pane === 'visual') setViewMode('visual');
-    if (pane === 'code') setViewMode('code');
-  };
-
   return (
     <div className="flex h-[100dvh] w-full flex-col overflow-hidden bg-[#FAFAFA] text-zinc-950 dark:bg-[#09090B] dark:text-zinc-100">
-      {/* Compact Mobile Top App Bar (< md) */}
-      <header className="flex md:hidden h-13 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white/95 px-2.5 backdrop-blur-md dark:border-zinc-800 dark:bg-[#0F0F12]/95">
+      {/* Compact Top App Bar (< lg: mobile & tablet) */}
+      <header className="flex lg:hidden h-13 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white/95 px-2.5 backdrop-blur-md dark:border-zinc-800 dark:bg-[#0F0F12]/95">
         <button
           type="button"
           onClick={onBackHome}
@@ -499,8 +491,8 @@ export default function WorkspaceView({
         </div>
       </header>
 
-      {/* Default Desktop Studio Top Bar (>= md) */}
-      <header className="hidden md:flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-4 dark:border-zinc-800 dark:bg-[#0F0F12]">
+      {/* Desktop Studio Top Bar (>= lg) */}
+      <header className="hidden lg:flex h-14 shrink-0 items-center justify-between gap-2 xl:gap-3 border-b border-zinc-200 bg-white px-3 xl:px-4 dark:border-zinc-800 dark:bg-[#0F0F12]">
         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
           <button
             type="button"
@@ -524,7 +516,7 @@ export default function WorkspaceView({
               setTitleSavedToast(true);
               setTimeout(() => setTitleSavedToast(false), 1200);
             }}
-            className="min-w-[72px] max-w-[190px] flex-1 truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 font-display text-xs sm:text-sm font-semibold text-zinc-950 hover:border-zinc-200 focus:border-blue-500 focus:bg-white focus:outline-none dark:text-white dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
+            className="min-w-[72px] max-w-[140px] xl:max-w-[190px] flex-1 truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 font-display text-xs xl:text-sm font-semibold text-zinc-950 hover:border-zinc-200 focus:border-blue-500 focus:bg-white focus:outline-none dark:text-white dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
           />
 
           {titleSavedToast && (
@@ -556,7 +548,9 @@ export default function WorkspaceView({
               type="button"
               onClick={() => {
                 setViewMode(id);
-                if (id !== 'split') setMobilePane(id);
+                if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                  setActivePane('preview');
+                }
               }}
               className={`inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 viewMode === id
@@ -602,20 +596,20 @@ export default function WorkspaceView({
             type="button"
             onClick={onOpenVoiceChat}
             aria-label="Open voice refinement studio"
-            className="hidden sm:inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2 xl:px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Mic className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-            <span className="hidden lg:inline">Voice</span>
+            <span className="hidden xl:inline">Voice</span>
           </button>
 
           <button
             type="button"
             onClick={onOpenProviders}
             aria-label="Configure AI models"
-            className="hidden md:inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Cpu className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-            <span>{shortProviderLabel}</span>
+            <span className="max-w-[90px] truncate">{shortProviderLabel}</span>
             {currentModelMeta && (
               <span
                 className={`rounded px-1 py-0.2 text-[10px] font-semibold ${
@@ -637,7 +631,7 @@ export default function WorkspaceView({
             type="button"
             onClick={onDuplicateProject}
             aria-label="Duplicate project"
-            className="hidden lg:inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="hidden xl:inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Copy className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Duplicate</span>
@@ -647,16 +641,16 @@ export default function WorkspaceView({
             type="button"
             onClick={onExportZip}
             aria-label="Export ZIP"
-            className="inline-flex h-9 sm:h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 sm:px-3 text-xs font-medium text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2 xl:px-3 text-xs font-medium text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Download className="h-3.5 w-3.5" aria-hidden="true" />
-            <span className="hidden sm:inline">Export ZIP</span>
+            <span className="hidden xl:inline">Export ZIP</span>
           </button>
 
           <button
             type="button"
             onClick={onOpenDeploy}
-            className="inline-flex h-9 sm:h-8 items-center gap-1.5 rounded-lg mist-primary-gradient px-2.5 sm:px-3.5 text-xs font-medium text-white shadow-sm transition-all whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg mist-primary-gradient px-3 text-xs font-medium text-white shadow-sm transition-all whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Globe className="h-3.5 w-3.5" aria-hidden="true" />
             <span>{project.isPublished ? 'Published' : 'Deploy'}</span>
@@ -666,7 +660,7 @@ export default function WorkspaceView({
             type="button"
             onClick={onOpenSettings}
             aria-label="Open Studio Settings"
-            className="hidden sm:inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer"
           >
             <Settings className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
@@ -675,7 +669,7 @@ export default function WorkspaceView({
             type="button"
             onClick={onOpenAccount}
             aria-label="Account profile"
-            className="hidden sm:inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer"
           >
             <UserIcon className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
@@ -683,12 +677,14 @@ export default function WorkspaceView({
       </header>
 
       {/* Main Body */}
-      <div className="relative flex flex-1 min-h-0 overflow-hidden pb-16 md:pb-0">
-        {/* Left Sidebar */}
+      <div className="relative flex flex-1 min-h-0 overflow-hidden">
+        {/* Left Sidebar (Chat & Files) */}
         <aside
           className={`${
-            mobilePane === 'ai' ? 'flex w-full' : 'hidden'
-          } md:flex md:w-80 shrink-0 flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#0F0F12]`}
+            activePane === 'chat'
+              ? 'flex w-full lg:w-[310px] xl:w-[350px]'
+              : 'hidden'
+          } shrink-0 flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#0F0F12]`}
         >
           <div className="flex border-b border-zinc-200 dark:border-zinc-800">
             <button
@@ -863,7 +859,7 @@ export default function WorkspaceView({
 
               <form
                 onSubmit={handleRefineSubmit}
-                className="border-t border-zinc-200 p-3 dark:border-zinc-800"
+                className="border-t border-zinc-200 p-3 pb-16 dark:border-zinc-800"
               >
                 {selectedElement && (
                   <div className="mb-2 flex items-center justify-between rounded-lg bg-blue-50 px-2.5 py-1 text-[11px] text-blue-700 dark:bg-blue-950/60 dark:text-blue-300">
@@ -1018,7 +1014,7 @@ export default function WorkspaceView({
                 </form>
               )}
 
-              <div className="flex-1 overflow-y-auto p-2 space-y-0.5 mist-scrollbar">
+              <div className="flex-1 overflow-y-auto p-2 pb-16 space-y-0.5 mist-scrollbar">
                 {project.files.map((file) => {
                   const isActive = file.path === activeFilePath;
                   const canDelete = file.path !== 'src/App.tsx' && file.path !== 'src/index.css';
@@ -1035,9 +1031,11 @@ export default function WorkspaceView({
                         type="button"
                         onClick={() => {
                           setActiveFilePath(file.path);
-                          setMobilePane('code');
                           if (viewMode === 'preview' || viewMode === 'visual') {
                             setViewMode('code');
+                          }
+                          if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                            setActivePane('preview');
                           }
                         }}
                         className="flex min-w-0 flex-1 items-center gap-2 text-left cursor-pointer"
@@ -1050,7 +1048,7 @@ export default function WorkspaceView({
                           type="button"
                           aria-label={`Delete ${file.path}`}
                           onClick={() => onDeleteFile(file.path)}
-                          className="opacity-100 md:opacity-0 md:group-hover:opacity-100 p-1 text-zinc-400 hover:text-red-600 transition-opacity cursor-pointer"
+                          className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 p-1 text-zinc-400 hover:text-red-600 transition-opacity cursor-pointer"
                         >
                           <Trash2 className="h-3 w-3" aria-hidden="true" />
                         </button>
@@ -1066,16 +1064,74 @@ export default function WorkspaceView({
         {/* Center Canvas: Preview, Visual, Code, or Split */}
         <main
           className={`${
-            mobilePane === 'ai' ? 'hidden md:flex' : 'flex'
+            activePane === 'chat' ? 'hidden lg:flex' : 'flex'
           } flex-1 min-w-0 flex-col bg-zinc-100 dark:bg-zinc-950`}
         >
+          {/* Compact Mode Sub-Bar (< lg: mobile & tablet) */}
+          <div className="flex lg:hidden shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white/95 px-2.5 py-1.5 dark:border-zinc-800 dark:bg-[#0F0F12]/95">
+            <div
+              role="tablist"
+              aria-label="Canvas mode"
+              className="inline-flex items-center gap-0.5 rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-900"
+            >
+              {(
+                [
+                  { id: 'preview', label: 'Preview', icon: Eye },
+                  { id: 'visual', label: 'Visual', icon: MousePointerClick },
+                  { id: 'code', label: 'Code', icon: Code2 },
+                ] as const
+              ).map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  role="tab"
+                  aria-selected={viewMode === id}
+                  type="button"
+                  onClick={() => setViewMode(id)}
+                  className={`inline-flex h-7 items-center gap-1 rounded-md px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    viewMode === id
+                      ? 'bg-white text-zinc-950 shadow-xs dark:bg-zinc-800 dark:text-white'
+                      : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white'
+                  }`}
+                >
+                  <Icon className="h-3 w-3" aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {viewMode === 'visual' && (
+                <button
+                  type="button"
+                  onClick={() => setMobileInspectorOpen(true)}
+                  className="inline-flex h-7 items-center gap-1 rounded-md border border-zinc-200 bg-white px-2 text-xs font-medium text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <SlidersHorizontal className="h-3 w-3" aria-hidden="true" />
+                  <span>Inspector</span>
+                </button>
+              )}
+              {viewMode !== 'code' && (
+                <button
+                  type="button"
+                  onClick={onRebundle}
+                  aria-label="Rebuild live preview"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 cursor-pointer"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${isBundling ? 'animate-spin' : ''}`} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          </div>
+
           {viewMode === 'code' ? (
-            <CodeEditor
-              files={project.files}
-              activeFilePath={activeFilePath}
-              onSelectFile={setActiveFilePath}
-              onChangeFileContent={onChangeFileContent}
-            />
+            <div className="flex flex-1 flex-col min-h-0">
+              <CodeEditor
+                files={project.files}
+                activeFilePath={activeFilePath}
+                onSelectFile={setActiveFilePath}
+                onChangeFileContent={onChangeFileContent}
+              />
+            </div>
           ) : viewMode === 'split' ? (
             <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-zinc-200 dark:divide-zinc-800">
               <div className="min-h-0 overflow-hidden">
@@ -1086,7 +1142,7 @@ export default function WorkspaceView({
                   onChangeFileContent={onChangeFileContent}
                 />
               </div>
-              <div className="flex flex-col min-h-0 bg-zinc-100 p-3 dark:bg-zinc-950">
+              <div className="flex flex-col min-h-0 bg-zinc-100 p-3 pb-16 dark:bg-zinc-950">
                 <div className="flex items-center justify-between pb-2 text-xs text-zinc-500">
                   <span>Live Preview</span>
                   <button
@@ -1111,13 +1167,13 @@ export default function WorkspaceView({
               </div>
             </div>
           ) : (
-            <div className="flex flex-1 flex-col min-h-0 p-2.5 sm:p-4">
+            <div className="flex flex-1 flex-col min-h-0 p-2.5 pb-16 sm:p-4 sm:pb-16">
               {/* Preview Status Bar */}
-              <div className="mb-2.5 flex items-center justify-between gap-3 text-xs">
+              <div className="mb-2 hidden lg:flex items-center justify-between gap-3 text-xs">
                 <div className="flex min-w-0 items-center gap-2 text-zinc-500 dark:text-zinc-400">
                   <span className="truncate font-mono text-[11px]">
                     {viewMode === 'visual'
-                      ? 'Visual Editor active — tap any element to edit'
+                      ? 'Visual Editor active — click any element to edit'
                       : `Live Preview · ${viewport}`}
                   </span>
                   {bundleError && (
@@ -1127,22 +1183,12 @@ export default function WorkspaceView({
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  {viewMode === 'visual' && (
-                    <button
-                      type="button"
-                      onClick={() => setMobileInspectorOpen(true)}
-                      className="inline-flex md:hidden items-center gap-1 rounded border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer"
-                    >
-                      <SlidersHorizontal className="h-3 w-3" aria-hidden="true" />
-                      <span>Inspector</span>
-                    </button>
-                  )}
                   {project.isPublished && project.publishedSlug && (
                     <a
                       href={`/p/${project.publishedSlug}`}
                       target="_blank"
                       rel="noreferrer"
-                      className="hidden sm:inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline dark:text-emerald-400"
+                      className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline dark:text-emerald-400"
                     >
                       <Check className="h-3 w-3" aria-hidden="true" />
                       <span>/p/{project.publishedSlug}</span>
@@ -1155,7 +1201,7 @@ export default function WorkspaceView({
                     className="inline-flex items-center gap-1 rounded border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 cursor-pointer"
                   >
                     <RefreshCw className={`h-3 w-3 ${isBundling ? 'animate-spin' : ''}`} aria-hidden="true" />
-                    <span className="hidden sm:inline">Rebuild</span>
+                    <span>Rebuild</span>
                   </button>
                 </div>
               </div>
@@ -1187,7 +1233,7 @@ export default function WorkspaceView({
 
         {/* Desktop Right Visual Inspector Rail */}
         {viewMode === 'visual' && (
-          <aside className="hidden md:block w-76 shrink-0 border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#0F0F12]">
+          <aside className="hidden lg:block w-72 xl:w-76 shrink-0 border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-[#0F0F12]">
             <VisualInspector
               selectedElement={selectedElement}
               onLivePreviewPatch={handleLivePreviewPatch}
@@ -1195,20 +1241,21 @@ export default function WorkspaceView({
               onAskAiAboutElement={(el) => {
                 setSelectedElement(el);
                 setLeftTab('ai');
+                setActivePane('chat');
                 setRefineInput(`Update the <${el.tagName}> "${el.textContent.slice(0, 40)}" to `);
               }}
             />
           </aside>
         )}
 
-        {/* Mobile Visual Inspector Bottom Sheet */}
+        {/* Mobile/Tablet Visual Inspector Bottom Sheet (< lg) */}
         <AnimatePresence>
           {viewMode === 'visual' && mobileInspectorOpen && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 z-40 flex flex-col justify-end bg-black/50 md:hidden"
+              className="fixed inset-0 z-40 flex flex-col justify-end bg-black/50 lg:hidden"
             >
               <motion.div
                 initial={{ y: '100%' }}
@@ -1238,7 +1285,7 @@ export default function WorkspaceView({
                     onAskAiAboutElement={(el) => {
                       setSelectedElement(el);
                       setMobileInspectorOpen(false);
-                      setMobilePane('ai');
+                      setActivePane('chat');
                       setLeftTab('ai');
                       setRefineInput(`Update the <${el.tagName}> "${el.textContent.slice(0, 40)}" to `);
                     }}
@@ -1249,7 +1296,7 @@ export default function WorkspaceView({
           )}
         </AnimatePresence>
 
-        {/* Mobile Actions Bottom Sheet (< md) */}
+        {/* Actions Bottom Sheet (< lg) */}
         <AnimatePresence>
           {mobileMoreOpen && (
             <motion.div
@@ -1257,7 +1304,7 @@ export default function WorkspaceView({
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setMobileMoreOpen(false)}
-              className="fixed inset-0 z-40 flex items-end bg-black/55 backdrop-blur-xs md:hidden"
+              className="fixed inset-0 z-40 flex items-end bg-black/55 backdrop-blur-xs lg:hidden"
             >
               <motion.div
                 initial={{ y: '100%' }}
@@ -1373,38 +1420,40 @@ export default function WorkspaceView({
         </AnimatePresence>
       </div>
 
-      {/* Fixed Mobile Bottom Tab Bar */}
-      <nav
-        aria-label="Mobile workspace navigation"
-        className="fixed bottom-0 inset-x-0 z-30 grid h-16 grid-cols-4 border-t border-zinc-200 bg-white/95 backdrop-blur-lg md:hidden dark:border-zinc-800 dark:bg-[#0F0F12]/95"
-      >
-        {(
-          [
-            { id: 'preview', label: 'Preview', icon: Eye },
-            { id: 'ai', label: 'AI & Files', icon: MessageSquare },
-            { id: 'visual', label: 'Visual', icon: MousePointerClick },
-            { id: 'code', label: 'Code', icon: Code2 },
-          ] as const
-        ).map(({ id, label, icon: Icon }) => {
-          const active = mobilePane === id;
-          return (
-            <button
-              key={id}
-              type="button"
-              onClick={() => handleSelectMobilePane(id)}
-              aria-current={active ? 'page' : undefined}
-              className={`flex min-h-[44px] flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer ${
-                active
-                  ? 'text-blue-600 dark:text-blue-400'
-                  : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200'
-              }`}
-            >
-              <Icon className="h-4.5 w-4.5" aria-hidden="true" />
-              <span>{label}</span>
-            </button>
-          );
-        })}
-      </nav>
+      {/* Compact Middle-Bottom Two-Button Switcher (Chat & Preview) across Desktop, Tablet & Mobile */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-3 z-30 flex justify-center px-4">
+        <nav
+          aria-label="Workspace pane switcher"
+          className="pointer-events-auto inline-flex items-center gap-1 rounded-xl border border-zinc-200/90 bg-white/95 p-1 shadow-lg shadow-zinc-950/10 backdrop-blur-md dark:border-zinc-700/80 dark:bg-[#141418]/95 dark:shadow-black/50"
+        >
+          <button
+            type="button"
+            onClick={() => setActivePane('chat')}
+            aria-pressed={activePane === 'chat'}
+            className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activePane === 'chat'
+                ? 'bg-zinc-900 text-white shadow-xs dark:bg-white dark:text-zinc-950'
+                : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800/80 dark:hover:text-white'
+            }`}
+          >
+            <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Chat</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActivePane('preview')}
+            aria-pressed={activePane === 'preview'}
+            className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activePane === 'preview'
+                ? 'bg-zinc-900 text-white shadow-xs dark:bg-white dark:text-zinc-950'
+                : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800/80 dark:hover:text-white'
+            }`}
+          >
+            <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Preview</span>
+          </button>
+        </nav>
+      </div>
     </div>
   );
 }

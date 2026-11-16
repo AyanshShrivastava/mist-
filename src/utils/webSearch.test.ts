@@ -7,12 +7,14 @@ import {
   sanitizeSearchText,
   sanitizeSearchUrl,
   validateAndExtractCitations,
+  webSearchConfigReady,
 } from '../data/webSearch';
 import {
   formatRetrievedSourcesForPrompt,
   formatSearchFailureForPrompt,
   MAX_SEARCH_REQUESTS_PER_INTERACTION,
   MAX_TOTAL_RETRIEVED_SOURCES,
+  parseDuckDuckGoHtml,
   WebSearchError,
   WebSearchService,
 } from './webSearchService';
@@ -290,4 +292,100 @@ test('formatRetrievedSourcesForPrompt, formatSearchFailureForPrompt, and redactS
   const norm = normalizeWebSearchConfig({ maxResults: 99, provider: 'brave_web' });
   assert.equal(norm.maxResults, 8);
   assert.equal(norm.provider, 'brave_web');
+
+  const defaultNorm = normalizeWebSearchConfig();
+  assert.equal(defaultNorm.provider, 'duckduckgo');
+  assert.equal(webSearchConfigReady({ provider: 'duckduckgo' }), true);
+  assert.equal(webSearchConfigReady({ provider: 'brave_llm_context', apiKey: '' }), false);
 });
+
+test('DuckDuckGo free adapter queries without API key, parses HTML redirects, falls back to Instant Answer on 202 challenge, and fails honestly if both are blocked/empty', async () => {
+  const sampleHtml = `
+    <div class="result results_links">
+      <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freact.dev%2Fblog%2F2024%2F12%2F05%2Freact-19&rut=1">React &amp; v19 Blog</a>
+      <a class="result__snippet">Official <b>React 19</b> release notes &amp; actions guide.</a>
+    </div>
+    <div class="result results_links">
+      <a class="result__a" href="https://duckduckgo.com/y.js?ad_domain=spam">Sponsored Ad</a>
+      <a class="result__snippet">Ad snippet</a>
+    </div>
+    <div class="result results_links">
+      <a class="result__a" href="https://vitejs.dev/guide/">Vite Guide</a>
+      <div class="result__snippet">Next generation frontend tooling.</div>
+    </div>
+  `;
+
+  const parsedHtml = parseDuckDuckGoHtml(sampleHtml);
+  assert.equal(parsedHtml.length, 2);
+  assert.equal(parsedHtml[0].url, 'https://react.dev/blog/2024/12/05/react-19');
+  assert.equal(parsedHtml[1].url, 'https://vitejs.dev/guide/');
+
+  const svc = new WebSearchService();
+
+  // 1. Zero-key DuckDuckGo HTML search succeeds cleanly
+  const htmlResult = await svc.search({
+    rawConfig: { provider: 'duckduckgo', apiKey: '' },
+    queries: ['React 19'],
+    fetchImpl: (async (input: RequestInfo | URL) => {
+      assert.ok(String(input).includes('html.duckduckgo.com'));
+      return new Response(sampleHtml, { status: 200, headers: { 'Content-Type': 'text/html' } });
+    }) as typeof fetch,
+    skipDnsLookup: true,
+  });
+  assert.equal(htmlResult.outcome.status, 'performed');
+  assert.equal(htmlResult.outcome.sources.length, 2);
+  assert.equal(htmlResult.outcome.sources[0].title, 'React & v19 Blog');
+  assert.equal(htmlResult.outcome.sources[0].url, 'https://react.dev/blog/2024/12/05/react-19');
+
+  // 2. Falls back to Instant Answer lowercase JSON when HTML returns 202 bot challenge
+  let calledUrls: string[] = [];
+  const iaFallback = await svc.search({
+    rawConfig: { provider: 'duckduckgo' },
+    queries: ['Tailwind CSS'],
+    fetchImpl: (async (input: RequestInfo | URL) => {
+      const u = String(input);
+      calledUrls.push(u);
+      if (u.includes('html.duckduckgo.com')) {
+        return new Response('<div class="anomaly-modal">Challenge</div>', {
+          status: 202,
+          headers: { 'Content-Type': 'text/html' },
+        });
+      }
+      assert.ok(u.includes('q=tailwind+css'), 'Instant Answer query must be lowercased');
+      return new Response(
+        JSON.stringify({
+          Heading: 'Tailwind CSS',
+          AbstractSource: 'Wikipedia',
+          AbstractURL: 'https://en.wikipedia.org/wiki/Tailwind_CSS',
+          AbstractText: 'Tailwind CSS is a utility-first CSS framework.',
+          Results: [{ FirstURL: 'https://tailwindcss.com', Text: 'Tailwind CSS - Official Site' }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch,
+    skipDnsLookup: true,
+  });
+  assert.equal(iaFallback.outcome.status, 'performed');
+  assert.equal(iaFallback.outcome.sources.length, 2);
+  assert.equal(iaFallback.outcome.sources[0].url, 'https://tailwindcss.com/');
+  assert.equal(iaFallback.outcome.sources[1].url, 'https://en.wikipedia.org/wiki/Tailwind_CSS');
+  assert.ok(calledUrls.some((u) => u.includes('api.duckduckgo.com')));
+
+  // 3. Throws explicit error when HTML returns 202 challenge AND Instant Answer is empty
+  await assert.rejects(
+    () =>
+      svc.search({
+        rawConfig: { provider: 'duckduckgo' },
+        queries: ['veryobscurequeryxyz'],
+        fetchImpl: (async (input: RequestInfo | URL) => {
+          if (String(input).includes('html.duckduckgo.com')) {
+            return new Response('anomaly-modal challenge', { status: 202 });
+          }
+          return new Response('', { status: 200 });
+        }) as typeof fetch,
+        skipDnsLookup: true,
+      }),
+    (err: unknown) => err instanceof WebSearchError && err.code === 'UPSTREAM_ERROR' && err.status === 503,
+  );
+});
+

@@ -852,3 +852,176 @@ test('POST /api/ai/generate/stream emits search_start, search_results, and compl
     await srv.close();
   }
 });
+
+test('POST /api/search returns 401 on invalid search key, handles no results, and enforces request timeouts', async () => {
+  let mode: 'invalid' | 'empty' | 'hang' = 'invalid';
+  const srv = await startTestServer({
+    searchFetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (mode === 'invalid') {
+        return new Response('Unauthorized key BSA_leaked_check', { status: 401 });
+      }
+      if (mode === 'empty') {
+        return new Response(JSON.stringify({ grounding: { generic: [] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          const e = new Error('Timeout aborted');
+          e.name = 'AbortError';
+          reject(e);
+        });
+      });
+    }) as typeof fetch,
+  });
+
+  try {
+    const invalidResp = await fetch(`${srv.baseUrl}/api/search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-a',
+      },
+      body: JSON.stringify({
+        query: 'test',
+        searchConfig: { provider: 'brave_llm_context', apiKey: 'BSA_bad_key_123456' },
+      }),
+    });
+    assert.equal(invalidResp.status, 401);
+    const invalidJson = (await invalidResp.json()) as { code: string; error: string };
+    assert.equal(invalidJson.code, 'INVALID_KEY');
+    assert.equal(invalidJson.error.includes('BSA_bad_key_123456'), false);
+
+    mode = 'empty';
+    const emptyResp = await fetch(`${srv.baseUrl}/api/search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-a',
+      },
+      body: JSON.stringify({
+        query: 'nonexistent topic xyz',
+        searchConfig: { provider: 'brave_llm_context', apiKey: 'BSA_valid_empty_123' },
+      }),
+    });
+    assert.equal(emptyResp.status, 200);
+    const emptyJson = (await emptyResp.json()) as { status: string; sources: unknown[] };
+    assert.equal(emptyJson.status, 'no_results');
+    assert.equal(emptyJson.sources.length, 0);
+
+    // Client cancellation / abort cleans up cleanly
+    mode = 'hang';
+    const cancelCtrl = new AbortController();
+    setTimeout(() => cancelCtrl.abort(), 50);
+    await assert.rejects(() =>
+      fetch(`${srv.baseUrl}/api/search`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer token-user-a',
+        },
+        signal: cancelCtrl.signal,
+        body: JSON.stringify({
+          query: 'slow query',
+          searchConfig: { provider: 'brave_llm_context', apiKey: 'BSA_valid_hang_123' },
+        }),
+      }),
+    );
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Default DuckDuckGo web search works with zero API keys on /api/search/test and /api/ai/generate', async () => {
+  const srv = await startTestServer({
+    searchFetchImpl: (async (input: RequestInfo | URL) => {
+      const u = String(input);
+      if (u.includes('html.duckduckgo.com')) {
+        return new Response(
+          `<div class="result">
+            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.typescriptlang.org%2F">TypeScript Official Docs</a>
+            <a class="result__snippet">TypeScript is JavaScript with syntax for types.</a>
+          </div>`,
+          { status: 200, headers: { 'Content-Type': 'text/html' } },
+        );
+      }
+      return new Response('', { status: 200 });
+    }) as typeof fetch,
+    aiFetchImpl: (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  projectName: 'DDG Grounded Site',
+                  description: 'Zero-key DuckDuckGo grounded site',
+                  summary: 'Built from DuckDuckGo result [S1].',
+                  files: [
+                    {
+                      path: 'src/App.tsx',
+                      language: 'tsx',
+                      content: 'export default function App() { return <main>DDG Ready</main>; }',
+                    },
+                    {
+                      path: 'src/index.css',
+                      language: 'css',
+                      content: '@import "tailwindcss";',
+                    },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch,
+  });
+
+  try {
+    const testResp = await fetch(`${srv.baseUrl}/api/search/test`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-a',
+      },
+      body: JSON.stringify({ searchConfig: { provider: 'duckduckgo' } }),
+    });
+    assert.equal(testResp.status, 200);
+    const testJson = (await testResp.json()) as { ok: boolean; resultCount: number };
+    assert.equal(testJson.ok, true);
+    assert.equal(testJson.resultCount, 1);
+
+    // Omitting searchConfig completely defaults to zero-key DuckDuckGo
+    const genResp = await fetch(`${srv.baseUrl}/api/ai/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-a',
+      },
+      body: JSON.stringify({
+        prompt: 'Build a TypeScript docs site using latest info',
+        searchMode: 'on',
+        providerConfig: {
+          provider: 'custom',
+          name: 'OpenRouter',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          model: 'openrouter/free',
+          apiKey: 'sk-or-test',
+        },
+      }),
+    });
+    assert.equal(genResp.status, 200);
+    const genJson = (await genResp.json()) as {
+      searchOutcome: { status: string; providerName?: string; citedIds: string[]; sources: Array<{ url: string }> };
+    };
+    assert.equal(genJson.searchOutcome.status, 'performed');
+    assert.equal(genJson.searchOutcome.providerName, 'DuckDuckGo (Free · No Key)');
+    assert.equal(genJson.searchOutcome.sources[0].url, 'https://www.typescriptlang.org/');
+    assert.deepEqual(genJson.searchOutcome.citedIds, ['S1']);
+  } finally {
+    await srv.close();
+  }
+});
+

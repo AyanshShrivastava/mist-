@@ -22,6 +22,7 @@ import {
 import {
   DEFAULT_WEB_SEARCH_CONFIG,
   normalizeWebSearchConfig,
+  webSearchConfigReady,
 } from './data/webSearch';
 import {
   applyVisualPatchToFiles,
@@ -1177,7 +1178,7 @@ export default function App() {
           defaultViewMode={studioSettings.defaultViewMode}
           defaultViewport={studioSettings.defaultViewport}
           webSearchMode={studioSettings.webSearchMode || 'auto'}
-          hasWebSearchKey={Boolean(webSearchConfig.apiKey?.trim())}
+          hasWebSearchKey={webSearchConfigReady(webSearchConfig)}
           modelIncident={modelIncident}
           bundledHtml={bundledHtml}
           bundleError={bundleError}
@@ -1260,7 +1261,7 @@ export default function App() {
           darkMode={darkMode}
           appAiMode={studioSettings.appAiMode}
           webSearchMode={studioSettings.webSearchMode || 'auto'}
-          hasWebSearchKey={Boolean(webSearchConfig.apiKey?.trim())}
+          hasWebSearchKey={webSearchConfigReady(webSearchConfig)}
           onChangeAppAiMode={(mode) =>
             handleUpdateSettings({ appAiMode: mode, enableAppAi: mode === 'always' })
           }

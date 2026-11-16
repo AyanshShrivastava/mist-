@@ -7,7 +7,7 @@ export interface ProjectFile {
   content: string;
 }
 
-export type WebSearchProviderId = 'brave_llm_context' | 'brave_web' | 'custom_json';
+export type WebSearchProviderId = 'duckduckgo' | 'brave_llm_context' | 'brave_web' | 'custom_json';
 export type WebSearchMode = 'auto' | 'on' | 'off';
 
 export interface WebSearchConfig {

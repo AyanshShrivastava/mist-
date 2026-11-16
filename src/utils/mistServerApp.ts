@@ -19,6 +19,7 @@ import {
 } from '../data/models';
 import {
   needsWebSearch,
+  normalizeWebSearchConfig,
   validateAndExtractCitations,
 } from '../data/webSearch';
 import { classifyModelError, type ModelHealthIncident } from './aiErrors';
@@ -1359,9 +1360,14 @@ Return JSON: { "content": "..." }`;
       });
 
       try {
+        const normalizedSearchCfg = normalizeWebSearchConfig(searchConfig);
+        const testQuery =
+          normalizedSearchCfg.provider === 'duckduckgo'
+            ? 'typescript'
+            : 'latest web standards specification';
         const { outcome } = await searchService.search({
-          rawConfig: searchConfig,
-          queries: ['latest web standards specification'],
+          rawConfig: normalizedSearchCfg,
+          queries: [testQuery],
           maxRequestsInTurn: 1,
           signal: abortController.signal,
           fetchImpl: searchFetchImpl,
