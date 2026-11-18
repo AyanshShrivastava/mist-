@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
+  Bell,
+  BellRing,
   CheckCircle2,
   Cpu,
   ExternalLink,
@@ -22,6 +24,7 @@ import {
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import type { User } from 'firebase/auth';
+import { notifyAnswerDone, subscribeToPush } from '../utils/pushNotifications';
 import type {
   AiProviderConfig,
   AppAiMode,
@@ -1423,6 +1426,70 @@ export default function SettingsView({
                     <option value="tablet">Tablet (768px)</option>
                     <option value="mobile">Mobile (390px)</option>
                   </select>
+                </div>
+
+                {/* Answer Done Notifications (VAPID) */}
+                <div className="pt-3.5 border-t border-zinc-200/80 dark:border-zinc-800 space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 font-medium text-zinc-900 dark:text-zinc-100">
+                        <Bell className="h-3.5 w-3.5 text-pink-500" aria-hidden="true" />
+                        <span>Notify when answer is done</span>
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                        Receive a browser alert ("Answer done! ✨") when generation finishes.
+                      </p>
+                    </div>
+
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={studioSettings.notifyOnAnswerDone !== false}
+                        onChange={async (e) => {
+                          const nextVal = e.target.checked;
+                          onUpdateSettings({ notifyOnAnswerDone: nextVal });
+                          if (nextVal && typeof window !== 'undefined' && 'Notification' in window) {
+                            if (Notification.permission === 'default') {
+                              const perm = await Notification.requestPermission();
+                              if (perm === 'granted') {
+                                const idToken = user ? await user.getIdToken().catch(() => undefined) : undefined;
+                                void subscribeToPush(idToken).catch(() => {});
+                              }
+                            }
+                          }
+                        }}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-zinc-300 peer-focus:outline-none rounded-full peer dark:bg-zinc-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-zinc-600 peer-checked:bg-pink-600"></div>
+                    </label>
+                  </div>
+
+                  {studioSettings.notifyOnAnswerDone !== false && (
+                    <div className="flex items-center justify-between gap-2 rounded-xl bg-zinc-100/70 px-3 py-2 dark:bg-zinc-900/60 text-[11px]">
+                      <span className="text-zinc-600 dark:text-zinc-400">
+                        {typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted'
+                          ? '✓ Push alerts active'
+                          : typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'denied'
+                            ? '⚠ Notifications blocked in browser'
+                            : 'Click test to verify'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (typeof window !== 'undefined' && 'Notification' in window) {
+                            if (Notification.permission !== 'granted') {
+                              await Notification.requestPermission();
+                            }
+                          }
+                          void notifyAnswerDone('Test Website');
+                        }}
+                        className="inline-flex items-center gap-1 text-pink-600 dark:text-pink-400 hover:underline font-medium cursor-pointer"
+                      >
+                        <BellRing className="h-3 w-3" aria-hidden="true" />
+                        <span>Test Notification</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </motion.section>

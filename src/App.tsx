@@ -35,6 +35,8 @@ import {
   sanitizeSlug,
   suggestShortSlug,
 } from './utils/projectOps';
+import { canUseDirectClient, executeDirectGenerate } from './utils/directClientAi';
+import { notifyAnswerDone } from './utils/pushNotifications';
 import {
   fetchUserEncryptedVault,
   fetchUserProfilePreferences,
@@ -75,6 +77,7 @@ const DEFAULT_STUDIO_SETTINGS: StudioSettings = {
   enableAppAi: false,
   appAiMode: 'on_request',
   webSearchMode: 'auto',
+  notifyOnAnswerDone: true,
 };
 
 function loadLocalProjects(): MistProject[] {
@@ -536,116 +539,156 @@ export default function App() {
       });
 
       try {
-        const idToken = await currentUser.getIdToken();
-        const resp = await fetch('/api/ai/generate/stream', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`,
-          },
-          signal: abortController.signal,
-          body: JSON.stringify({
-            prompt,
-            providerConfig: cfg,
-            enableAppAi: enableAppAiForBuild,
-            searchConfig: webSearchConfigRef.current,
-            searchMode: studioSettingsRef.current.webSearchMode || 'auto',
-          }),
-        });
-
-        if (!resp.ok) {
-          const errPayload = (await resp.json().catch(() => ({}))) as {
-            error?: string;
-            incident?: ModelHealthIncident;
-          };
-          const err = new Error(
-            errPayload.incident?.message ||
-              errPayload.error ||
-              `Generation failed (${resp.status}).`,
-          ) as Error & { incident?: ModelHealthIncident };
-          err.incident = errPayload.incident;
-          throw err;
-        }
-
-        const data = (await consumeAiSseStream(resp, (ev) => {
-          setAiStreamProgress((prev) => {
-            const base = prev || {
-              phase: 'Generating...',
-              completedFiles: [],
-              charsReceived: 0,
-              startedAt,
-            };
-            if (ev.type === 'search_start') {
-              return {
-                ...base,
-                phase: ev.phase || 'Searching live web sources...',
-                searchState: 'searching',
-                searchQueries: ev.queries ?? base.searchQueries,
-                searchError: undefined,
-              };
-            }
-            if (ev.type === 'search_results') {
-              return {
-                ...base,
-                searchState: 'done',
-                searchQueries: ev.queries ?? base.searchQueries,
-                searchSources: ev.sources ?? base.searchSources,
-                searchError: undefined,
-              };
-            }
-            if (ev.type === 'search_error') {
-              return {
-                ...base,
-                searchState: 'failed',
-                searchQueries: ev.queries ?? base.searchQueries,
-                searchError: ev.error || 'Web search failed.',
-              };
-            }
-            if (ev.type === 'phase') {
-              return {
-                ...base,
-                phase: ev.phase || base.phase,
-                completedFiles: ev.completedFiles ?? base.completedFiles,
-                charsReceived: ev.chars ? Math.max(base.charsReceived, ev.chars) : base.charsReceived,
-              };
-            }
-            if (ev.type === 'file_start') {
-              return {
-                ...base,
-                phase: `Writing ${ev.path || 'file'}...`,
-                activeFile: ev.path,
-                completedFiles: ev.completedFiles ?? base.completedFiles,
-                charsReceived: ev.chars ?? base.charsReceived,
-              };
-            }
-            if (ev.type === 'file_done' && ev.path) {
-              const nextCompleted = base.completedFiles.includes(ev.path)
-                ? base.completedFiles
-                : [...base.completedFiles, ev.path];
-              return {
-                ...base,
-                completedFiles: nextCompleted,
-              };
-            }
-            if (ev.type === 'progress') {
-              return {
-                ...base,
-                activeFile: ev.activeFile ?? base.activeFile,
-                completedFiles: ev.completedFiles ?? base.completedFiles,
-                charsReceived: ev.chars ?? base.charsReceived,
-              };
-            }
-            return base;
-          });
-        })) as {
+        let data: {
           projectName?: string;
           description?: string;
           summary?: string;
           searchOutcome?: WebSearchOutcome;
           files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
-        };
+        } | null = null;
 
-        if (!Array.isArray(data.files) || data.files.length === 0) {
+        // Try direct browser-to-Gemini connection first to eliminate server load
+        if (canUseDirectClient(cfg)) {
+          try {
+            data = await executeDirectGenerate({
+              prompt,
+              config: cfg,
+              signal: abortController.signal,
+              onProgress: (ev) => {
+                setAiStreamProgress((prev) => {
+                  const base = prev || {
+                    phase: 'Generating...',
+                    completedFiles: [],
+                    charsReceived: 0,
+                    startedAt,
+                  };
+                  return {
+                    ...base,
+                    phase: ev.phase || base.phase,
+                    activeFile: ev.activeFile ?? base.activeFile,
+                    completedFiles: ev.completedFiles ?? base.completedFiles,
+                    charsReceived: ev.chars ?? base.charsReceived,
+                  };
+                });
+              },
+            });
+          } catch (directErr) {
+            console.warn('[Direct Client AI] Direct connection failed, falling back to server stream:', directErr);
+          }
+        }
+
+        if (!data) {
+          const idToken = await currentUser.getIdToken();
+          const resp = await fetch('/api/ai/generate/stream', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            signal: abortController.signal,
+            body: JSON.stringify({
+              prompt,
+              providerConfig: cfg,
+              enableAppAi: enableAppAiForBuild,
+              searchConfig: webSearchConfigRef.current,
+              searchMode: studioSettingsRef.current.webSearchMode || 'auto',
+            }),
+          });
+
+          if (!resp.ok) {
+            const errPayload = (await resp.json().catch(() => ({}))) as {
+              error?: string;
+              incident?: ModelHealthIncident;
+            };
+            const err = new Error(
+              errPayload.incident?.message ||
+                errPayload.error ||
+                `Generation failed (${resp.status}).`,
+            ) as Error & { incident?: ModelHealthIncident };
+            err.incident = errPayload.incident;
+            throw err;
+          }
+
+          data = (await consumeAiSseStream(resp, (ev) => {
+            setAiStreamProgress((prev) => {
+              const base = prev || {
+                phase: 'Generating...',
+                completedFiles: [],
+                charsReceived: 0,
+                startedAt,
+              };
+              if (ev.type === 'search_start') {
+                return {
+                  ...base,
+                  phase: ev.phase || 'Searching live web sources...',
+                  searchState: 'searching',
+                  searchQueries: ev.queries ?? base.searchQueries,
+                  searchError: undefined,
+                };
+              }
+              if (ev.type === 'search_results') {
+                return {
+                  ...base,
+                  searchState: 'done',
+                  searchQueries: ev.queries ?? base.searchQueries,
+                  searchSources: ev.sources ?? base.searchSources,
+                  searchError: undefined,
+                };
+              }
+              if (ev.type === 'search_error') {
+                return {
+                  ...base,
+                  searchState: 'failed',
+                  searchQueries: ev.queries ?? base.searchQueries,
+                  searchError: ev.error || 'Web search failed.',
+                };
+              }
+              if (ev.type === 'phase') {
+                return {
+                  ...base,
+                  phase: ev.phase || base.phase,
+                  completedFiles: ev.completedFiles ?? base.completedFiles,
+                  charsReceived: ev.chars ? Math.max(base.charsReceived, ev.chars) : base.charsReceived,
+                };
+              }
+              if (ev.type === 'file_start') {
+                return {
+                  ...base,
+                  phase: `Writing ${ev.path || 'file'}...`,
+                  activeFile: ev.path,
+                  completedFiles: ev.completedFiles ?? base.completedFiles,
+                  charsReceived: ev.chars ?? base.charsReceived,
+                };
+              }
+              if (ev.type === 'file_done' && ev.path) {
+                const nextCompleted = base.completedFiles.includes(ev.path)
+                  ? base.completedFiles
+                  : [...base.completedFiles, ev.path];
+                return {
+                  ...base,
+                  completedFiles: nextCompleted,
+                };
+              }
+              if (ev.type === 'progress') {
+                return {
+                  ...base,
+                  activeFile: ev.activeFile ?? base.activeFile,
+                  completedFiles: ev.completedFiles ?? base.completedFiles,
+                  charsReceived: ev.chars ?? base.charsReceived,
+                };
+              }
+              return base;
+            });
+          })) as {
+            projectName?: string;
+            description?: string;
+            summary?: string;
+            searchOutcome?: WebSearchOutcome;
+            files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
+          };
+        }
+
+        if (!data || !Array.isArray(data.files) || data.files.length === 0) {
           throw new Error('AI did not return project files.');
         }
 
@@ -691,6 +734,11 @@ export default function App() {
 
         setProjects((prev) => [newProject, ...prev]);
         navigateToProject(newProject.id);
+
+        if (studioSettingsRef.current.notifyOnAnswerDone !== false) {
+          notifyAnswerDone(newProject.name).catch(() => {});
+        }
+
         if (currentUser) {
           void saveProjectToFirestore(newProject, { isNew: true }).catch(() => {});
         }
@@ -1067,6 +1115,10 @@ export default function App() {
           },
         ],
       }));
+
+      if (studioSettingsRef.current.notifyOnAnswerDone !== false) {
+        notifyAnswerDone(activeProject.name).catch(() => {});
+      }
     } catch (err) {
       if (
         abortController.signal.aborted ||

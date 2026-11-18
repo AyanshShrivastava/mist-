@@ -163,4 +163,5 @@ export interface StudioSettings {
   enableAppAi: boolean;
   appAiMode: AppAiMode;
   webSearchMode?: WebSearchMode;
+  notifyOnAnswerDone?: boolean;
 }

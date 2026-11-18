@@ -202,3 +202,39 @@ export async function sendTestPushNotification(
     };
   }
 }
+
+export async function notifyAnswerDone(projectName?: string): Promise<boolean> {
+  if (typeof window === 'undefined' || !('Notification' in window)) return false;
+  if (Notification.permission !== 'granted') return false;
+
+  const title = 'Answer done! ✨';
+  const body = projectName
+    ? `Mist finished generating "${projectName}". Your website is ready!`
+    : 'Mist finished generating your website. Click to view!';
+
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (reg && reg.showNotification) {
+      await reg.showNotification(title, {
+        body,
+        icon: '/favicon.ico',
+        badge: '/favicon.ico',
+        tag: 'mist-answer-done',
+        data: { url: '/' },
+      } as NotificationOptions);
+      return true;
+    }
+  } catch {
+    // Fall back to window Notification
+  }
+
+  try {
+    new Notification(title, {
+      body,
+      icon: '/favicon.ico',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
