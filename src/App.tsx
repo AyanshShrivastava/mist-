@@ -53,6 +53,12 @@ import {
   saveProjectToFirestore,
   syncLocalProjectsToFirestore,
 } from './firebase/store';
+import {
+  dequeueProjectFromBatchedSync,
+  flushBatchedSyncNow,
+  initLocalCacheQueue,
+  queueProjectForBatchedSync,
+} from './firebase/batchedProjectSync';
 import HomeView from './components/HomeView';
 import WorkspaceView from './components/WorkspaceView';
 import SettingsView from './components/SettingsView';
@@ -385,6 +391,34 @@ export default function App() {
     }
   }, [projects]);
 
+  // Local-First 10-Second Batched Sync + Exit / Refresh Flush
+  useEffect(() => {
+    initLocalCacheQueue();
+
+    // 1. Batched dump every 10 seconds (drastically cuts database write load)
+    const intervalId = setInterval(() => {
+      void flushBatchedSyncNow().catch(() => {});
+    }, 10_000);
+
+    // 2. Dump all pending data at once on tab closing, reload, or visibility hidden
+    const handleFlushOnExit = () => {
+      void flushBatchedSyncNow().catch(() => {});
+    };
+
+    window.addEventListener('beforeunload', handleFlushOnExit);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        handleFlushOnExit();
+      }
+    });
+
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('beforeunload', handleFlushOnExit);
+      document.removeEventListener('visibilitychange', handleFlushOnExit);
+    };
+  }, []);
+
   // Fetch deployments (authenticated per-user) & AI status
   const refreshDeployments = useCallback(async (currentUser: User | null) => {
     if (!currentUser) {
@@ -484,15 +518,7 @@ export default function App() {
       );
 
       if (user && updatedProject) {
-        const snapshot = updatedProject;
-        if (cloudSaveTimerRef.current) window.clearTimeout(cloudSaveTimerRef.current);
-        cloudSaveTimerRef.current = window.setTimeout(async () => {
-          try {
-            await saveProjectToFirestore(snapshot);
-          } catch {
-            // Logged silently in firebase/client.ts
-          }
-        }, 700);
+        queueProjectForBatchedSync(updatedProject);
       }
     },
     [activeProjectId, user],
@@ -740,7 +766,7 @@ export default function App() {
         }
 
         if (currentUser) {
-          void saveProjectToFirestore(newProject, { isNew: true }).catch(() => {});
+          queueProjectForBatchedSync(newProject);
         }
       } catch (err) {
         if (
@@ -921,7 +947,7 @@ export default function App() {
     setProjects((prev) => [copy, ...prev]);
     navigateToProject(copy.id);
     if (user) {
-      void saveProjectToFirestore(copy, { isNew: true }).catch(() => {});
+      queueProjectForBatchedSync(copy);
     }
   };
 
@@ -930,6 +956,7 @@ export default function App() {
     if (activeProjectId === projectId) {
       setActiveProjectId(null);
     }
+    dequeueProjectFromBatchedSync(projectId);
     if (user) {
       void deleteProjectFromFirestore(projectId).catch(() => {});
     }
@@ -1237,7 +1264,7 @@ export default function App() {
       };
       setProjects((prev) => prev.map((p) => (p.id === target.id ? updatedProject : p)));
       if (user) {
-        void saveProjectToFirestore(updatedProject).catch(() => {});
+        queueProjectForBatchedSync(updatedProject);
       }
     } catch (err) {
       setDeployError(err instanceof Error ? err.message : 'Failed to prepare publish ZIP.');
