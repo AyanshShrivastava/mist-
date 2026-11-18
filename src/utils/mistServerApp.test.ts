@@ -124,6 +124,7 @@ test('Backend routes enforce Firebase Auth and verified email on AI & deployment
       ['POST', '/api/ai/voice-turn'],
       ['GET', '/api/deployments'],
       ['POST', '/api/deployments'],
+      ['POST', '/api/projects/sync-dump'],
     ] as const) {
       const resp = await fetch(`${srv.baseUrl}${endpoint}`, {
         method,
@@ -1289,5 +1290,48 @@ test('Server blocks cross-site/cross-origin mutations, sets strict security head
     await srv.close();
   }
 });
+
+test('POST /api/projects/sync-dump dumps projects & files to Firebase under user account', async () => {
+  const srv = await startTestServer();
+  try {
+    const resp = await fetch(`${srv.baseUrl}/api/projects/sync-dump`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer token-user-a',
+      },
+      body: JSON.stringify({
+        projects: [
+          {
+            id: 'proj_test_1',
+            name: 'Test Project',
+            prompt: 'Build something cool',
+            isPublished: false,
+            files: [
+              {
+                id: 'f1',
+                path: 'src/App.tsx',
+                language: 'tsx',
+                content: 'export default function App() {}',
+              },
+            ],
+            chatHistory: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+    assert.equal(resp.status, 200);
+    const data = (await resp.json()) as { ok: boolean; syncedProjects: number; syncedFiles: number; userEmail: string };
+    assert.equal(data.ok, true);
+    assert.equal(data.syncedProjects, 1);
+    assert.equal(data.syncedFiles, 1);
+    assert.equal(data.userEmail, 'alice@example.com');
+  } finally {
+    await srv.close();
+  }
+});
+
 
 

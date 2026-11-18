@@ -7,6 +7,7 @@ import { compile as compileTailwind } from 'tailwindcss';
 import type {
   AiProviderConfig,
   AiProviderId,
+  MistProject,
   ProjectFile,
   WebSearchConfig,
   WebSearchMode,
@@ -29,6 +30,7 @@ import {
   createPreviewAiSession,
   createRateLimiter,
   enforceSameOriginOnMutations,
+  getFirebaseAppletConfig,
   resolvePreviewAiSession,
   revokeAllUserPreviewSessions,
   revokePreviewAiSession,
@@ -2438,6 +2440,137 @@ Return JSON: { "content": "..." }`;
       } catch (err) {
         const status = err instanceof SecurityValidationError ? err.status : 500;
         res.status(status).json({ error: sanitizeErrorMessage(err) || 'Delete deployment failed' });
+      }
+    },
+  );
+
+  // --- 5.5. Batched Project Sync Dump on App Exit ---
+  app.post(
+    '/api/projects/sync-dump',
+    requireVerifiedAuth,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const authUser = req.authUser!;
+        const { projects } = req.body as { projects?: MistProject[] };
+        if (!Array.isArray(projects) || projects.length === 0) {
+          res.json({ ok: true, syncedProjects: 0, syncedFiles: 0 });
+          return;
+        }
+
+        const cfg = getFirebaseAppletConfig();
+        const dbBase = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(cfg.projectId)}/databases/${encodeURIComponent(cfg.firestoreDatabaseId)}`;
+        const documentsBase = `${dbBase}/documents`;
+
+        let totalFiles = 0;
+        const writes: Array<{
+          update: {
+            name: string;
+            fields: Record<string, unknown>;
+          };
+          updateTransforms?: Array<{
+            fieldPath: string;
+            setToServerValue: string;
+          }>;
+        }> = [];
+
+        for (const project of projects) {
+          if (!project || !project.id) continue;
+          const safeProjectId = project.id.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
+          const projectDocName = `projects/${cfg.projectId}/databases/${cfg.firestoreDatabaseId}/documents/projects/${safeProjectId}`;
+
+          // Project document write
+          const projectFields: Record<string, unknown> = {
+            id: { stringValue: safeProjectId },
+            ownerId: { stringValue: authUser.uid },
+            name: { stringValue: (project.name || 'Untitled Website').slice(0, 120) },
+            prompt: { stringValue: (project.prompt || '').slice(0, 4000) },
+            isPublished: { booleanValue: Boolean(project.isPublished) },
+          };
+          if (project.description) {
+            projectFields.description = { stringValue: project.description.slice(0, 500) };
+          }
+          if (project.templateId) {
+            projectFields.templateId = { stringValue: project.templateId.slice(0, 64) };
+          }
+          if (typeof project.appAiEnabled === 'boolean') {
+            projectFields.appAiEnabled = { booleanValue: project.appAiEnabled };
+          }
+          if (project.publishedSlug) {
+            projectFields.publishedSlug = { stringValue: project.publishedSlug.slice(0, 80) };
+          }
+
+          writes.push({
+            update: {
+              name: projectDocName,
+              fields: projectFields,
+            },
+            updateTransforms: [
+              { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+            ],
+          });
+
+          // Files writes
+          if (Array.isArray(project.files)) {
+            for (const file of project.files) {
+              if (!file || !file.id) continue;
+              const safeFileId = file.id.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
+              const fileDocName = `${projectDocName}/files/${safeFileId}`;
+              writes.push({
+                update: {
+                  name: fileDocName,
+                  fields: {
+                    id: { stringValue: safeFileId },
+                    projectId: { stringValue: safeProjectId },
+                    ownerId: { stringValue: authUser.uid },
+                    path: { stringValue: (file.path || 'src/App.tsx').slice(0, 256) },
+                    language: { stringValue: file.language || 'tsx' },
+                    content: { stringValue: (file.content || '').slice(0, 200000) },
+                  },
+                },
+                updateTransforms: [
+                  { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+                ],
+              });
+              totalFiles++;
+            }
+          }
+        }
+
+        if (writes.length > 0) {
+          const chunks: (typeof writes)[] = [];
+          for (let i = 0; i < writes.length; i += 400) {
+            chunks.push(writes.slice(i, i + 400));
+          }
+
+          for (const chunk of chunks) {
+            const commitResp = await fetch(`${documentsBase}:commit`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${authUser.idToken}`,
+              },
+              body: JSON.stringify({ writes: chunk }),
+            });
+            if (!commitResp.ok) {
+              const errBody = await commitResp.text().catch(() => '');
+              console.warn(`[Mist SyncDump] Firestore commit warning (${commitResp.status}):`, errBody.slice(0, 200));
+            }
+          }
+        }
+
+        console.log(
+          `[Mist SyncDump] App exit sync: dumped ${totalFiles} files across ${projects.length} projects for user ${authUser.email} (${authUser.uid}) to Firebase`,
+        );
+
+        res.json({
+          ok: true,
+          syncedProjects: projects.length,
+          syncedFiles: totalFiles,
+          userEmail: authUser.email,
+        });
+      } catch (err) {
+        console.error('[Mist SyncDump] Failed to dump projects to Firebase:', err);
+        res.status(500).json({ error: sanitizeErrorMessage(err) || 'Sync dump failed' });
       }
     },
   );

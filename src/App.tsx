@@ -56,6 +56,7 @@ import {
 import {
   dequeueProjectFromBatchedSync,
   flushBatchedSyncNow,
+  flushBatchedSyncOnAppExit,
   initLocalCacheQueue,
   queueProjectForBatchedSync,
 } from './firebase/batchedProjectSync';
@@ -391,33 +392,30 @@ export default function App() {
     }
   }, [projects]);
 
-  // Local-First 10-Second Batched Sync + Exit / Refresh Flush
+  // Local-First Batched Sync: NO 10-second interval!
+  // Syncs strictly when user closes or exits the app (tab close, reload, or backgrounding)
   useEffect(() => {
     initLocalCacheQueue();
 
-    // 1. Batched dump every 10 seconds (drastically cuts database write load)
-    const intervalId = setInterval(() => {
-      void flushBatchedSyncNow().catch(() => {});
-    }, 10_000);
-
-    // 2. Dump all pending data at once on tab closing, reload, or visibility hidden
     const handleFlushOnExit = () => {
-      void flushBatchedSyncNow().catch(() => {});
+      void flushBatchedSyncOnAppExit(user).catch(() => {});
     };
 
     window.addEventListener('beforeunload', handleFlushOnExit);
-    document.addEventListener('visibilitychange', () => {
+    window.addEventListener('pagehide', handleFlushOnExit);
+    const handleVisibility = () => {
       if (document.visibilityState === 'hidden') {
         handleFlushOnExit();
       }
-    });
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
-      clearInterval(intervalId);
       window.removeEventListener('beforeunload', handleFlushOnExit);
-      document.removeEventListener('visibilitychange', handleFlushOnExit);
+      window.removeEventListener('pagehide', handleFlushOnExit);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, []);
+  }, [user]);
 
   // Fetch deployments (authenticated per-user) & AI status
   const refreshDeployments = useCallback(async (currentUser: User | null) => {

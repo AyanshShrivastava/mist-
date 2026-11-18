@@ -2,11 +2,13 @@
  * Local-First Batched Sync Manager for Mist Projects.
  *
  * All modifications are saved instantly to the browser's local cache.
- * Network/cloud sync to Firestore is batched on a 10-second interval
- * and flushed at once on window refresh, tab hide, or closing the app.
- * This drops server & database write operations by over 90%.
+ * There is NO periodic 10-second sync timer: network/cloud sync happens
+ * strictly when the user closes the app, reloads, or navigates away.
+ * On exit, pending files and projects are read and dumped to Firebase
+ * for that user's account (associated with their email ID).
  */
 
+import type { User } from 'firebase/auth';
 import type { MistProject } from '../types/mist';
 import { auth } from './client';
 import { saveProjectToFirestore } from './store';
@@ -51,8 +53,8 @@ function persistDirtyQueueToLocalCache(): void {
 }
 
 /**
- * Queue a project modification for the next 10-second batched dump.
- * Automatically saves to local cache immediately.
+ * Queue a project modification in local cache.
+ * Changes remain local until the user closes or leaves the app.
  */
 export function queueProjectForBatchedSync(project: MistProject): void {
   pendingDirtyProjects.set(project.id, project);
@@ -68,8 +70,7 @@ export function dequeueProjectFromBatchedSync(projectId: string): void {
 }
 
 /**
- * Flush all dirty projects at once to Firestore.
- * Called automatically every 10 seconds, and on refresh / closing the app.
+ * Flush all dirty projects at once to Firestore directly from client.
  */
 export async function flushBatchedSyncNow(): Promise<{ synced: number; remaining: number }> {
   if (isFlushing || pendingDirtyProjects.size === 0) {
@@ -88,7 +89,7 @@ export async function flushBatchedSyncNow(): Promise<{ synced: number; remaining
   let synced = 0;
 
   try {
-    // Save all pending projects at once in parallel
+    // Save all pending projects in parallel
     await Promise.all(
       snapshot.map(async ([id, project]) => {
         try {
@@ -106,6 +107,43 @@ export async function flushBatchedSyncNow(): Promise<{ synced: number; remaining
   }
 
   return { synced, remaining: pendingDirtyProjects.size };
+}
+
+/**
+ * Flush pending dirty projects when the user closes the app, reloads, or hides tab.
+ * Reads all dirty project files and dumps them to the backend /api/projects/sync-dump
+ * with keepalive: true (which the browser network stack completes even if the tab closes),
+ * while also running client-side Firestore flush in parallel.
+ */
+export async function flushBatchedSyncOnAppExit(user?: User | null): Promise<void> {
+  const activeUser = user || auth.currentUser;
+  if (!activeUser) return;
+
+  initLocalCacheQueue();
+  if (pendingDirtyProjects.size === 0) return;
+
+  const dirtyList = Array.from(pendingDirtyProjects.values());
+
+  try {
+    const idToken = await activeUser.getIdToken();
+    if (idToken) {
+      void fetch('/api/projects/sync-dump', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        keepalive: true,
+        body: JSON.stringify({ projects: dirtyList }),
+      }).catch((err) => {
+        console.warn('[BatchedSync] Exit sync dump beacon error:', err);
+      });
+    }
+  } catch (tokenErr) {
+    console.warn('[BatchedSync] Could not obtain idToken on app close:', tokenErr);
+  }
+
+  void flushBatchedSyncNow().catch(() => {});
 }
 
 export function getPendingDirtyCount(): number {
