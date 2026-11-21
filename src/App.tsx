@@ -1,12 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useAuth as useClerkAuth, useClerk } from '@clerk/react';
+import {
+  useAuth as useClerkAuth,
+  useClerk,
+  useUser,
+  AuthenticateWithRedirectCallback,
+} from '@clerk/react';
 import JSZip from 'jszip';
-import type { User } from 'firebase/auth';
 import type {
   AiProviderConfig,
   AiStreamProgress,
   DeploymentRecord,
   MistProject,
+  MistUser,
   ProjectFile,
   SelectedVisualElement,
   StudioSettings,
@@ -42,9 +47,6 @@ import {
   fetchUserEncryptedVault,
   fetchUserProfilePreferences,
   saveUserEncryptedVault,
-  signOutUser,
-  subscribeToAuth,
-  syncFirebaseWithClerk,
   syncUserProfile,
 } from './firebase/client';
 import {
@@ -54,13 +56,7 @@ import {
   saveProjectToFirestore,
   syncLocalProjectsToFirestore,
 } from './firebase/store';
-import {
-  dequeueProjectFromBatchedSync,
-  flushBatchedSyncNow,
-  flushBatchedSyncOnAppExit,
-  initLocalCacheQueue,
-  queueProjectForBatchedSync,
-} from './firebase/batchedProjectSync';
+import { mistApi, setApiTokenProvider } from './utils/apiClient';
 import HomeView from './components/HomeView';
 import WorkspaceView from './components/WorkspaceView';
 import SettingsView from './components/SettingsView';
@@ -71,8 +67,21 @@ import {
   DeployModal,
   ProvidersModal,
 } from './components/Modals';
+import { mistClerkAppearance } from './utils/clerkTheme';
+import {
+  clearPendingDirtyQueue,
+  dequeueProjectFromBatchedSync,
+  flushBatchedSyncNow,
+  flushBatchedSyncOnAppExit,
+  initLocalCacheQueue,
+  queueProjectForBatchedSync,
+  setBatchedSyncUserProvider,
+} from './firebase/batchedProjectSync';
 
-const STORAGE_PROJECTS_KEY = 'mist_projects_v1';
+export function getProjectsStorageKey(userId?: string | null): string {
+  return userId ? `mist_projects_${userId}` : 'mist_projects_anonymous';
+}
+
 const LEGACY_STORAGE_PROVIDER_KEY = 'mist_provider_v1';
 const LEGACY_STORAGE_SEARCH_KEY = 'mist_search_v1';
 const STORAGE_SETTINGS_KEY = 'mist_settings_v1';
@@ -88,9 +97,13 @@ const DEFAULT_STUDIO_SETTINGS: StudioSettings = {
   notifyOnAnswerDone: true,
 };
 
-function loadLocalProjects(): MistProject[] {
+function loadLocalProjects(userId?: string | null): MistProject[] {
   try {
-    const raw = localStorage.getItem(STORAGE_PROJECTS_KEY);
+    const key = getProjectsStorageKey(userId);
+    let raw = localStorage.getItem(key);
+    if (!raw && !userId) {
+      raw = localStorage.getItem('mist_projects_v1') || localStorage.getItem('mist_projects');
+    }
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed as MistProject[]) : [];
@@ -216,7 +229,21 @@ async function consumeAiSseStream(
 export default function App() {
   const clerk = useClerk();
   const clerkAuth = useClerkAuth();
-  const [user, setUser] = useState<User | null>(null);
+  const { user: clerkUser, isLoaded: clerkUserLoaded, isSignedIn: clerkSignedIn } = useUser();
+
+  // If returning from Google/GitHub OAuth redirect
+  if (typeof window !== 'undefined' && window.location.pathname === '/sso-callback') {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#090b10] text-white">
+        <AuthenticateWithRedirectCallback
+          signInForceRedirectUrl="/"
+          signUpForceRedirectUrl="/"
+        />
+      </div>
+    );
+  }
+
+  const [user, setUser] = useState<MistUser | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authPromptReason, setAuthPromptReason] = useState<string | null>(null);
   const pendingGeneratePromptRef = useRef<string | null>(null);
@@ -339,7 +366,7 @@ export default function App() {
 
   // Encrypt & persist BYOK AI + Search credentials to Firestore bound to the signed-in Google email
   const syncCredentialsToAccountVault = useCallback(
-    async (firebaseUser: User, nextAi: AiProviderConfig, nextSearch: WebSearchConfig) => {
+    async (firebaseUser: MistUser, nextAi: AiProviderConfig, nextSearch: WebSearchConfig) => {
       try {
         const idToken = await firebaseUser.getIdToken();
         const resp = await fetch('/api/user/vault/seal', {
@@ -386,19 +413,26 @@ export default function App() {
     }
   }, [darkMode, studioSettings]);
 
-  // Persist local projects cache
+  // Persist local projects cache scoped to active account
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_PROJECTS_KEY, JSON.stringify(projects));
+      const key = getProjectsStorageKey(user?.uid);
+      localStorage.setItem(key, JSON.stringify(projects));
     } catch {
       // ignore quota errors
     }
-  }, [projects]);
+  }, [projects, user?.uid]);
 
   // Local-First Batched Sync: NO 10-second interval!
   // Syncs strictly when user closes or exits the app (tab close, reload, or backgrounding)
   useEffect(() => {
-    initLocalCacheQueue();
+    initLocalCacheQueue(user?.uid);
+    if (user?.uid) {
+      const localScoped = loadLocalProjects(user.uid);
+      if (localScoped.length > 0) {
+        setProjects(localScoped);
+      }
+    }
 
     const handleFlushOnExit = () => {
       void flushBatchedSyncOnAppExit(user).catch(() => {});
@@ -421,7 +455,7 @@ export default function App() {
   }, [user]);
 
   // Fetch deployments (authenticated per-user) & AI status
-  const refreshDeployments = useCallback(async (currentUser: User | null) => {
+  const refreshDeployments = useCallback(async (currentUser: MistUser | null) => {
     if (!currentUser) {
       setDeployments([]);
       return;
@@ -535,7 +569,7 @@ export default function App() {
 
   // Core SSE streaming generation executor
   const executeGenerateWebsite = useCallback(
-    async (prompt: string, currentUser: User) => {
+    async (prompt: string, currentUser: MistUser) => {
       const cfg = providerConfigRef.current;
       if (!cfg.apiKey?.trim()) {
         setGenerationError(
@@ -791,164 +825,172 @@ export default function App() {
     [],
   );
 
+  // Pure Clerk Authentication State & User Hydration
   useEffect(() => {
-    if (!clerkAuth.isLoaded) return;
+    if (!clerkUserLoaded) return;
 
-    if (!clerkAuth.isSignedIn) {
+    if (!clerkSignedIn || !clerkUser) {
       setUser(null);
-      void signOutUser().catch(() => {});
+      setDeployments([]);
+      clearKnownCloudProjects();
+      scrubLegacyCredentialStorage();
       return;
     }
 
     setAuthError(null);
-    void syncFirebaseWithClerk(clerkAuth.getToken)
-      .catch((error) => {
-        setAuthError(
-          error instanceof Error
-            ? error.message
-            : 'Clerk sign-in could not be connected to Firebase.',
-        );
-      });
-  }, [clerkAuth.isLoaded, clerkAuth.isSignedIn, clerkAuth.getToken]);
+    setAuthPromptReason(null);
 
-  // Subscribe once to Auth state changes; hydrate settings, email-bound encrypted vault, & cloud sync
-  useEffect(() => {
-    const unsub = subscribeToAuth(async (firebaseUser) => {
-      setUser(firebaseUser);
-      if (firebaseUser) {
-        setAuthPromptReason(null);
-        try {
-          const [cloudPrefs, encryptedVault] = await Promise.all([
-            fetchUserProfilePreferences(firebaseUser),
-            fetchUserEncryptedVault(firebaseUser),
-          ]);
+    const mistUser: MistUser = {
+      id: clerkUser.id,
+      uid: clerkUser.id,
+      email: clerkUser.primaryEmailAddress?.emailAddress ?? null,
+      displayName: clerkUser.fullName || clerkUser.firstName || clerkUser.username || null,
+      photoURL: clerkUser.imageUrl || null,
+      emailVerified: clerkUser.primaryEmailAddress?.verification?.status === 'verified',
+      getIdToken: async () => clerkAuth.getToken(),
+    };
 
-          let hydratedAiConfig = providerConfigRef.current;
-          let hydratedSearchConfig = webSearchConfigRef.current;
+    setUser(mistUser);
+    setApiTokenProvider(clerkAuth.getToken);
+    setBatchedSyncUserProvider(() => mistUser);
 
-          if (cloudPrefs) {
-            if (cloudPrefs.preferredProvider || cloudPrefs.preferredModel) {
-              hydratedAiConfig = normalizeProviderConfigToStudio({
-                ...hydratedAiConfig,
-                provider: cloudPrefs.preferredProvider || hydratedAiConfig.provider,
-                model: cloudPrefs.preferredModel || hydratedAiConfig.model,
-              });
-            }
-            setStudioSettings((prev) => {
-              const nextMode =
-                cloudPrefs.appAiMode ||
-                (typeof cloudPrefs.enableAppAi === 'boolean'
-                  ? cloudPrefs.enableAppAi
-                    ? 'always'
-                    : prev.appAiMode
-                  : prev.appAiMode);
-              return {
-                theme: cloudPrefs.theme || prev.theme,
-                defaultViewMode: cloudPrefs.defaultViewMode || prev.defaultViewMode,
-                defaultViewport: cloudPrefs.defaultViewport || prev.defaultViewport,
-                appAiMode: nextMode,
-                enableAppAi: nextMode === 'always',
-                webSearchMode: cloudPrefs.webSearchMode || prev.webSearchMode || 'auto',
-              };
+    void (async () => {
+      try {
+        const token = await clerkAuth.getToken();
+        const [cloudPrefs, encryptedVault] = await Promise.all([
+          fetchUserProfilePreferences(mistUser),
+          fetchUserEncryptedVault(mistUser),
+        ]);
+
+        let hydratedAiConfig = providerConfigRef.current;
+        let hydratedSearchConfig = webSearchConfigRef.current;
+
+        if (cloudPrefs) {
+          if (cloudPrefs.preferredProvider || cloudPrefs.preferredModel) {
+            hydratedAiConfig = normalizeProviderConfigToStudio({
+              ...hydratedAiConfig,
+              provider: cloudPrefs.preferredProvider || hydratedAiConfig.provider,
+              model: cloudPrefs.preferredModel || hydratedAiConfig.model,
             });
           }
-
-          if (encryptedVault?.ciphertext) {
-            try {
-              const idToken = await firebaseUser.getIdToken();
-              const unsealResp = await fetch('/api/user/vault/unseal', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${idToken}`,
-                },
-                body: JSON.stringify({ encryptedPayload: encryptedVault.ciphertext }),
-              });
-              if (unsealResp.ok) {
-                const unsealed = (await unsealResp.json()) as {
-                  aiConfig?: AiProviderConfig;
-                  searchConfig?: WebSearchConfig;
-                };
-                if (unsealed.aiConfig) {
-                  hydratedAiConfig = normalizeProviderConfigToStudio({
-                    ...hydratedAiConfig,
-                    ...unsealed.aiConfig,
-                    // Preserve any key typed before sign-in if the account vault had no key yet
-                    apiKey: unsealed.aiConfig.apiKey || hydratedAiConfig.apiKey || '',
-                  });
-                }
-                if (unsealed.searchConfig) {
-                  hydratedSearchConfig = normalizeWebSearchConfig({
-                    ...hydratedSearchConfig,
-                    ...unsealed.searchConfig,
-                    apiKey: unsealed.searchConfig.apiKey || hydratedSearchConfig.apiKey || '',
-                  });
-                }
-              }
-            } catch {
-              // Non-blocking decrypt failure keeps memory defaults
-            }
-          } else if (
-            hydratedAiConfig.apiKey?.trim() ||
-            hydratedSearchConfig.apiKey?.trim()
-          ) {
-            void syncCredentialsToAccountVault(
-              firebaseUser,
-              hydratedAiConfig,
-              hydratedSearchConfig,
-            );
-          }
-
-          setProviderConfig(hydratedAiConfig);
-          setWebSearchConfig(hydratedSearchConfig);
-
-          await syncUserProfile(firebaseUser, {
-            preferredProvider: hydratedAiConfig.provider || cloudPrefs?.preferredProvider,
-            preferredModel: hydratedAiConfig.model || cloudPrefs?.preferredModel,
-            theme: cloudPrefs?.theme || studioSettingsRef.current.theme,
-            defaultViewMode: cloudPrefs?.defaultViewMode || studioSettingsRef.current.defaultViewMode,
-            defaultViewport: cloudPrefs?.defaultViewport || studioSettingsRef.current.defaultViewport,
-            enableAppAi:
-              typeof cloudPrefs?.enableAppAi === 'boolean'
+          setStudioSettings((prev) => {
+            const nextMode =
+              cloudPrefs.appAiMode ||
+              (typeof cloudPrefs.enableAppAi === 'boolean'
                 ? cloudPrefs.enableAppAi
-                : studioSettingsRef.current.enableAppAi,
-            appAiMode: cloudPrefs?.appAiMode || studioSettingsRef.current.appAiMode,
-            webSearchMode: cloudPrefs?.webSearchMode || studioSettingsRef.current.webSearchMode,
+                  ? 'always'
+                  : prev.appAiMode
+                : prev.appAiMode);
+            return {
+              theme: cloudPrefs.theme || prev.theme,
+              defaultViewMode: cloudPrefs.defaultViewMode || prev.defaultViewMode,
+              defaultViewport: cloudPrefs.defaultViewport || prev.defaultViewport,
+              appAiMode: nextMode,
+              enableAppAi: nextMode === 'always',
+              webSearchMode: cloudPrefs.webSearchMode || prev.webSearchMode || 'auto',
+            };
           });
+        }
 
-          const cloudProjects = await listUserProjectsFromFirestore(firebaseUser.uid);
-          const cloudIds = new Set(cloudProjects.map((p) => p.id));
-          const localOnly = projectsRef.current.filter((p) => !cloudIds.has(p.id));
-
-          setProjects((local) => {
-            const merged = new Map<string, MistProject>();
-            for (const p of local) merged.set(p.id, p);
-            for (const cp of cloudProjects) merged.set(cp.id, cp);
-            return Array.from(merged.values()).sort((a, b) =>
-              b.updatedAt.localeCompare(a.updatedAt),
-            );
-          });
-
-          if (localOnly.length > 0) {
-            await syncLocalProjectsToFirestore(localOnly, cloudIds);
+        if (encryptedVault?.ciphertext) {
+          try {
+            const unsealResp = await fetch('/api/user/vault/unseal', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({ encryptedPayload: encryptedVault.ciphertext }),
+            });
+            if (unsealResp.ok) {
+              const unsealed = (await unsealResp.json()) as {
+                aiConfig?: AiProviderConfig;
+                searchConfig?: WebSearchConfig;
+              };
+              if (unsealed.aiConfig) {
+                hydratedAiConfig = normalizeProviderConfigToStudio({
+                  ...hydratedAiConfig,
+                  ...unsealed.aiConfig,
+                  apiKey: unsealed.aiConfig.apiKey || hydratedAiConfig.apiKey || '',
+                });
+              }
+              if (unsealed.searchConfig) {
+                hydratedSearchConfig = normalizeWebSearchConfig({
+                  ...hydratedSearchConfig,
+                  ...unsealed.searchConfig,
+                  apiKey: unsealed.searchConfig.apiKey || hydratedSearchConfig.apiKey || '',
+                });
+              }
+            }
+          } catch {
+            // Non-blocking decrypt failure
           }
-
-          await refreshDeployments(firebaseUser);
-        } catch {
-          // Errors logged silently in firebase/client.ts
+        } else if (
+          hydratedAiConfig.apiKey?.trim() ||
+          hydratedSearchConfig.apiKey?.trim()
+        ) {
+          void syncCredentialsToAccountVault(
+            mistUser,
+            hydratedAiConfig,
+            hydratedSearchConfig,
+          );
         }
 
-        if (pendingGeneratePromptRef.current) {
-          const queued = pendingGeneratePromptRef.current;
-          pendingGeneratePromptRef.current = null;
-          void executeGenerateWebsite(queued, firebaseUser);
+        setProviderConfig(hydratedAiConfig);
+        setWebSearchConfig(hydratedSearchConfig);
+
+        await syncUserProfile(mistUser, {
+          preferredProvider: hydratedAiConfig.provider || cloudPrefs?.preferredProvider,
+          preferredModel: hydratedAiConfig.model || cloudPrefs?.preferredModel,
+          theme: cloudPrefs?.theme || studioSettingsRef.current.theme,
+          defaultViewMode: cloudPrefs?.defaultViewMode || studioSettingsRef.current.defaultViewMode,
+          defaultViewport: cloudPrefs?.defaultViewport || studioSettingsRef.current.defaultViewport,
+          enableAppAi:
+            typeof cloudPrefs?.enableAppAi === 'boolean'
+              ? cloudPrefs.enableAppAi
+              : studioSettingsRef.current.enableAppAi,
+          appAiMode: cloudPrefs?.appAiMode || studioSettingsRef.current.appAiMode,
+          webSearchMode: cloudPrefs?.webSearchMode || studioSettingsRef.current.webSearchMode,
+        });
+
+        const cloudProjects = await listUserProjectsFromFirestore(mistUser.uid, token);
+        const cloudIds = new Set(cloudProjects.map((p) => p.id));
+        const localOnly = projectsRef.current.filter((p) => !cloudIds.has(p.id));
+
+        setProjects((local) => {
+          const merged = new Map<string, MistProject>();
+          for (const p of local) merged.set(p.id, p);
+          for (const cp of cloudProjects) merged.set(cp.id, cp);
+          return Array.from(merged.values()).sort((a, b) =>
+            b.updatedAt.localeCompare(a.updatedAt),
+          );
+        });
+
+        if (localOnly.length > 0) {
+          await syncLocalProjectsToFirestore(localOnly, cloudIds, token);
         }
-      } else {
-        setDeployments([]);
+
+        await refreshDeployments(mistUser);
+      } catch (err) {
+        console.warn('[Mist App] User hydration failed:', err);
       }
-    });
-    return unsub;
-  }, [executeGenerateWebsite, navigateToProject, refreshDeployments, syncCredentialsToAccountVault]);
+
+      if (pendingGeneratePromptRef.current) {
+        const queued = pendingGeneratePromptRef.current;
+        pendingGeneratePromptRef.current = null;
+        void executeGenerateWebsite(queued, mistUser);
+      }
+    })();
+  }, [
+    clerkUserLoaded,
+    clerkSignedIn,
+    clerkUser,
+    clerkAuth.getToken,
+    executeGenerateWebsite,
+    refreshDeployments,
+    syncCredentialsToAccountVault,
+  ]);
+
 
   // Require sign-in when clicking Generate Website on the front page
   const handleGenerateWebsite = (prompt: string) => {
@@ -1380,10 +1422,35 @@ export default function App() {
     });
   };
 
-  const handleGoogleSignIn = async () => {
+  const handleOAuthSignIn = async (strategy: 'oauth_google' | 'oauth_github') => {
     setAuthError(null);
     try {
-      clerk.openSignIn();
+      if (clerk.client?.signIn) {
+        await clerk.client.signIn.authenticateWithRedirect({
+          strategy,
+          redirectUrl: '/sso-callback',
+          redirectUrlComplete: '/',
+        });
+        return;
+      }
+      if (clerk.client?.signUp) {
+        await clerk.client.signUp.authenticateWithRedirect({
+          strategy,
+          redirectUrl: '/sso-callback',
+          redirectUrlComplete: '/',
+        });
+        return;
+      }
+      clerk.openSignIn({ appearance: mistClerkAppearance });
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'OAuth sign-in failed.');
+    }
+  };
+
+  const handleEmailSignIn = () => {
+    setAuthError(null);
+    try {
+      clerk.openSignIn({ appearance: mistClerkAppearance });
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Sign-in failed.');
     }
@@ -1403,7 +1470,6 @@ export default function App() {
           // Best-effort session revocation before sign-out
         }
       }
-      await signOutUser();
       await clerkAuth.signOut();
       clearKnownCloudProjects();
       scrubLegacyCredentialStorage();
@@ -1412,8 +1478,9 @@ export default function App() {
       setWebSearchConfig({ ...DEFAULT_WEB_SEARCH_CONFIG });
       setActiveProjectId(null);
       setActivePage('home');
+      clearPendingDirtyQueue();
       try {
-        localStorage.removeItem(STORAGE_PROJECTS_KEY);
+        localStorage.removeItem(getProjectsStorageKey(user?.uid));
       } catch {
         // ignore
       }
@@ -1439,7 +1506,7 @@ export default function App() {
           onSaveWebSearch={handleSaveWebSearch}
           onUpdateSettings={handleUpdateSettings}
           onIncident={setModelIncident}
-          onSignIn={() => void handleGoogleSignIn()}
+          onSignIn={() => void handleOAuthSignIn('oauth_google')}
           onSignOut={() => void handleSignOut()}
         />
       ) : activeProject ? (
@@ -1589,8 +1656,18 @@ export default function App() {
           setAccountOpen(false);
           setAuthPromptReason(null);
         }}
-        onSignIn={() => void handleGoogleSignIn()}
+        onSignIn={() => void handleOAuthSignIn('oauth_google')}
+        onSignInGoogle={() => void handleOAuthSignIn('oauth_google')}
+        onSignInGithub={() => void handleOAuthSignIn('oauth_github')}
+        onSignInEmail={() => void handleEmailSignIn()}
         onSignOut={() => void handleSignOut()}
+        onManageProfile={() => {
+          try {
+            clerk.openUserProfile({ appearance: mistClerkAppearance });
+          } catch (err) {
+            console.error('Failed to open user profile:', err);
+          }
+        }}
       />
 
       <VoiceChatModal

@@ -1,4 +1,10 @@
-import { getFirebaseAppletConfig, SecurityValidationError } from './serverSecurity';
+import { SecurityValidationError } from './serverSecurity';
+import { FirestoreAdminStore, type AdminDatabaseOperations } from '../server/firestoreAdmin';
+import {
+  CloudflareR2ArtifactStore,
+  InMemoryR2ArtifactStore,
+  type R2StorageOperations,
+} from './r2ArtifactStore';
 
 export interface StoredDeployment {
   slug: string;
@@ -8,6 +14,8 @@ export interface StoredDeployment {
   htmlBundle: string;
   createdAt?: string;
   updatedAt: string;
+  r2Bucket?: string;
+  artifactPath?: string;
 }
 
 export interface DeploymentSummary {
@@ -25,7 +33,7 @@ export function formatDeploymentUrl(slug: string, publicBaseUrl?: string): strin
 }
 
 export interface DeploymentStore {
-  listByOwner(ownerUid: string, idToken: string): Promise<DeploymentSummary[]>;
+  listByOwner(ownerUid: string, idToken?: string): Promise<DeploymentSummary[]>;
   getPublic(slug: string): Promise<StoredDeployment | null>;
   upsertOwned(
     input: {
@@ -35,242 +43,108 @@ export interface DeploymentStore {
       title: string;
       htmlBundle: string;
     },
-    idToken: string,
+    idToken?: string,
   ): Promise<StoredDeployment>;
-  deleteOwned(slug: string, ownerUid: string, idToken: string): Promise<boolean>;
-}
-
-interface FirestoreFieldValue {
-  stringValue?: string;
-  timestampValue?: string;
-  booleanValue?: boolean;
-}
-
-interface FirestoreDocument {
-  name?: string;
-  fields?: Record<string, FirestoreFieldValue>;
-  updateTime?: string;
-  createTime?: string;
-}
-
-function decodeFirestoreDeployment(doc: FirestoreDocument): StoredDeployment | null {
-  const f = doc.fields;
-  if (!f) return null;
-  const slug = f.slug?.stringValue;
-  const ownerUid = f.ownerId?.stringValue;
-  const projectId = f.projectId?.stringValue;
-  const title = f.title?.stringValue;
-  const htmlBundle = f.htmlBundle?.stringValue;
-  if (!slug || !ownerUid || !title || htmlBundle === undefined) return null;
-  return {
-    slug,
-    ownerUid,
-    projectId: projectId || slug,
-    title,
-    htmlBundle,
-    createdAt: f.createdAt?.timestampValue || doc.createTime,
-    updatedAt: f.updatedAt?.timestampValue || doc.updateTime || new Date().toISOString(),
-  };
+  deleteOwned(slug: string, ownerUid: string, idToken?: string): Promise<boolean>;
 }
 
 export const MAX_DEPLOYMENT_BUNDLE_BYTES = 900_000;
 
 export function createFirestoreDeploymentStore(options?: {
-  projectId?: string;
-  databaseId?: string;
-  fetchImpl?: typeof fetch;
+  adminStore?: AdminDatabaseOperations;
+  r2Store?: R2StorageOperations;
 }): DeploymentStore {
-  const fetchFn = options?.fetchImpl || globalThis.fetch;
+  let adminDb = options?.adminStore;
+  let r2 = options?.r2Store;
 
-  const getDbRoot = () => {
-    const cfg = options?.projectId
-      ? { projectId: options.projectId, firestoreDatabaseId: options.databaseId || '(default)' }
-      : getFirebaseAppletConfig();
-    const dbBase = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(cfg.projectId)}/databases/${encodeURIComponent(cfg.firestoreDatabaseId)}`;
-    return {
-      projectId: cfg.projectId,
-      databaseId: cfg.firestoreDatabaseId,
-      documentsBase: `${dbBase}/documents`,
-      docResourcePath: (slug: string) =>
-        `projects/${cfg.projectId}/databases/${cfg.firestoreDatabaseId}/documents/deployments/${slug}`,
-    };
-  };
-
-  const fetchDoc = async (slug: string, idToken?: string): Promise<StoredDeployment | null> => {
-    const { documentsBase } = getDbRoot();
-    const url = `${documentsBase}/deployments/${encodeURIComponent(slug)}`;
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (idToken) headers.Authorization = `Bearer ${idToken}`;
-    const resp = await fetchFn(url, { headers, redirect: 'error' });
-    if (resp.status === 404) return null;
-    if (!resp.ok) {
-      const errBody = await resp.text().catch(() => '');
-      throw new SecurityValidationError(
-        resp.status === 403 ? 403 : 502,
-        `Firestore deployment lookup failed (${resp.status}): ${errBody.slice(0, 200)}`,
-      );
+  function getStores() {
+    if (!adminDb) {
+      try {
+        adminDb = new FirestoreAdminStore();
+      } catch {
+        // Fall back to memory if credentials missing
+      }
     }
-    const doc = (await resp.json()) as FirestoreDocument;
-    return decodeFirestoreDeployment(doc);
-  };
+    if (!r2) {
+      try {
+        r2 = new CloudflareR2ArtifactStore();
+      } catch {
+        r2 = new InMemoryR2ArtifactStore();
+      }
+    }
+    return { adminDb, r2 };
+  }
 
   return {
     async getPublic(slug: string): Promise<StoredDeployment | null> {
-      return fetchDoc(slug);
+      const { adminDb, r2 } = getStores();
+      if (adminDb) {
+        const metadata = await adminDb.getDeployment(slug);
+        if (metadata) {
+          if (r2 && !metadata.htmlBundle) {
+            const html = await r2.getPublishedHtml(slug);
+            if (html) metadata.htmlBundle = html;
+          }
+          return metadata;
+        }
+      }
+      return null;
     },
 
-    async listByOwner(ownerUid: string, idToken: string): Promise<DeploymentSummary[]> {
-      const { documentsBase } = getDbRoot();
-      const resp = await fetchFn(`${documentsBase}:runQuery`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        redirect: 'error',
-        body: JSON.stringify({
-          structuredQuery: {
-            from: [{ collectionId: 'deployments' }],
-            where: {
-              fieldFilter: {
-                field: { fieldPath: 'ownerId' },
-                op: 'EQUAL',
-                value: { stringValue: ownerUid },
-              },
-            },
-          },
-        }),
-      });
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        throw new SecurityValidationError(
-          resp.status === 401 || resp.status === 403 ? resp.status : 502,
-          `Failed to list user deployments (${resp.status}): ${errBody.slice(0, 200)}`,
-        );
+    async listByOwner(ownerUid: string): Promise<DeploymentSummary[]> {
+      const { adminDb } = getStores();
+      if (!adminDb) return [];
+      const list = await adminDb.listDeployments(ownerUid);
+      return list.map((item) => ({
+        ...item,
+        url: formatDeploymentUrl(item.slug, process.env.PUBLIC_APP_URL),
+      }));
+    },
+
+    async upsertOwned(input): Promise<StoredDeployment> {
+      const { adminDb, r2 } = getStores();
+      const slug = input.slug;
+
+      let artifactInfo: { key: string } | undefined;
+      if (r2) {
+        artifactInfo = await r2.uploadPublishedSite(slug, input.htmlBundle);
+        const exists = await r2.artifactExists(slug);
+        if (!exists) {
+          throw new SecurityValidationError(500, 'Artifact upload verification failed.');
+        }
       }
-      const rows = (await resp.json()) as Array<{ document?: FirestoreDocument }>;
-      const list: DeploymentSummary[] = [];
-      for (const row of rows) {
-        if (!row.document) continue;
-        const decoded = decodeFirestoreDeployment(row.document);
-        if (!decoded || decoded.ownerUid !== ownerUid) continue;
-        list.push({
-          slug: decoded.slug,
-          projectId: decoded.projectId,
-          title: decoded.title,
-          url: formatDeploymentUrl(decoded.slug, process.env.PUBLIC_APP_URL),
-          updatedAt: decoded.updatedAt,
+
+      if (adminDb) {
+        await adminDb.saveDeployment(input.ownerUid, {
+          slug,
+          projectId: input.projectId,
+          title: input.title,
+          r2Bucket: process.env.R2_BUCKET_NAME || 'mist-published-sites',
+          artifactPath: artifactInfo?.key || `sites/${slug}/index.html`,
+          htmlBundle: input.htmlBundle,
         });
       }
-      return list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    },
 
-    async upsertOwned(input, idToken: string): Promise<StoredDeployment> {
-      const bundleBytes = Buffer.byteLength(input.htmlBundle, 'utf8');
-      if (bundleBytes > MAX_DEPLOYMENT_BUNDLE_BYTES) {
-        throw new SecurityValidationError(
-          413,
-          `Published bundle (${Math.round(bundleBytes / 1000)}KB) exceeds maximum 900KB limit.`,
-        );
-      }
-
-      const existing = await fetchDoc(input.slug, idToken);
-      if (existing && existing.ownerUid !== input.ownerUid) {
-        throw new SecurityValidationError(403, 'This deployment URL is owned by another user.');
-      }
-
-      const { documentsBase, docResourcePath } = getDbRoot();
-      const docName = docResourcePath(input.slug);
-      const safeTitle = (input.title || input.slug).slice(0, 120);
-      const safeProjectId = (input.projectId || input.slug).slice(0, 128);
-
-      const writePayload = existing
-        ? {
-            update: {
-              name: docName,
-              fields: {
-                title: { stringValue: safeTitle },
-                htmlBundle: { stringValue: input.htmlBundle },
-              },
-            },
-            updateMask: { fieldPaths: ['title', 'htmlBundle'] },
-            updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
-            currentDocument: { exists: true },
-          }
-        : {
-            update: {
-              name: docName,
-              fields: {
-                slug: { stringValue: input.slug },
-                ownerId: { stringValue: input.ownerUid },
-                projectId: { stringValue: safeProjectId },
-                title: { stringValue: safeTitle },
-                htmlBundle: { stringValue: input.htmlBundle },
-              },
-            },
-            updateTransforms: [
-              { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
-              { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
-            ],
-            currentDocument: { exists: false },
-          };
-
-      const resp = await fetchFn(`${documentsBase}:commit`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        redirect: 'error',
-        body: JSON.stringify({ writes: [writePayload] }),
-      });
-
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        if (resp.status === 403) {
-          throw new SecurityValidationError(
-            403,
-            'Deployment write denied by Firestore security rules. Ensure your project is synced first and owned by your account.',
-          );
-        }
-        throw new SecurityValidationError(
-          resp.status >= 400 && resp.status < 500 ? resp.status : 502,
-          `Failed to save deployment (${resp.status}): ${errBody.slice(0, 200)}`,
-        );
-      }
-
+      const now = new Date().toISOString();
       return {
         slug: input.slug,
         ownerUid: input.ownerUid,
-        projectId: safeProjectId,
-        title: safeTitle,
+        projectId: input.projectId,
+        title: input.title,
         htmlBundle: input.htmlBundle,
-        updatedAt: new Date().toISOString(),
+        createdAt: now,
+        updatedAt: now,
+        artifactPath: artifactInfo?.key,
       };
     },
 
-    async deleteOwned(slug: string, ownerUid: string, idToken: string): Promise<boolean> {
-      const existing = await fetchDoc(slug, idToken);
-      if (!existing) return false;
-      if (existing.ownerUid !== ownerUid) {
-        throw new SecurityValidationError(403, 'Only the deployment owner can unpublish this site.');
+    async deleteOwned(slug: string, ownerUid: string): Promise<boolean> {
+      const { adminDb, r2 } = getStores();
+      if (r2) {
+        await r2.deletePublishedSite(slug).catch(() => {});
       }
-
-      const { documentsBase } = getDbRoot();
-      const resp = await fetchFn(`${documentsBase}/deployments/${encodeURIComponent(slug)}`, {
-        method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${idToken}`,
-        },
-        redirect: 'error',
-      });
-      if (resp.status === 404) return false;
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        throw new SecurityValidationError(
-          resp.status === 403 ? 403 : 502,
-          `Failed to delete deployment (${resp.status}): ${errBody.slice(0, 200)}`,
-        );
+      if (adminDb) {
+        return adminDb.deleteDeployment(ownerUid, slug);
       }
       return true;
     },
@@ -279,7 +153,7 @@ export function createFirestoreDeploymentStore(options?: {
 
 /**
  * In-memory DeploymentStore implementation matching the exact authorization semantics
- * for unit tests (without hitting live Firestore).
+ * for unit tests (without hitting live Firestore/R2).
  */
 export function createMemoryDeploymentStore(): DeploymentStore {
   const map = new Map<string, StoredDeployment>();

@@ -165,3 +165,16 @@ export interface StudioSettings {
   webSearchMode?: WebSearchMode;
   notifyOnAnswerDone?: boolean;
 }
+
+export interface MistUser {
+  id: string;
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  photoURL?: string | null;
+  emailVerified: boolean;
+  getIdToken: () => Promise<string | null>;
+}
+
+export type User = MistUser;
+

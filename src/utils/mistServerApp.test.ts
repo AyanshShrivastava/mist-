@@ -8,18 +8,21 @@ import type { VerifiedFirebaseUser } from './serverSecurity';
 function createMockUsers(): Record<string, VerifiedFirebaseUser> {
   return {
     'token-user-a': {
+      userId: 'user-a',
       uid: 'user-a',
       email: 'alice@example.com',
       emailVerified: true,
       idToken: 'token-user-a',
     },
     'token-user-b': {
+      userId: 'user-b',
       uid: 'user-b',
       email: 'bob@example.com',
       emailVerified: true,
       idToken: 'token-user-b',
     },
     'token-unverified': {
+      userId: 'user-unverified',
       uid: 'user-unverified',
       email: 'pending@example.com',
       emailVerified: false,

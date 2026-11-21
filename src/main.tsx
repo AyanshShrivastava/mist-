@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { ClerkProvider } from '@clerk/react';
 import App from './App.tsx';
+import { mistClerkAppearance } from './utils/clerkTheme.ts';
 import './index.css';
 
 const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
@@ -24,7 +25,11 @@ if (!clerkPublishableKey) {
   root.render(<ClerkConfigurationError />);
 } else {
   root.render(
-    <ClerkProvider publishableKey={clerkPublishableKey} afterSignOutUrl="/">
+    <ClerkProvider
+      publishableKey={clerkPublishableKey}
+      afterSignOutUrl="/"
+      appearance={mistClerkAppearance}
+    >
       <App />
     </ClerkProvider>,
   );

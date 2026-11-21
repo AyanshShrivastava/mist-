@@ -14,7 +14,9 @@ import {
   unsealUserVaultPayload,
   validateExternalUrlSyntax,
   validateProjectFilesPayload,
-  verifyFirebaseJwtString,
+  verifyClerkAuthHeader,
+  createClerkAuthMiddleware,
+  createEdgeOriginSecretMiddleware,
 } from './serverSecurity';
 import {
   clearServerCatalogCache,
@@ -134,76 +136,56 @@ function signTestJwt(params: {
   return `${header}.${body}.${sig}`;
 }
 
-test('verifyFirebaseJwtString validates RS256 ID tokens and rejects tampered, expired, or wrong-project tokens', async () => {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
-  const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
-  const certsOverride = { 'test-kid-1': publicPem };
-  const now = 1_800_000_000;
-
-  const validJwt = signTestJwt({
-    privateKey,
-    kid: 'test-kid-1',
-    payload: {
-      aud: 'lithe-sensor-2v0ns',
-      iss: 'https://securetoken.google.com/lithe-sensor-2v0ns',
-      sub: 'user_abc_123',
-      email: 'builder@example.com',
-      email_verified: true,
-      iat: now - 30,
-      exp: now + 3600,
-    },
-  });
-
-  const verified = await verifyFirebaseJwtString(validJwt, {
-    expectedProjectId: 'lithe-sensor-2v0ns',
-    certsOverride,
-    nowSeconds: now,
-  });
-  assert.equal(verified.uid, 'user_abc_123');
-  assert.equal(verified.email, 'builder@example.com');
-  assert.equal(verified.emailVerified, true);
-
-  const wrongAudJwt = signTestJwt({
-    privateKey,
-    kid: 'test-kid-1',
-    payload: {
-      aud: 'other-project',
-      iss: 'https://securetoken.google.com/lithe-sensor-2v0ns',
-      sub: 'user_abc_123',
-      iat: now - 30,
-      exp: now + 3600,
-    },
-  });
+test('Clerk Auth & Edge Origin Secret enforce strict verification and rejection', async () => {
+  // 1. Missing header
   await assert.rejects(
-    () =>
-      verifyFirebaseJwtString(wrongAudJwt, {
-        expectedProjectId: 'lithe-sensor-2v0ns',
-        certsOverride,
-        nowSeconds: now,
-      }),
-    SecurityValidationError,
+    () => verifyClerkAuthHeader(undefined),
+    (err: unknown) => err instanceof SecurityValidationError && err.status === 401,
   );
 
-  const expiredJwt = signTestJwt({
-    privateKey,
-    kid: 'test-kid-1',
-    payload: {
-      aud: 'lithe-sensor-2v0ns',
-      iss: 'https://securetoken.google.com/lithe-sensor-2v0ns',
-      sub: 'user_abc_123',
-      iat: now - 7200,
-      exp: now - 10,
-    },
-  });
+  // 2. Malformed token form
   await assert.rejects(
-    () =>
-      verifyFirebaseJwtString(expiredJwt, {
-        expectedProjectId: 'lithe-sensor-2v0ns',
-        certsOverride,
-        nowSeconds: now,
-      }),
-    SecurityValidationError,
+    () => verifyClerkAuthHeader('Bearer invalid-not-jwt'),
+    (err: unknown) => err instanceof SecurityValidationError && err.status === 401,
   );
+
+  // 3. Edge Origin Secret middleware tests
+  const edgeMiddleware = createEdgeOriginSecretMiddleware({ expectedSecret: 'super-secret-edge-key-123' });
+
+  // Missing secret -> 403
+  let statusMissing = 0;
+  let jsonMissing: any = null;
+  const reqMissing = { headers: {} } as any;
+  const resMissing = {
+    status: (s: number) => {
+      statusMissing = s;
+      return { json: (j: any) => { jsonMissing = j; } };
+    },
+  } as any;
+  edgeMiddleware(reqMissing, resMissing, () => {});
+  assert.equal(statusMissing, 403);
+  assert.ok(jsonMissing.error.includes('Direct access to origin is prohibited'));
+
+  // Tampered / wrong secret -> 403
+  let statusWrong = 0;
+  const reqWrong = { headers: { 'x-mist-edge-secret': 'wrong-secret' } } as any;
+  const resWrong = {
+    status: (s: number) => {
+      statusWrong = s;
+      return { json: () => {} };
+    },
+  } as any;
+  edgeMiddleware(reqWrong, resWrong, () => {});
+  assert.equal(statusWrong, 403);
+
+  // Valid secret -> passes
+  let nextCalled = false;
+  const reqValid = { headers: { 'x-mist-edge-secret': 'super-secret-edge-key-123' } } as any;
+  const resValid = {} as any;
+  edgeMiddleware(reqValid, resValid, () => {
+    nextCalled = true;
+  });
+  assert.equal(nextCalled, true);
 });
 
 test('Model mappers avoid name-based billing guesses, preserve new Gemini models, track capabilities, and flag deprecated models', () => {

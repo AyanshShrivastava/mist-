@@ -4,25 +4,36 @@
  * All modifications are saved instantly to the browser's local cache.
  * There is NO periodic 10-second sync timer: network/cloud sync happens
  * strictly when the user closes the app, reloads, or navigates away.
- * On exit, pending files and projects are read and dumped to Firebase
- * for that user's account (associated with their email ID).
+ * On exit, pending files and projects are read and dumped to backend /api/projects/sync-dump
+ * with keepalive: true, scoped to the verified Clerk account.
  */
 
-import type { User } from 'firebase/auth';
-import type { MistProject } from '../types/mist';
-import { auth } from './client';
-import { saveProjectToFirestore } from './store';
+import type { MistProject, MistUser } from '../types/mist';
+import { mistApi } from '../utils/apiClient';
 
-const STORAGE_DIRTY_PROJECTS_KEY = 'mist_dirty_projects_v1';
+export function getDirtyProjectsStorageKey(userId?: string | null): string {
+  return userId ? `mist_dirty_projects_${userId}` : 'mist_dirty_projects_anonymous';
+}
 
-// In-memory queue of modified projects awaiting cloud dump
 const pendingDirtyProjects = new Map<string, MistProject>();
 let isFlushing = false;
 
-// Load any pending unsynced projects from local cache on startup
-export function initLocalCacheQueue(): void {
+let currentUserProvider: () => MistUser | null = () => null;
+
+export function setBatchedSyncUserProvider(provider: () => MistUser | null): void {
+  currentUserProvider = provider;
+}
+
+export function clearPendingDirtyQueue(): void {
+  pendingDirtyProjects.clear();
+}
+
+export function initLocalCacheQueue(userId?: string | null): void {
   try {
-    const raw = localStorage.getItem(STORAGE_DIRTY_PROJECTS_KEY);
+    pendingDirtyProjects.clear();
+    const effectiveUid = userId || currentUserProvider()?.uid;
+    const storageKey = getDirtyProjectsStorageKey(effectiveUid);
+    const raw = localStorage.getItem(storageKey);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
@@ -38,85 +49,62 @@ export function initLocalCacheQueue(): void {
   }
 }
 
-// Persist the dirty queue to localStorage
-function persistDirtyQueueToLocalCache(): void {
+function persistDirtyQueueToLocalCache(userId?: string | null): void {
   try {
+    const effectiveUid = userId || currentUserProvider()?.uid;
+    const storageKey = getDirtyProjectsStorageKey(effectiveUid);
     const array = Array.from(pendingDirtyProjects.values());
     if (array.length === 0) {
-      localStorage.removeItem(STORAGE_DIRTY_PROJECTS_KEY);
+      localStorage.removeItem(storageKey);
     } else {
-      localStorage.setItem(STORAGE_DIRTY_PROJECTS_KEY, JSON.stringify(array));
+      localStorage.setItem(storageKey, JSON.stringify(array));
     }
   } catch {
     // Ignore quota errors
   }
 }
 
-/**
- * Queue a project modification in local cache.
- * Changes remain local until the user closes or leaves the app.
- */
-export function queueProjectForBatchedSync(project: MistProject): void {
+export function queueProjectForBatchedSync(project: MistProject, userId?: string | null): void {
   pendingDirtyProjects.set(project.id, project);
-  persistDirtyQueueToLocalCache();
+  persistDirtyQueueToLocalCache(userId);
 }
 
-/**
- * Remove a project from the dirty queue (e.g. if deleted locally).
- */
-export function dequeueProjectFromBatchedSync(projectId: string): void {
+export function dequeueProjectFromBatchedSync(projectId: string, userId?: string | null): void {
   pendingDirtyProjects.delete(projectId);
-  persistDirtyQueueToLocalCache();
+  persistDirtyQueueToLocalCache(userId);
 }
 
-/**
- * Flush all dirty projects at once to Firestore directly from client.
- */
-export async function flushBatchedSyncNow(): Promise<{ synced: number; remaining: number }> {
+export async function flushBatchedSyncNow(user?: MistUser | null): Promise<{ synced: number; remaining: number }> {
   if (isFlushing || pendingDirtyProjects.size === 0) {
     return { synced: 0, remaining: pendingDirtyProjects.size };
   }
 
-  const user = auth.currentUser;
-  if (!user) {
-    // Keep in local cache until user signs in
+  const activeUser = user || currentUserProvider();
+  if (!activeUser) {
     return { synced: 0, remaining: pendingDirtyProjects.size };
   }
 
   isFlushing = true;
-  // Snapshot current dirty projects to sync
-  const snapshot = Array.from(pendingDirtyProjects.entries());
-  let synced = 0;
+  const snapshot = Array.from(pendingDirtyProjects.values());
 
   try {
-    // Save all pending projects in parallel
-    await Promise.all(
-      snapshot.map(async ([id, project]) => {
-        try {
-          await saveProjectToFirestore(project);
-          pendingDirtyProjects.delete(id);
-          synced++;
-        } catch (err) {
-          console.warn(`[BatchedSync] Deferred sync for project ${id} due to network:`, err);
-        }
-      }),
-    );
+    const token = await activeUser.getIdToken();
+    const res = await mistApi.syncProjects(snapshot, token);
+    for (const p of snapshot) {
+      pendingDirtyProjects.delete(p.id);
+    }
+    return { synced: res.synced, remaining: pendingDirtyProjects.size };
+  } catch (err) {
+    console.warn('[BatchedSync] Flush failure:', err);
+    return { synced: 0, remaining: pendingDirtyProjects.size };
   } finally {
     persistDirtyQueueToLocalCache();
     isFlushing = false;
   }
-
-  return { synced, remaining: pendingDirtyProjects.size };
 }
 
-/**
- * Flush pending dirty projects when the user closes the app, reloads, or hides tab.
- * Reads all dirty project files and dumps them to the backend /api/projects/sync-dump
- * with keepalive: true (which the browser network stack completes even if the tab closes),
- * while also running client-side Firestore flush in parallel.
- */
-export async function flushBatchedSyncOnAppExit(user?: User | null): Promise<void> {
-  const activeUser = user || auth.currentUser;
+export async function flushBatchedSyncOnAppExit(user?: MistUser | null): Promise<void> {
+  const activeUser = user || currentUserProvider();
   if (!activeUser) return;
 
   initLocalCacheQueue();
@@ -125,13 +113,13 @@ export async function flushBatchedSyncOnAppExit(user?: User | null): Promise<voi
   const dirtyList = Array.from(pendingDirtyProjects.values());
 
   try {
-    const idToken = await activeUser.getIdToken();
-    if (idToken) {
+    const token = await activeUser.getIdToken();
+    if (token) {
       void fetch('/api/projects/sync-dump', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
+          Authorization: `Bearer ${token}`,
         },
         keepalive: true,
         body: JSON.stringify({ projects: dirtyList }),
@@ -140,10 +128,10 @@ export async function flushBatchedSyncOnAppExit(user?: User | null): Promise<voi
       });
     }
   } catch (tokenErr) {
-    console.warn('[BatchedSync] Could not obtain idToken on app close:', tokenErr);
+    console.warn('[BatchedSync] Could not obtain token on app close:', tokenErr);
   }
 
-  void flushBatchedSyncNow().catch(() => {});
+  void flushBatchedSyncNow(activeUser).catch(() => {});
 }
 
 export function getPendingDirtyCount(): number {

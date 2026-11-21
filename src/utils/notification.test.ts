@@ -74,6 +74,7 @@ test('Server notification endpoints: /sw.js, /api/notifications/vapid-public-key
     verifyAuthHeader: async (header) => {
       if (header === 'Bearer valid-user-token') {
         return {
+          userId: 'test-user-123',
           uid: 'test-user-123',
           email: 'test@example.com',
           emailVerified: true,
@@ -105,17 +106,26 @@ test('Server notification endpoints: /sw.js, /api/notifications/vapid-public-key
     assert.ok(keyJson.publicKey);
     assert.ok(keyJson.subject);
 
-    // 3. POST /api/notifications/keys/generate
-    const genRes = await fetch(`${baseUrl}/api/notifications/keys/generate`, {
+    // 3. POST /api/notifications/keys/generate (requires verified auth)
+    const genResUnauth = await fetch(`${baseUrl}/api/notifications/keys/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+    });
+    assert.equal(genResUnauth.status, 401);
+
+    const genRes = await fetch(`${baseUrl}/api/notifications/keys/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer valid-user-token',
+      },
     });
     assert.equal(genRes.status, 200);
     const genJson = await genRes.json();
     assert.ok(genJson.publicKey);
     assert.ok(genJson.privateKey);
 
-    // 4. POST /api/notifications/subscribe (anonymous)
+    // 4. POST /api/notifications/subscribe (anonymous rejected with 401)
     const subPayload = {
       subscription: {
         endpoint: 'https://updates.push.services.mozilla.com/wpush/v2/gAAAAAB...',
@@ -125,15 +135,12 @@ test('Server notification endpoints: /sw.js, /api/notifications/vapid-public-key
         },
       },
     };
-    const subRes = await fetch(`${baseUrl}/api/notifications/subscribe`, {
+    const subResAnon = await fetch(`${baseUrl}/api/notifications/subscribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(subPayload),
     });
-    assert.equal(subRes.status, 200);
-    const subJson = await subRes.json();
-    assert.equal(subJson.ok, true);
-    assert.equal(subJson.subscription.endpoint, subPayload.subscription.endpoint);
+    assert.equal(subResAnon.status, 401);
 
     // 5. POST /api/notifications/subscribe (authenticated with user)
     const subResAuth = await fetch(`${baseUrl}/api/notifications/subscribe`, {
@@ -147,10 +154,13 @@ test('Server notification endpoints: /sw.js, /api/notifications/vapid-public-key
     assert.equal(subResAuth.status, 200);
     assert.equal(customService.getSubscriptions('test-user-123').length, 1);
 
-    // 6. POST /api/notifications/unsubscribe
+    // 6. POST /api/notifications/unsubscribe (authenticated)
     const unsubRes = await fetch(`${baseUrl}/api/notifications/unsubscribe`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer valid-user-token',
+      },
       body: JSON.stringify({ endpoint: subPayload.subscription.endpoint }),
     });
     assert.equal(unsubRes.status, 200);

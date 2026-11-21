@@ -13,7 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import type { User } from 'firebase/auth';
+import type { MistUser as User } from '../types/mist';
 import type { AiProviderConfig } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
 import { MistMark } from './MistLogo';

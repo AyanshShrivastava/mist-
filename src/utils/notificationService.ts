@@ -106,7 +106,7 @@ export class PushNotificationService {
 
     console.info('[Mist Notifications] Auto-generated VAPID keys for Web Push:');
     console.info(`  VAPID_PUBLIC_KEY:  ${config.publicKey}`);
-    console.info(`  VAPID_PRIVATE_KEY: ${config.privateKey}`);
+    console.info('  VAPID_PRIVATE_KEY: [REDACTED]');
     console.info(`  VAPID_SUBJECT:     ${config.subject}`);
     console.info('[Mist Notifications] To persist across AI Studio restarts at mistdev.ai.studio:');
     console.info('  Add VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY to the Google AI Studio Secrets / Environment Variables panel.');

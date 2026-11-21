@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { User } from 'firebase/auth';
+import type { MistUser as User } from '../types/mist';
 import {
   fetchVapidConfig,
   getCurrentPushSubscription,
@@ -53,7 +53,7 @@ export function usePushNotifications(user: User | null) {
     setMessage(null);
 
     try {
-      const idToken = user ? await user.getIdToken().catch(() => undefined) : undefined;
+      const idToken = user ? (await user.getIdToken().catch(() => undefined)) ?? undefined : undefined;
       const result = await subscribeToPush(idToken);
 
       if (result.success) {
@@ -80,7 +80,7 @@ export function usePushNotifications(user: User | null) {
     setMessage(null);
 
     try {
-      const idToken = user ? await user.getIdToken().catch(() => undefined) : undefined;
+      const idToken = user ? (await user.getIdToken().catch(() => undefined)) ?? undefined : undefined;
       const result = await unsubscribeFromPush(idToken);
 
       if (result.success) {
@@ -105,7 +105,7 @@ export function usePushNotifications(user: User | null) {
     setMessage(null);
 
     try {
-      const idToken = user ? await user.getIdToken().catch(() => undefined) : undefined;
+      const idToken = user ? (await user.getIdToken().catch(() => undefined)) ?? undefined : undefined;
       const result = await sendTestPushNotification(idToken);
 
       if (result.success) {

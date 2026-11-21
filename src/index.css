@@ -189,3 +189,139 @@ h1, h2 { letter-spacing: -0.035em; }
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------- Clerk Custom UI & Watermark Suppression ---------- */
+.cl-footer,
+.cl-footerAction,
+.cl-internal-b3fm6y,
+.cl-internal-1dauvpw,
+.cl-internal-18080wh,
+.cl-badge,
+.cl-attribution,
+[data-localization-key*="securedByClerk"],
+a[href*="clerk.com?utm_source"],
+a[href*="clerk.dev?utm_source"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+}
+
+/* Force dark contrast on Clerk modal elements */
+.cl-rootBox,
+.cl-card,
+.cl-modalBackdrop,
+.cl-modalContent,
+[data-clerk-modal] {
+  color-scheme: dark !important;
+}
+
+.cl-modalBackdrop {
+  background-color: rgba(0, 0, 0, 0.82) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+.cl-card {
+  background-color: #0d0f18 !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.85) !important;
+  color: #f8fafc !important;
+}
+
+.cl-headerTitle {
+  color: #ffffff !important;
+  font-weight: 700 !important;
+}
+
+.cl-headerSubtitle {
+  color: #94a3b8 !important;
+}
+
+.cl-socialButtonsBlockButton,
+.cl-socialButtonsBlockButton *,
+.cl-socialButtonsBlockButtonText,
+.cl-socialButtonsIconButton,
+.cl-button {
+  color: #ffffff !important;
+}
+
+.cl-socialButtonsBlockButton {
+  background-color: #161924 !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+}
+
+.cl-socialButtonsBlockButton:hover,
+.cl-socialButtonsIconButton:hover {
+  background-color: #1f2433 !important;
+  border-color: rgba(255, 255, 255, 0.25) !important;
+  color: #ffffff !important;
+}
+
+.cl-socialButtonsBlockButtonText {
+  color: #f8fafc !important;
+  font-weight: 600 !important;
+}
+
+.cl-socialButtonsIconButton {
+  background-color: #161924 !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: #f8fafc !important;
+}
+
+.cl-dividerLine {
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+.cl-dividerText {
+  color: #64748b !important;
+  font-weight: 600 !important;
+}
+
+.cl-formFieldLabel {
+  color: #cbd5e1 !important;
+  font-weight: 500 !important;
+}
+
+.cl-formFieldInput,
+.cl-input,
+input.cl-input,
+input.cl-formFieldInput,
+input[name="identifier"] {
+  background-color: #161924 !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+.cl-formFieldInput:focus,
+.cl-input:focus,
+input.cl-input:focus {
+  border-color: #3b82f6 !important;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25) !important;
+}
+
+.cl-formFieldInput::placeholder,
+.cl-input::placeholder,
+input.cl-input::placeholder {
+  color: #64748b !important;
+  -webkit-text-fill-color: #64748b !important;
+}
+
+.cl-formButtonPrimary {
+  background: linear-gradient(135deg, #2563eb 0%, #4f46e5 50%, #7c3aed 100%) !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  border: none !important;
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35) !important;
+}
+
+.cl-formButtonPrimary:hover {
+  opacity: 0.94 !important;
+  box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5) !important;
+}

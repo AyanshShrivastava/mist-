@@ -31,7 +31,7 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import type { User } from 'firebase/auth';
+import type { MistUser as User } from '../types/mist';
 import type {
   AiProviderConfig,
   AiStreamProgress,
@@ -677,9 +677,13 @@ export default function WorkspaceView({
             type="button"
             onClick={onOpenAccount}
             aria-label="Account profile"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer overflow-hidden"
           >
-            <UserIcon className="h-3.5 w-3.5" aria-hidden="true" />
+            {user?.photoURL ? (
+              <img src={user.photoURL} alt={user.displayName || 'Account'} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
+            ) : (
+              <UserIcon className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
           </button>
         </div>
       </header>

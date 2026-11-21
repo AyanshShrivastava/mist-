@@ -10,10 +10,14 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/data/models.test.ts src/utils/webSearch.test.ts src/utils/security.test.ts src/utils/mistServerApp.test.ts src/utils/notification.test.ts"
+    "test": "tsx --test src/data/models.test.ts src/utils/webSearch.test.ts src/utils/security.test.ts src/utils/mistServerApp.test.ts src/utils/notification.test.ts src/utils/projectOps.test.ts src/utils/aiErrors.test.ts src/server/migration.test.ts cloudflare/src/index.test.ts",
+    "migrate:identities": "tsx scripts/migrate-identities.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1175.0",
+    "@clerk/express": "^2.1.96",
     "@clerk/react": "^6.19.4",
+    "@clerk/themes": "^2.4.57",
     "@firebase/eslint-plugin-security-rules": "^0.0.2",
     "@google/genai": "^3.3.0",
     "@rolldown/binding-darwin-arm64": "^1.2.19",
@@ -26,6 +30,7 @@
     "eslint": "^10.15.0",
     "express": "^4.21.2",
     "firebase": "^13.3.0",
+    "firebase-admin": "^13.10.0",
     "jszip": "^3.10.2",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",

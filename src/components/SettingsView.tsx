@@ -23,7 +23,7 @@ import {
   User as UserIcon,
 } from 'lucide-react';
 import { motion } from 'motion/react';
-import type { User } from 'firebase/auth';
+import type { MistUser as User } from '../types/mist';
 import { notifyAnswerDone, subscribeToPush } from '../utils/pushNotifications';
 import type {
   AiProviderConfig,
@@ -208,7 +208,7 @@ export default function SettingsView({
       setCatalogError(null);
 
       try {
-        const idToken = user ? await user.getIdToken() : undefined;
+        const idToken = user ? (await user.getIdToken()) ?? undefined : undefined;
         if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
         const res = await fetchLiveModelCatalog({
           baseUrl: cleaned,
@@ -1452,7 +1452,7 @@ export default function SettingsView({
                             if (Notification.permission === 'default') {
                               const perm = await Notification.requestPermission();
                               if (perm === 'granted') {
-                                const idToken = user ? await user.getIdToken().catch(() => undefined) : undefined;
+                                const idToken = user ? (await user.getIdToken().catch(() => undefined)) ?? undefined : undefined;
                                 void subscribeToPush(idToken).catch(() => {});
                               }
                             }

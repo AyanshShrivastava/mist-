@@ -30,7 +30,7 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import type { User } from 'firebase/auth';
+import type { MistUser as User } from '../types/mist';
 import type {
   AiProviderConfig,
   AiStreamProgress,
@@ -250,7 +250,7 @@ export default function HomeView({
       setCatalogError(null);
 
       try {
-        const idToken = user ? await user.getIdToken() : undefined;
+        const idToken = user ? (await user.getIdToken()) ?? undefined : undefined;
         if (seq !== catalogSeqRef.current || controller.signal.aborted) return;
         const res = await fetchLiveModelCatalog({
           baseUrl: cleanUrl,
@@ -1140,7 +1140,7 @@ export default function HomeView({
             ) : (
               <span className="flex h-7 w-7 items-center justify-center rounded-full mist-primary-gradient text-xs font-semibold text-white">{firstName.charAt(0).toUpperCase()}</span>
             )}
-            <span className="min-w-0">
+            <span className="min-w-0 flex-1">
               <span className="block truncate text-sm font-medium">{user.displayName || firstName}</span>
               <span className="block truncate text-[11px] text-zinc-500">{user.email}</span>
             </span>

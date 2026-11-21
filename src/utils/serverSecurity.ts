@@ -477,12 +477,20 @@ function deriveUserVaultKey(params: {
 
   const rawSecret =
     params.secretOverride?.trim() ||
-    process.env.MIST_VAULT_SECRET?.trim() ||
-    `${runtimeProject}:mist-account-vault-master-v1`;
+    process.env.MIST_VAULT_SECRET?.trim();
+
+  if (!rawSecret && process.env.NODE_ENV === 'production') {
+    throw new SecurityValidationError(
+      500,
+      'Server configuration error: MIST_VAULT_SECRET must be configured in production.',
+    );
+  }
+
+  const effectiveSecret = rawSecret || `${runtimeProject}:mist-account-vault-dev-only`;
 
   const derived = crypto.hkdfSync(
     'sha256',
-    Buffer.from(rawSecret, 'utf8'),
+    Buffer.from(effectiveSecret, 'utf8'),
     Buffer.from(`mist:${runtimeProject}:${uid}`, 'utf8'),
     Buffer.from(`mist-vault:${normalizedEmail}`, 'utf8'),
     32,
@@ -615,220 +623,181 @@ export function unsealUserVaultPayload(params: {
   }
 }
 
-// --- 5. Firebase Auth ID Token Verification (RS256 via Google Public x509 Certs) ---
+import { verifyToken as clerkVerifyToken } from '@clerk/express';
 
-const SECURE_TOKEN_CERTS_URL =
-  'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
+// --- 5. Clerk Auth Token Verification & Edge Origin Protection ---
 
 let cachedProjectId: string | null = null;
 export function getFirebaseProjectId(): string {
   if (cachedProjectId) return cachedProjectId;
   const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-  const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { projectId?: string };
-  if (!parsed.projectId) {
-    throw new Error('Missing projectId in firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { projectId?: string };
+    if (parsed.projectId) {
+      cachedProjectId = parsed.projectId;
+      return cachedProjectId;
+    }
   }
-  cachedProjectId = parsed.projectId;
+  cachedProjectId = process.env.FIREBASE_PROJECT_ID || 'lithe-sensor-2v0ns';
   return cachedProjectId;
 }
 
 export function getFirebaseAppletConfig(): { projectId: string; firestoreDatabaseId: string } {
   const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-  const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as {
-    projectId?: string;
-    firestoreDatabaseId?: string;
-  };
-  if (!parsed.projectId) {
-    throw new Error('Missing projectId in firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as {
+      projectId?: string;
+      firestoreDatabaseId?: string;
+    };
+    if (parsed.projectId) {
+      return {
+        projectId: parsed.projectId,
+        firestoreDatabaseId: parsed.firestoreDatabaseId || '(default)',
+      };
+    }
   }
   return {
-    projectId: parsed.projectId,
-    firestoreDatabaseId: parsed.firestoreDatabaseId || '(default)',
+    projectId: process.env.FIREBASE_PROJECT_ID || 'lithe-sensor-2v0ns',
+    firestoreDatabaseId: process.env.FIREBASE_DATABASE_ID || '(default)',
   };
 }
 
-let certCache: { certs: Record<string, string>; expiresAt: number } | null = null;
-
-async function fetchGoogleSecureTokenCerts(): Promise<Record<string, string>> {
-  if (certCache && certCache.expiresAt > Date.now()) {
-    return certCache.certs;
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
-  try {
-    const resp = await fetch(SECURE_TOKEN_CERTS_URL, {
-      redirect: 'error',
-      signal: controller.signal,
-    });
-    if (!resp.ok) {
-      throw new Error(`Failed to fetch Firebase public certificates (${resp.status}).`);
-    }
-    const certs = (await resp.json()) as Record<string, string>;
-    const cc = resp.headers.get('cache-control') || '';
-    const maxAgeMatch = cc.match(/max-age=(\d+)/i);
-    const maxAgeSec = maxAgeMatch ? Math.min(Number(maxAgeMatch[1]), 86400) : 3600;
-    certCache = {
-      certs,
-      expiresAt: Date.now() + Math.max(60, maxAgeSec) * 1000,
-    };
-    return certs;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-export interface VerifiedFirebaseUser {
+export interface VerifiedClerkUser {
+  userId: string;
   uid: string;
   email?: string;
   emailVerified: boolean;
-  idToken: string;
+  claims?: Record<string, unknown>;
+  idToken?: string;
 }
+
+export type VerifiedFirebaseUser = VerifiedClerkUser;
 
 export interface AuthenticatedRequest extends ExpressRequest {
-  authUser?: VerifiedFirebaseUser;
+  authUser?: VerifiedClerkUser;
 }
 
-function decodeBase64UrlJson<T>(segment: string): T {
-  const normalized = segment.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
-  return JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as T;
-}
-
-function decodeBase64UrlBuffer(segment: string): Buffer {
-  const normalized = segment.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
-  return Buffer.from(padded, 'base64');
-}
-
-export async function verifyFirebaseJwtString(
+export async function verifyClerkToken(
   token: string,
   options?: {
-    expectedProjectId?: string;
-    certsOverride?: Record<string, string>;
-    nowSeconds?: number;
+    secretKey?: string;
+    jwtKey?: string;
+    authorizedParties?: string[];
   },
-): Promise<VerifiedFirebaseUser> {
-  const parts = token.split('.');
-  if (parts.length !== 3) {
-    throw new SecurityValidationError(401, 'Invalid authentication token format.');
-  }
-  const [encodedHeader, encodedPayload, encodedSig] = parts;
-  const header = decodeBase64UrlJson<{ alg?: string; kid?: string }>(encodedHeader);
-  if (header.alg !== 'RS256' || !header.kid) {
-    throw new SecurityValidationError(401, 'Unsupported authentication token algorithm.');
+): Promise<VerifiedClerkUser> {
+  const secretKey = options?.secretKey || process.env.CLERK_SECRET_KEY;
+  const authorizedParties =
+    options?.authorizedParties ||
+    (process.env.CLERK_AUTHORIZED_PARTIES
+      ? process.env.CLERK_AUTHORIZED_PARTIES.split(',').map((s) => s.trim()).filter(Boolean)
+      : undefined);
+
+  if (!token) {
+    throw new SecurityValidationError(401, 'Missing authentication token.');
   }
 
-  const certs = options?.certsOverride || (await fetchGoogleSecureTokenCerts());
-  const pem = certs[header.kid];
-  if (!pem) {
-    if (!options?.certsOverride) {
-      certCache = null;
-      const fresh = await fetchGoogleSecureTokenCerts();
-      if (!fresh[header.kid]) {
-        throw new SecurityValidationError(401, 'Signing certificate not recognized.');
-      }
-      return verifyWithCert(token, encodedHeader, encodedPayload, encodedSig, fresh[header.kid], options);
+  try {
+    const verified = await clerkVerifyToken(token, {
+      secretKey,
+      jwtKey: options?.jwtKey || process.env.CLERK_JWT_KEY,
+      authorizedParties,
+    });
+
+    const sub = verified.sub;
+    if (!sub || typeof sub !== 'string') {
+      throw new SecurityValidationError(401, 'Authentication token missing subject.');
     }
-    throw new SecurityValidationError(401, 'Signing certificate not recognized.');
-  }
 
-  return verifyWithCert(token, encodedHeader, encodedPayload, encodedSig, pem, options);
+    const claims = verified as Record<string, unknown>;
+    const email =
+      (typeof claims.email === 'string' && claims.email) ||
+      (typeof claims.primary_email === 'string' && claims.primary_email) ||
+      undefined;
+
+    const emailVerified =
+      claims.email_verified === true ||
+      claims.email_verified === undefined;
+
+    return {
+      userId: sub,
+      uid: sub,
+      email,
+      emailVerified,
+      claims,
+      idToken: token,
+    };
+  } catch (err) {
+    if (err instanceof SecurityValidationError) throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new SecurityValidationError(401, `Authentication failed: ${msg}`);
+  }
 }
 
-function verifyWithCert(
-  rawToken: string,
-  encodedHeader: string,
-  encodedPayload: string,
-  encodedSig: string,
-  pem: string,
-  options?: { expectedProjectId?: string; nowSeconds?: number },
-): VerifiedFirebaseUser {
-  const verifier = crypto.createVerify('RSA-SHA256');
-  verifier.update(`${encodedHeader}.${encodedPayload}`);
-  verifier.end();
-
-  const signature = decodeBase64UrlBuffer(encodedSig);
-  const publicKey = crypto.createPublicKey(pem);
-  const isValid = verifier.verify(publicKey, signature);
-  if (!isValid) {
-    throw new SecurityValidationError(401, 'Authentication signature verification failed.');
-  }
-
-  const payload = decodeBase64UrlJson<{
-    aud?: string;
-    iss?: string;
-    sub?: string;
-    exp?: number;
-    iat?: number;
-    auth_time?: number;
-    email?: string;
-    email_verified?: boolean;
-  }>(encodedPayload);
-
-  const projectId = options?.expectedProjectId || getFirebaseProjectId();
-  const now = options?.nowSeconds ?? Math.floor(Date.now() / 1000);
-
-  if (payload.aud !== projectId) {
-    throw new SecurityValidationError(401, 'Authentication token audience mismatch.');
-  }
-  if (payload.iss !== `https://securetoken.google.com/${projectId}`) {
-    throw new SecurityValidationError(401, 'Authentication token issuer mismatch.');
-  }
-  if (!payload.sub || typeof payload.sub !== 'string' || payload.sub.length > 128) {
-    throw new SecurityValidationError(401, 'Authentication token missing subject.');
-  }
-  if (typeof payload.exp !== 'number' || payload.exp <= now) {
-    throw new SecurityValidationError(401, 'Authentication session expired. Please sign in again.');
-  }
-  if (typeof payload.iat !== 'number' || payload.iat > now + 300) {
-    throw new SecurityValidationError(401, 'Authentication token issued-at time is invalid.');
-  }
-  if (typeof payload.auth_time === 'number' && payload.auth_time > now + 300) {
-    throw new SecurityValidationError(401, 'Authentication auth_time is invalid.');
-  }
-
-  return {
-    uid: payload.sub,
-    email: typeof payload.email === 'string' ? payload.email : undefined,
-    emailVerified: Boolean(payload.email_verified),
-    idToken: rawToken,
-  };
-}
-
-export async function verifyFirebaseAuthHeader(
+export async function verifyClerkAuthHeader(
   authHeader?: string,
   options?: {
-    expectedProjectId?: string;
-    certsOverride?: Record<string, string>;
-    nowSeconds?: number;
+    secretKey?: string;
+    jwtKey?: string;
+    authorizedParties?: string[];
   },
-): Promise<VerifiedFirebaseUser> {
+): Promise<VerifiedClerkUser> {
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw new SecurityValidationError(401, 'Sign in with Google is required for this action.');
+    throw new SecurityValidationError(401, 'Clerk authentication is required for this action.');
   }
   const token = authHeader.slice('Bearer '.length).trim();
   if (!token) {
     throw new SecurityValidationError(401, 'Missing authentication token.');
   }
-  return verifyFirebaseJwtString(token, options);
+  return verifyClerkToken(token, options);
 }
 
-export function createFirebaseAuthMiddleware(options?: {
+export const verifyFirebaseAuthHeader = verifyClerkAuthHeader;
+
+export function createClerkAuthMiddleware(options?: {
   requireVerifiedEmail?: boolean;
-  verifyHeaderFn?: (header?: string) => Promise<VerifiedFirebaseUser>;
+  verifyHeaderFn?: (header?: string) => Promise<VerifiedClerkUser>;
+  authorizedParties?: string[];
+  secretKey?: string;
 }) {
-  const verifyFn = options?.verifyHeaderFn || verifyFirebaseAuthHeader;
+  const verifyFn = options?.verifyHeaderFn || ((h) => verifyClerkAuthHeader(h, options));
   const requireEmailVerified = options?.requireVerifiedEmail !== false;
 
   return async (req: AuthenticatedRequest, res: ExpressResponse, next: NextFunction) => {
     try {
       const authUser = await verifyFn(req.headers.authorization);
-      if (requireEmailVerified && !authUser.emailVerified) {
+      if (!authUser.userId) {
+        authUser.userId = authUser.uid;
+      }
+      if (requireEmailVerified && authUser.emailVerified === false) {
         res.status(403).json({
-          error: 'A verified Google account email is required for this action.',
+          error: 'A verified account email is required for this action.',
         });
         return;
       }
+
+      // Check server-side allowlists if configured in environment
+      const allowedUserIds = (process.env.MIST_ALLOWED_USER_IDS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const allowedEmails = (process.env.MIST_ALLOWED_EMAILS || '')
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+
+      if (allowedUserIds.length > 0 && !allowedUserIds.includes(authUser.userId)) {
+        res.status(403).json({ error: 'Access denied: user ID is not authorized.' });
+        return;
+      }
+
+      if (
+        allowedEmails.length > 0 &&
+        (!authUser.email || !allowedEmails.includes(authUser.email.toLowerCase()))
+      ) {
+        res.status(403).json({ error: 'Access denied: account email is not authorized.' });
+        return;
+      }
+
       req.authUser = authUser;
       next();
     } catch (err) {
@@ -837,6 +806,35 @@ export function createFirebaseAuthMiddleware(options?: {
     }
   };
 }
+
+export const createFirebaseAuthMiddleware = createClerkAuthMiddleware;
+
+export function createEdgeOriginSecretMiddleware(options?: {
+  expectedSecret?: string;
+}) {
+  return (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+    const expected = options?.expectedSecret ?? process.env.MIST_EDGE_ORIGIN_SECRET;
+    if (!expected) {
+      return next();
+    }
+
+    const header = req.headers['x-mist-edge-secret'];
+    if (typeof header !== 'string' || !header) {
+      res.status(403).json({ error: 'Direct access to origin is prohibited. Requests must route via Cloudflare edge.' });
+      return;
+    }
+
+    const bufHeader = Buffer.from(header, 'utf8');
+    const bufExpected = Buffer.from(expected, 'utf8');
+    if (bufHeader.length !== bufExpected.length || !crypto.timingSafeEqual(bufHeader, bufExpected)) {
+      res.status(403).json({ error: 'Invalid edge origin secret.' });
+      return;
+    }
+
+    next();
+  };
+}
+
 
 // --- 6. Same-Origin / Cross-Site Mutation Defense ---
 

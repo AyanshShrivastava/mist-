@@ -26,6 +26,8 @@ import {
 import { classifyModelError, type ModelHealthIncident } from './aiErrors';
 import { maskApiKey, normalizeProjectFilePath, resolveAppEntryPath } from './projectOps';
 import {
+  createClerkAuthMiddleware,
+  createEdgeOriginSecretMiddleware,
   createFirebaseAuthMiddleware,
   createPreviewAiSession,
   createRateLimiter,
@@ -39,8 +41,10 @@ import {
   SecurityValidationError,
   unsealUserVaultPayload,
   validateProjectFilesPayload,
+  verifyClerkAuthHeader,
   verifyFirebaseAuthHeader,
   type AuthenticatedRequest,
+  type VerifiedClerkUser,
   type VerifiedFirebaseUser,
 } from './serverSecurity';
 import { fetchGatewayModelsCatalog } from './modelCatalogServer';
@@ -56,6 +60,17 @@ import {
   formatDeploymentUrl,
   type DeploymentStore,
 } from './deploymentStore';
+import {
+  FirestoreAdminStore,
+  InMemoryAdminStore,
+  type AdminDatabaseOperations,
+} from '../server/firestoreAdmin';
+import {
+  CloudflareR2ArtifactStore,
+  InMemoryR2ArtifactStore,
+  type R2StorageOperations,
+} from './r2ArtifactStore';
+
 import {
   defaultWebSearchService,
   formatRetrievedSourcesForPrompt,
@@ -1005,7 +1020,10 @@ Return valid JSON containing ONLY the modified or newly created files (full comp
 
 export interface MistAppDeps {
   deploymentStore?: DeploymentStore;
-  verifyAuthHeader?: (authHeader?: string) => Promise<VerifiedFirebaseUser>;
+  adminStore?: AdminDatabaseOperations;
+  r2Store?: R2StorageOperations;
+  edgeOriginSecret?: string;
+  verifyAuthHeader?: (authHeader?: string) => Promise<VerifiedClerkUser>;
   aiFetchImpl?: typeof fetch;
   searchFetchImpl?: typeof fetch;
   searchService?: WebSearchService;
@@ -1021,8 +1039,37 @@ export interface MistAppDeps {
 
 export function createMistApp(deps: MistAppDeps = {}): Express {
   const app = express();
-  const deploymentStore = deps.deploymentStore || createFirestoreDeploymentStore();
-  const verifyAuth = deps.verifyAuthHeader || verifyFirebaseAuthHeader;
+
+  let adminStore = deps.adminStore;
+  if (!adminStore) {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.NODE_ENV === 'production') {
+      try {
+        adminStore = new FirestoreAdminStore();
+      } catch {
+        adminStore = new InMemoryAdminStore();
+      }
+    } else {
+      adminStore = new InMemoryAdminStore();
+    }
+  }
+
+  let r2Store = deps.r2Store;
+  if (!r2Store) {
+    if (process.env.R2_SECRET_ACCESS_KEY || process.env.NODE_ENV === 'production') {
+      try {
+        r2Store = new CloudflareR2ArtifactStore();
+      } catch {
+        r2Store = new InMemoryR2ArtifactStore();
+      }
+    } else {
+      r2Store = new InMemoryR2ArtifactStore();
+    }
+  }
+
+  const deploymentStore =
+    deps.deploymentStore ||
+    createFirestoreDeploymentStore({ adminStore, r2Store });
+  const verifyAuth = deps.verifyAuthHeader || verifyClerkAuthHeader;
   const aiFetchImpl = deps.aiFetchImpl;
   const searchFetchImpl = deps.searchFetchImpl ?? deps.aiFetchImpl;
   const searchService = deps.searchService || defaultWebSearchService;
@@ -1050,13 +1097,27 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
     res.setHeader('X-DNS-Prefetch-Control', 'off');
     next();
   });
+  app.use(createEdgeOriginSecretMiddleware({ expectedSecret: deps.edgeOriginSecret }));
   app.use(enforceSameOriginOnMutations);
   app.use(express.json({ limit: '6mb' }));
 
-  const requireVerifiedAuth = createFirebaseAuthMiddleware({
+  // Explicit health check endpoints
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      status: 'ok',
+      service: 'mist-control-plane',
+      time: new Date().toISOString(),
+    });
+  });
+  app.get('/healthz', (_req, res) => {
+    res.json({ status: 'ok', time: new Date().toISOString() });
+  });
+
+  const requireVerifiedAuth = createClerkAuthMiddleware({
     requireVerifiedEmail: true,
     verifyHeaderFn: verifyAuth,
   });
+
 
   const aiRateLimiter = createRateLimiter({
     windowMs: 60_000,
@@ -1082,6 +1143,11 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
     windowMs: 60_000,
     maxRequests: deps.notificationRateLimitMax ?? 60,
     label: 'notifications',
+  });
+  const bundleRateLimiter = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: 30,
+    label: 'bundling',
   });
 
   const recentModelIncidents = new Map<string, ModelHealthIncident>();
@@ -1195,7 +1261,7 @@ Return JSON: { "content": "..." }`;
     }
   });
 
-  app.post('/api/bundle', catalogRateLimiter, async (req, res) => {
+  app.post('/api/bundle', bundleRateLimiter, async (req, res) => {
     try {
       const { files, title, includeInspector, enableAppAi, standaloneExport } = req.body as {
         files: ProjectFile[];
@@ -1290,11 +1356,11 @@ Return JSON: { "content": "..." }`;
     '/api/user/vault/seal',
     requireVerifiedAuth,
     catalogRateLimiter,
-    (req: AuthenticatedRequest, res) => {
+    async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
         if (!user.email) {
-          res.status(400).json({ error: 'A Google account email is required to seal credentials.' });
+          res.status(400).json({ error: 'An account email is required to seal credentials.' });
           return;
         }
         const { aiConfig, searchConfig } = req.body as {
@@ -1302,10 +1368,15 @@ Return JSON: { "content": "..." }`;
           searchConfig?: WebSearchConfig;
         };
         const sealed = sealUserVaultPayload({
-          uid: user.uid,
+          uid: user.userId,
           email: user.email,
           aiConfig: aiConfig ? normalizeProviderConfigToStudio(aiConfig) : undefined,
           searchConfig: searchConfig ? normalizeWebSearchConfig(searchConfig) : undefined,
+        });
+        await adminStore.saveUserVault(user.userId, user.email, {
+          ciphertext: sealed.encryptedPayload,
+          aiKeyHint: sealed.aiKeyHint,
+          searchKeyHint: sealed.searchKeyHint,
         });
         res.json(sealed);
       } catch (err) {
@@ -1319,18 +1390,26 @@ Return JSON: { "content": "..." }`;
     '/api/user/vault/unseal',
     requireVerifiedAuth,
     catalogRateLimiter,
-    (req: AuthenticatedRequest, res) => {
+    async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
         if (!user.email) {
-          res.status(400).json({ error: 'A Google account email is required to unseal credentials.' });
+          res.status(400).json({ error: 'An account email is required to unseal credentials.' });
           return;
         }
-        const { encryptedPayload } = req.body as { encryptedPayload?: string };
+        let encryptedPayload = (req.body as { encryptedPayload?: string })?.encryptedPayload;
+        if (!encryptedPayload) {
+          const vaultDoc = await adminStore.getUserVault(user.userId);
+          encryptedPayload = vaultDoc?.ciphertext;
+        }
+        if (!encryptedPayload) {
+          res.status(404).json({ error: 'No encrypted credentials found in vault.' });
+          return;
+        }
         const unsealed = unsealUserVaultPayload({
-          uid: user.uid,
+          uid: user.userId,
           email: user.email,
-          encryptedPayload: encryptedPayload || '',
+          encryptedPayload,
         });
         res.json({
           aiConfig: unsealed.aiConfig ? normalizeProviderConfigToStudio(unsealed.aiConfig) : undefined,
@@ -1344,6 +1423,180 @@ Return JSON: { "content": "..." }`;
       }
     },
   );
+
+  app.get(
+    '/api/user/vault',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const vault = await adminStore.getUserVault(user.userId);
+        res.json({ vault });
+      } catch (err) {
+        res.status(500).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  app.delete(
+    '/api/user/vault',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        await adminStore.deleteUserVault(user.userId);
+        res.json({ success: true });
+      } catch (err) {
+        res.status(500).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  // User Profile Preferences
+  app.get(
+    '/api/user/preferences',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const preferences = await adminStore.getUserPreferences(user.userId);
+        res.json({ preferences: preferences || {} });
+      } catch (err) {
+        res.status(500).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  app.put(
+    '/api/user/preferences',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const { preferences, meta } = req.body || {};
+        await adminStore.saveUserPreferences(user.userId, preferences || {}, meta);
+        res.json({ success: true });
+      } catch (err) {
+        res.status(500).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  // User Projects CRUD
+  app.get(
+    '/api/projects',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const projects = await adminStore.listUserProjects(user.userId);
+        res.json({ projects });
+      } catch (err) {
+        res.status(500).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  app.get(
+    '/api/projects/:id',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const project = await adminStore.getProject(user.userId, req.params.id);
+        if (!project) {
+          res.status(404).json({ error: 'Project not found.' });
+          return;
+        }
+        res.json({ project });
+      } catch (err) {
+        const status = err instanceof SecurityValidationError ? err.status : 500;
+        res.status(status).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  app.post(
+    '/api/projects',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const project = req.body?.project as MistProject;
+        if (!project || !project.id) {
+          res.status(400).json({ error: 'Valid project data is required.' });
+          return;
+        }
+        await adminStore.saveProject(user.userId, project, { isNew: true });
+        res.status(201).json({ success: true, project });
+      } catch (err) {
+        const status = err instanceof SecurityValidationError ? err.status : 500;
+        res.status(status).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  app.put(
+    '/api/projects/:id',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const project = req.body?.project as MistProject;
+        if (!project) {
+          res.status(400).json({ error: 'Valid project data is required.' });
+          return;
+        }
+        project.id = req.params.id;
+        await adminStore.saveProject(user.userId, project);
+        res.json({ success: true, project });
+      } catch (err) {
+        const status = err instanceof SecurityValidationError ? err.status : 500;
+        res.status(status).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  app.delete(
+    '/api/projects/:id',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        await adminStore.deleteProject(user.userId, req.params.id);
+        res.json({ success: true });
+      } catch (err) {
+        const status = err instanceof SecurityValidationError ? err.status : 500;
+        res.status(status).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  app.post(
+    '/api/projects/sync',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const projects = Array.isArray(req.body?.projects) ? req.body.projects : [];
+        const result = await adminStore.syncProjects(user.userId, projects);
+        res.json({ success: true, synced: result.synced });
+      } catch (err) {
+        res.status(500).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
 
   // Ephemeral owner-bound preview AI session endpoints
   app.post(
@@ -1396,7 +1649,9 @@ Return JSON: { "content": "..." }`;
       const provider = config.provider;
       const model = config.model;
       const abortController = new AbortController();
-      req.on('close', () => abortController.abort());
+      res.on('close', () => {
+        if (!res.writableEnded) abortController.abort();
+      });
 
       try {
         const probed = await probeProviderCapabilities(config, {
@@ -1447,7 +1702,7 @@ Return JSON: { "content": "..." }`;
       }
 
       const abortController = new AbortController();
-      req.on('close', () => {
+      res.on('close', () => {
         if (!res.writableEnded) abortController.abort();
       });
 
@@ -1481,7 +1736,7 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       const { searchConfig } = req.body as { searchConfig?: WebSearchConfig };
       const abortController = new AbortController();
-      req.on('close', () => {
+      res.on('close', () => {
         if (!res.writableEnded) abortController.abort();
       });
 
@@ -1921,7 +2176,9 @@ Return JSON: { "content": "..." }`;
       );
       const config = normalizeProviderConfigToStudio(providerConfig);
       const abortController = new AbortController();
-      req.on('close', () => abortController.abort());
+      res.on('close', () => {
+        if (!res.writableEnded) abortController.abort();
+      });
 
       try {
         if (!prompt || !prompt.trim()) {
@@ -2144,7 +2401,9 @@ Return JSON: { "content": "..." }`;
       );
       const config = normalizeProviderConfigToStudio(providerConfig);
       const abortController = new AbortController();
-      req.on('close', () => abortController.abort());
+      res.on('close', () => {
+        if (!res.writableEnded) abortController.abort();
+      });
 
       try {
         if (!instruction || !instruction.trim()) {
@@ -2386,7 +2645,7 @@ Return JSON: { "content": "..." }`;
         const saved = await deploymentStore.upsertOwned(
           {
             slug: cleanSlug,
-            ownerUid: authUser.uid,
+            ownerUid: authUser.userId,
             projectId: safeProjectId,
             title: safeTitle,
             htmlBundle: html,
@@ -2394,14 +2653,15 @@ Return JSON: { "content": "..." }`;
           authUser.idToken,
         );
 
+        const publishedUrl = `https://${cleanSlug}.mist.me`;
         const shortUrl = formatDeploymentUrl(saved.slug, process.env.PUBLIC_APP_URL);
 
         // Fire-and-forget push notification to owner
         notificationService
-          .sendNotificationToUser(authUser.uid, {
+          .sendNotificationToUser(authUser.userId, {
             title: 'Website Deployed! 🚀',
-            body: `"${saved.title}" is now live at ${shortUrl}`,
-            data: { url: shortUrl },
+            body: `"${saved.title}" is now live at ${publishedUrl}`,
+            data: { url: publishedUrl },
             tag: `deploy-${saved.slug}`,
           })
           .catch((err) => {
@@ -2411,6 +2671,8 @@ Return JSON: { "content": "..." }`;
         res.json({
           slug: saved.slug,
           url: shortUrl,
+          subdomainUrl: publishedUrl,
+          publishedUrl,
           legacyUrl: `/p/${saved.slug}`,
           title: saved.title,
           updatedAt: saved.updatedAt,
@@ -2435,7 +2697,7 @@ Return JSON: { "content": "..." }`;
           res.status(400).json({ error: 'Invalid deployment slug.' });
           return;
         }
-        await deploymentStore.deleteOwned(cleanSlug, authUser.uid, authUser.idToken);
+        await deploymentStore.deleteOwned(cleanSlug, authUser.userId, authUser.idToken);
         res.json({ ok: true, slug: cleanSlug });
       } catch (err) {
         const status = err instanceof SecurityValidationError ? err.status : 500;
@@ -2457,123 +2719,33 @@ Return JSON: { "content": "..." }`;
           return;
         }
 
-        const cfg = getFirebaseAppletConfig();
-        const dbBase = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(cfg.projectId)}/databases/${encodeURIComponent(cfg.firestoreDatabaseId)}`;
-        const documentsBase = `${dbBase}/documents`;
-
         let totalFiles = 0;
-        const writes: Array<{
-          update: {
-            name: string;
-            fields: Record<string, unknown>;
-          };
-          updateTransforms?: Array<{
-            fieldPath: string;
-            setToServerValue: string;
-          }>;
-        }> = [];
-
+        let syncedProjects = 0;
         for (const project of projects) {
           if (!project || !project.id) continue;
-          const safeProjectId = project.id.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
-          const projectDocName = `projects/${cfg.projectId}/databases/${cfg.firestoreDatabaseId}/documents/projects/${safeProjectId}`;
-
-          // Project document write
-          const projectFields: Record<string, unknown> = {
-            id: { stringValue: safeProjectId },
-            ownerId: { stringValue: authUser.uid },
-            name: { stringValue: (project.name || 'Untitled Website').slice(0, 120) },
-            prompt: { stringValue: (project.prompt || '').slice(0, 4000) },
-            isPublished: { booleanValue: Boolean(project.isPublished) },
-          };
-          if (project.description) {
-            projectFields.description = { stringValue: project.description.slice(0, 500) };
-          }
-          if (project.templateId) {
-            projectFields.templateId = { stringValue: project.templateId.slice(0, 64) };
-          }
-          if (typeof project.appAiEnabled === 'boolean') {
-            projectFields.appAiEnabled = { booleanValue: project.appAiEnabled };
-          }
-          if (project.publishedSlug) {
-            projectFields.publishedSlug = { stringValue: project.publishedSlug.slice(0, 80) };
-          }
-
-          writes.push({
-            update: {
-              name: projectDocName,
-              fields: projectFields,
-            },
-            updateTransforms: [
-              { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
-            ],
-          });
-
-          // Files writes
-          if (Array.isArray(project.files)) {
-            for (const file of project.files) {
-              if (!file || !file.id) continue;
-              const safeFileId = file.id.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
-              const fileDocName = `${projectDocName}/files/${safeFileId}`;
-              writes.push({
-                update: {
-                  name: fileDocName,
-                  fields: {
-                    id: { stringValue: safeFileId },
-                    projectId: { stringValue: safeProjectId },
-                    ownerId: { stringValue: authUser.uid },
-                    path: { stringValue: (file.path || 'src/App.tsx').slice(0, 256) },
-                    language: { stringValue: file.language || 'tsx' },
-                    content: { stringValue: (file.content || '').slice(0, 200000) },
-                  },
-                },
-                updateTransforms: [
-                  { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
-                ],
-              });
-              totalFiles++;
-            }
-          }
-        }
-
-        if (writes.length > 0) {
-          const chunks: (typeof writes)[] = [];
-          for (let i = 0; i < writes.length; i += 400) {
-            chunks.push(writes.slice(i, i + 400));
-          }
-
-          for (const chunk of chunks) {
-            const commitResp = await fetch(`${documentsBase}:commit`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${authUser.idToken}`,
-              },
-              body: JSON.stringify({ writes: chunk }),
-            });
-            if (!commitResp.ok) {
-              const errBody = await commitResp.text().catch(() => '');
-              console.warn(`[Mist SyncDump] Firestore commit warning (${commitResp.status}):`, errBody.slice(0, 200));
-            }
-          }
+          await adminStore.saveProject(authUser.userId, project);
+          syncedProjects++;
+          totalFiles += (project.files || []).length;
         }
 
         console.log(
-          `[Mist SyncDump] App exit sync: dumped ${totalFiles} files across ${projects.length} projects for user ${authUser.email} (${authUser.uid}) to Firebase`,
+          `[Mist SyncDump] App exit sync: dumped ${totalFiles} files across ${syncedProjects} projects for user ${authUser.email || authUser.userId} (${authUser.userId}) to Firebase`,
         );
 
         res.json({
           ok: true,
-          syncedProjects: projects.length,
+          syncedProjects,
           syncedFiles: totalFiles,
+          user: authUser.email || authUser.userId,
           userEmail: authUser.email,
         });
       } catch (err) {
-        console.error('[Mist SyncDump] Failed to dump projects to Firebase:', err);
-        res.status(500).json({ error: sanitizeErrorMessage(err) || 'Sync dump failed' });
+        const status = err instanceof SecurityValidationError ? err.status : 500;
+        res.status(status).json({ error: sanitizeErrorMessage(err) || 'Sync dump failed' });
       }
     },
   );
+
 
   // --- 6. Web Push Notifications (VAPID) ---
   app.get('/sw.js', (_req, res) => {
@@ -2594,18 +2766,17 @@ Return JSON: { "content": "..." }`;
 
   app.post(
     '/api/notifications/subscribe',
+    requireVerifiedAuth,
     notificationRateLimiter,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const user = req.headers.authorization
-          ? await verifyAuth(req.headers.authorization).catch(() => null)
-          : null;
+        const user = req.authUser!;
         const { subscription } = req.body as { subscription?: WebPushSubscription };
         if (!subscription || !subscription.endpoint || !subscription.keys) {
           res.status(400).json({ error: 'Valid PushSubscription payload with keys is required.' });
           return;
         }
-        const record = notificationService.addSubscription(subscription, user?.uid);
+        const record = notificationService.addSubscription(subscription, user.userId);
         res.json({ ok: true, subscription: record });
       } catch (err) {
         res.status(400).json({ error: sanitizeErrorMessage(err) || 'Failed to subscribe.' });
@@ -2613,24 +2784,28 @@ Return JSON: { "content": "..." }`;
     },
   );
 
-  app.post('/api/notifications/unsubscribe', notificationRateLimiter, (req, res) => {
-    const { endpoint } = req.body as { endpoint?: string };
-    if (!endpoint) {
-      res.status(400).json({ error: 'Endpoint is required.' });
-      return;
-    }
-    const removed = notificationService.removeSubscription(endpoint);
-    res.json({ ok: true, removed });
-  });
+  app.post(
+    '/api/notifications/unsubscribe',
+    requireVerifiedAuth,
+    notificationRateLimiter,
+    (req: AuthenticatedRequest, res) => {
+      const { endpoint } = req.body as { endpoint?: string };
+      if (!endpoint) {
+        res.status(400).json({ error: 'Endpoint is required.' });
+        return;
+      }
+      const removed = notificationService.removeSubscription(endpoint);
+      res.json({ ok: true, removed });
+    },
+  );
 
   app.post(
     '/api/notifications/test',
+    requireVerifiedAuth,
     notificationRateLimiter,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const user = req.headers.authorization
-          ? await verifyAuth(req.headers.authorization).catch(() => null)
-          : null;
+        const user = req.authUser!;
         const { subscription } = req.body as { subscription?: WebPushSubscription };
 
         if (subscription && subscription.endpoint && subscription.keys) {
@@ -2652,8 +2827,8 @@ Return JSON: { "content": "..." }`;
           return;
         }
 
-        if (user?.uid) {
-          const { sent, failed } = await notificationService.sendNotificationToUser(user.uid, {
+        if (user?.userId) {
+          const { sent, failed } = await notificationService.sendNotificationToUser(user.userId, {
             title: 'Mist Notification 🔔',
             body: 'Web Push with VAPID is working successfully on Mist!',
             icon: '/favicon.ico',
@@ -2670,7 +2845,7 @@ Return JSON: { "content": "..." }`;
         }
 
         res.status(400).json({
-          error: 'An active push subscription or Google sign-in is required to test notifications.',
+          error: 'An active push subscription or verified sign-in is required to test notifications.',
         });
       } catch (err) {
         res.status(500).json({ error: sanitizeErrorMessage(err) || 'Test notification failed.' });
@@ -2678,10 +2853,19 @@ Return JSON: { "content": "..." }`;
     },
   );
 
-  app.post('/api/notifications/keys/generate', notificationRateLimiter, (_req, res) => {
-    const keys = notificationService.generateNewKeypair();
-    res.json(keys);
-  });
+  app.post(
+    '/api/notifications/keys/generate',
+    requireVerifiedAuth,
+    notificationRateLimiter,
+    (_req: AuthenticatedRequest, res) => {
+      if (process.env.NODE_ENV === 'production') {
+        res.status(403).json({ error: 'Key generation endpoint is disabled in production.' });
+        return;
+      }
+      const keys = notificationService.generateNewKeypair();
+      res.json(keys);
+    },
+  );
 
   const RESERVED_ROOT_SEGMENTS = new Set([
     'api',
@@ -2698,10 +2882,14 @@ Return JSON: { "content": "..." }`;
   ]);
 
   const sendDeploymentHtml = (res: express.Response, htmlBundle: string) => {
+    // Isolate published websites into an opaque origin via sandbox (omitting allow-same-origin)
+    // to strictly prevent untrusted generated scripts from accessing Mist's cookies, localStorage, or auth tokens.
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data: blob: https:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self';",
+      "sandbox allow-scripts allow-forms allow-popups; default-src 'unsafe-inline' 'unsafe-eval' data: blob: https:; img-src 'self' data: blob: https:; connect-src *; object-src 'none'; base-uri 'none'; frame-ancestors 'self';",
     );
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(htmlBundle);
   };
@@ -2713,6 +2901,15 @@ Return JSON: { "content": "..." }`;
       .replace(/^-+|-+$/g, '');
     if (cleanSlug.length < 2) {
       res.status(404).setHeader('Content-Type', 'text/html; charset=utf-8').send('Site not found.');
+      return;
+    }
+
+    const apexDomain = process.env.APEX_DOMAIN?.trim() || 'mist.me';
+    const reqHost = (req.headers.host || '').toLowerCase();
+    const publishedHost = `${cleanSlug}.${apexDomain}`;
+    // In production with custom apex domain, redirect requests from main app host to isolated published subdomain
+    if (process.env.NODE_ENV === 'production' && reqHost && !reqHost.startsWith(`${cleanSlug}.`)) {
+      res.redirect(301, `https://${publishedHost}`);
       return;
     }
 
