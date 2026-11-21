@@ -1,5 +1,5 @@
 {
-  "name": "react-example",
+  "name": "mist",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -13,6 +13,7 @@
     "test": "tsx --test src/data/models.test.ts src/utils/webSearch.test.ts src/utils/security.test.ts src/utils/mistServerApp.test.ts src/utils/notification.test.ts"
   },
   "dependencies": {
+    "@clerk/react": "^6.19.4",
     "@firebase/eslint-plugin-security-rules": "^0.0.2",
     "@google/genai": "^3.3.0",
     "@rolldown/binding-darwin-arm64": "^1.2.19",

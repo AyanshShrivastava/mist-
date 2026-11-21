@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useAuth as useClerkAuth, useClerk } from '@clerk/react';
 import JSZip from 'jszip';
 import type { User } from 'firebase/auth';
 import type {
@@ -41,9 +42,9 @@ import {
   fetchUserEncryptedVault,
   fetchUserProfilePreferences,
   saveUserEncryptedVault,
-  signInWithGoogle,
   signOutUser,
   subscribeToAuth,
+  syncFirebaseWithClerk,
   syncUserProfile,
 } from './firebase/client';
 import {
@@ -213,6 +214,8 @@ async function consumeAiSseStream(
 }
 
 export default function App() {
+  const clerk = useClerk();
+  const clerkAuth = useClerkAuth();
   const [user, setUser] = useState<User | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authPromptReason, setAuthPromptReason] = useState<string | null>(null);
@@ -788,6 +791,26 @@ export default function App() {
     [],
   );
 
+  useEffect(() => {
+    if (!clerkAuth.isLoaded) return;
+
+    if (!clerkAuth.isSignedIn) {
+      setUser(null);
+      void signOutUser().catch(() => {});
+      return;
+    }
+
+    setAuthError(null);
+    void syncFirebaseWithClerk(clerkAuth.getToken)
+      .catch((error) => {
+        setAuthError(
+          error instanceof Error
+            ? error.message
+            : 'Clerk sign-in could not be connected to Firebase.',
+        );
+      });
+  }, [clerkAuth.isLoaded, clerkAuth.isSignedIn, clerkAuth.getToken]);
+
   // Subscribe once to Auth state changes; hydrate settings, email-bound encrypted vault, & cloud sync
   useEffect(() => {
     const unsub = subscribeToAuth(async (firebaseUser) => {
@@ -1360,10 +1383,7 @@ export default function App() {
   const handleGoogleSignIn = async () => {
     setAuthError(null);
     try {
-      await signInWithGoogle();
-      setAccountOpen(false);
-      setAuthPromptReason(null);
-      setGenerationError(null);
+      clerk.openSignIn();
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Sign-in failed.');
     }
@@ -1384,6 +1404,7 @@ export default function App() {
         }
       }
       await signOutUser();
+      await clerkAuth.signOut();
       clearKnownCloudProjects();
       scrubLegacyCredentialStorage();
       setProjects([]);

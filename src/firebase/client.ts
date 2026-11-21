@@ -3,6 +3,7 @@ import {
   GoogleAuthProvider,
   getAuth,
   onAuthStateChanged,
+  signInWithCustomToken,
   signInWithPopup,
   signOut,
   type User,
@@ -193,6 +194,18 @@ void checkFirestoreServerConnection();
 export async function signInWithGoogle(): Promise<User> {
   const result = await signInWithPopup(auth, googleProvider);
   // onAuthStateChanged triggers syncUserProfile once; no duplicate write race.
+  return result.user;
+}
+
+export async function syncFirebaseWithClerk(
+  getClerkToken: (options: { template: string }) => Promise<string | null>,
+): Promise<User> {
+  const clerkFirebaseToken = await getClerkToken({ template: 'firebase' });
+  if (!clerkFirebaseToken) {
+    throw new Error('Clerk did not return a Firebase session token. Configure the "firebase" JWT template.');
+  }
+
+  const result = await signInWithCustomToken(auth, clerkFirebaseToken);
   return result.user;
 }
 
