@@ -1425,19 +1425,26 @@ export default function App() {
   const handleOAuthSignIn = async (strategy: 'oauth_google' | 'oauth_github') => {
     setAuthError(null);
     try {
+      const redirectUrl = `${window.location.origin}/sso-callback`;
+      const redirectUrlComplete = `${window.location.origin}/`;
+
       if (clerk.client?.signIn) {
         await clerk.client.signIn.authenticateWithRedirect({
           strategy,
-          redirectUrl: '/sso-callback',
-          redirectUrlComplete: '/',
+          redirectUrl,
+          redirectUrlComplete,
+          continueSignUp: true,
+          oidcPrompt: 'consent',
         });
         return;
       }
       if (clerk.client?.signUp) {
         await clerk.client.signUp.authenticateWithRedirect({
           strategy,
-          redirectUrl: '/sso-callback',
-          redirectUrlComplete: '/',
+          redirectUrl,
+          redirectUrlComplete,
+          continueSignUp: true,
+          oidcPrompt: 'consent',
         });
         return;
       }

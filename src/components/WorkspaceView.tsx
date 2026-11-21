@@ -618,21 +618,6 @@ export default function WorkspaceView({
           >
             <Cpu className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
             <span className="max-w-[90px] truncate">{shortProviderLabel}</span>
-            {currentModelMeta && (
-              <span
-                className={`rounded px-1 py-0.2 text-[10px] font-semibold ${
-                  currentModelMeta.billing === 'free'
-                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                    : currentModelMeta.billing === 'paid'
-                      ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
-                      : currentModelMeta.billing === 'provider_billed'
-                        ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300'
-                        : 'bg-zinc-500/15 text-zinc-700 dark:text-zinc-300'
-                }`}
-              >
-                {currentModelMeta.billingLabel}
-              </span>
-            )}
           </button>
 
           <button
@@ -1380,21 +1365,6 @@ export default function WorkspaceView({
                       <Cpu className="h-4 w-4 text-blue-500 shrink-0" aria-hidden="true" />
                       <span className="truncate">{shortProviderLabel}</span>
                     </span>
-                    {currentModelMeta && (
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                          currentModelMeta.billing === 'free'
-                            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                            : currentModelMeta.billing === 'paid'
-                              ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
-                              : currentModelMeta.billing === 'provider_billed'
-                                ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300'
-                                : 'bg-zinc-500/15 text-zinc-700 dark:text-zinc-300'
-                        }`}
-                      >
-                        {currentModelMeta.billingLabel}
-                      </span>
-                    )}
                   </button>
                   <button
                     type="button"

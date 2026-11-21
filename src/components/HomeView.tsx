@@ -155,7 +155,7 @@ const WORKFLOW_STEPS = [
     alt: 'Minimalist laptop displaying the finished specialty coffee roastery website live in browser',
     samplePrompt: 'Packaged dist/index.html + render.yaml -> Ready for Netlify Drop or Render Static.',
     sampleFiles: ['dist/index.html', 'render.yaml', 'DEPLOY_FREE.md'],
-    outcome: '100% standalone static output — zero visitor load or billing on Mist’s server.',
+    outcome: '100% standalone static output — zero visitor load on Mist’s server.',
   },
 ] as const;
 
@@ -741,20 +741,6 @@ export default function HomeView({
                     {!hasApiKey ? (
                       <span className="hidden sm:inline text-[10px] font-semibold text-blue-600 dark:text-blue-300">
                         · Add key
-                      </span>
-                    ) : currentModelMeta ? (
-                      <span
-                        className={`hidden sm:inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                          currentModelMeta.billing === 'free'
-                            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
-                            : currentModelMeta.billing === 'paid'
-                              ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
-                              : currentModelMeta.billing === 'provider_billed'
-                                ? 'bg-blue-500/15 text-blue-700 dark:text-blue-300'
-                                : 'bg-zinc-500/15 text-zinc-700 dark:text-zinc-300'
-                        }`}
-                      >
-                        {currentModelMeta.billingLabel}
                       </span>
                     ) : null}
                   </span>

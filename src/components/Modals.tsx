@@ -793,9 +793,9 @@ export function DeployModal({
               >
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
                 <div className="leading-relaxed">
-                  <p className="font-semibold">Caution: Use ONLY Free Tiers With No Credit Card Billing</p>
+                  <p className="font-semibold">Host 100% Free With Zero Lock-in</p>
                   <p className="mt-0.5 opacity-90">
-                    Always select the <strong>Free Static Site</strong> option on providers that do not require adding a credit card upfront (like Render Static Sites, Netlify Drop, Vercel Hobby, Cloudflare Pages, or GitHub Pages). Never select paid server plans or hosts requiring card billing.
+                    Always select the <strong>Free Static Site</strong> option on providers that do not require adding a credit card upfront (like Render Static Sites, Netlify Drop, Vercel Hobby, Cloudflare Pages, or GitHub Pages).
                   </p>
                 </div>
               </div>

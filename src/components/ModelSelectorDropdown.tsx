@@ -38,25 +38,6 @@ interface ModelSelectorDropdownProps {
   onRefreshCatalog?: () => void;
 }
 
-function BillingBadge({ billing, label }: { billing: ModelBilling; label: string }) {
-  const classes =
-    billing === 'free'
-      ? 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300 border border-emerald-500/25'
-      : billing === 'paid'
-        ? 'bg-amber-500/12 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300 border border-amber-500/25'
-        : billing === 'provider_billed'
-          ? 'bg-blue-500/10 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300 border border-blue-500/25'
-          : 'bg-zinc-500/10 text-zinc-700 dark:bg-zinc-500/15 dark:text-zinc-300 border border-zinc-400/30';
-
-  return (
-    <span
-      className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold tracking-tight whitespace-nowrap shrink-0 ${classes}`}
-    >
-      {label}
-    </span>
-  );
-}
-
 function LifecycleBadge({ status }: { status?: ModelLifecycleStatus }) {
   if (!status || status === 'active') return null;
   const label =
@@ -120,7 +101,6 @@ export default function ModelSelectorDropdown({
 }: ModelSelectorDropdownProps) {
   const [expanded, setExpanded] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
-  const [billingFilter, setBillingFilter] = useState<'all' | 'free' | 'paid' | 'other'>('all');
 
   const catalog = PROVIDER_CATALOG[provider];
   const modelsList = modelsOverride !== undefined ? modelsOverride : catalog.models;
@@ -134,38 +114,18 @@ export default function ModelSelectorDropdown({
     verifiedModel?.verified && verifiedModel.model === value.trim(),
   );
 
-  const freeCount = useMemo(
-    () => modelsList.filter((m) => m.billing === 'free').length,
-    [modelsList],
-  );
-  const paidCount = useMemo(
-    () => modelsList.filter((m) => m.billing === 'paid').length,
-    [modelsList],
-  );
-  const otherCount = useMemo(
-    () =>
-      modelsList.filter((m) => m.billing === 'provider_billed' || m.billing === 'unknown').length,
-    [modelsList],
-  );
-
   const filteredModels = useMemo(() => {
     const q = filterQuery.trim().toLowerCase();
     return modelsList.filter((m) => {
-      if (billingFilter === 'free' && m.billing !== 'free') return false;
-      if (billingFilter === 'paid' && m.billing !== 'paid') return false;
-      if (billingFilter === 'other' && m.billing !== 'provider_billed' && m.billing !== 'unknown') {
-        return false;
-      }
       if (!q) return true;
       return (
         m.id.toLowerCase().includes(q) ||
         m.label.toLowerCase().includes(q) ||
         m.summary.toLowerCase().includes(q) ||
-        m.tier.toLowerCase().includes(q) ||
-        m.billingLabel.toLowerCase().includes(q)
+        m.tier.toLowerCase().includes(q)
       );
     });
-  }, [modelsList, billingFilter, filterQuery]);
+  }, [modelsList, filterQuery]);
 
   const sourceLabel =
     effectiveSource === 'live'
@@ -193,7 +153,6 @@ export default function ModelSelectorDropdown({
             </span>
             {activeEntry ? (
               <>
-                <BillingBadge billing={activeEntry.billing} label={activeEntry.billingLabel} />
                 <LifecycleBadge status={activeEntry.status} />
                 <span className="text-[10px] font-medium text-blue-600 dark:text-blue-400 whitespace-nowrap shrink-0">
                   {activeEntry.tier}
@@ -257,37 +216,7 @@ export default function ModelSelectorDropdown({
                   />
                 </div>
 
-                <div className="flex items-center gap-1.5">
-                  <div
-                    role="group"
-                    aria-label="Filter by billing"
-                    className="flex flex-wrap items-center gap-1 rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-950"
-                  >
-                    {(
-                      [
-                        { id: 'all', label: `All (${modelsList.length})` },
-                        { id: 'free', label: `Free (${freeCount})` },
-                        { id: 'paid', label: `Paid (${paidCount})` },
-                        ...(otherCount > 0
-                          ? [{ id: 'other' as const, label: `Plan (${otherCount})` }]
-                          : []),
-                      ] as const
-                    ).map((f) => (
-                      <button
-                        key={f.id}
-                        type="button"
-                        onClick={() => setBillingFilter(f.id)}
-                        className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap tabular-nums cursor-pointer ${
-                          billingFilter === f.id
-                            ? 'bg-white text-zinc-950 shadow-xs dark:bg-zinc-800 dark:text-white'
-                            : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white'
-                        }`}
-                      >
-                        {f.label}
-                      </button>
-                    ))}
-                  </div>
-
+                <div className="flex items-center gap-1.5 ml-auto">
                   {onRefreshCatalog && (
                     <button
                       type="button"
@@ -334,7 +263,7 @@ export default function ModelSelectorDropdown({
                 >
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
                   <span>
-                    Showing fallback presets because the live provider catalog could not be loaded. Models and billing may be outdated.
+                    Showing fallback presets because the live provider catalog could not be loaded. Models may be outdated.
                   </span>
                 </div>
               )}
@@ -429,7 +358,6 @@ export default function ModelSelectorDropdown({
                             >
                               {item.label}
                             </span>
-                            <BillingBadge billing={item.billing} label={item.billingLabel} />
                             <LifecycleBadge status={item.status} />
                             <span className="text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
                               {item.tier}
