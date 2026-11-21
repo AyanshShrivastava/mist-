@@ -74,13 +74,6 @@ h1, h2 { letter-spacing: -0.035em; }
   100% { transform: translate3d(0, -12px, 0) scale(1.04); }
 }
 
-.mist-gradient-text {
-  background-image: linear-gradient(90deg, var(--mist-aurora-1), var(--mist-aurora-2) 35%, var(--mist-aurora-3) 70%, var(--mist-aurora-5));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
 .mist-composer-shell {
   background: #ffffff;
   border-radius: 28px !important;
@@ -94,6 +87,36 @@ h1, h2 { letter-spacing: -0.035em; }
   box-shadow:
     0 30px 70px -25px rgba(0, 0, 0, 0.9),
     0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.mist-header {
+  border-bottom: 1px solid rgba(24, 24, 27, 0.06);
+  background: rgba(252, 251, 248, 0.86);
+  backdrop-filter: blur(18px) saturate(145%);
+}
+.dark .mist-header {
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+  background: rgba(11, 11, 13, 0.82);
+}
+
+.mist-mode-card {
+  min-height: 82px;
+  background: rgba(255, 255, 255, 0.74);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 1px 1px rgba(24, 24, 27, 0.02);
+}
+.dark .mist-mode-card {
+  background: rgba(24, 24, 27, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.mist-project-card {
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.04), 0 18px 50px -32px rgba(24, 24, 27, 0.34);
+}
+.dark .mist-project-card {
+  background: rgba(24, 24, 27, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 24px 60px -38px rgba(0, 0, 0, 0.9);
 }
 
 .mist-surface-card {

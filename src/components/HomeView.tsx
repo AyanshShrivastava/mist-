@@ -511,7 +511,7 @@ export default function HomeView({
   const composerBlock = (
     <>
           {/* Interactive One-Tap Builder Type Picker */}
-          <div className="mt-10 grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+          <div className="mt-8 grid grid-cols-2 lg:grid-cols-4 gap-2.5">
             {INTERACTIVE_MODES.map((mode) => {
               const Icon = mode.icon;
               const isSelected = selectedMode === mode.id;
@@ -529,10 +529,10 @@ export default function HomeView({
                     }
                     promptInputRef.current?.focus();
                   }}
-                  className={`flex flex-col items-start gap-1 rounded-2xl border p-3.5 text-left transition-all duration-200 cursor-pointer ${
+                  className={`mist-mode-card flex min-h-[88px] flex-col items-start justify-between gap-2 rounded-2xl border p-3.5 text-left transition-all duration-200 cursor-pointer ${
                     isSelected
-                      ? 'mist-gradient-border shadow-lg shadow-pink-500/10'
-                      : 'border-zinc-200/70 bg-white/70 backdrop-blur hover:bg-white hover:-translate-y-0.5 dark:border-zinc-800/80 dark:bg-zinc-900/60 dark:hover:bg-zinc-900'
+                      ? 'mist-gradient-border shadow-lg shadow-violet-500/10'
+                      : 'border-zinc-200/75 hover:border-zinc-300 hover:-translate-y-0.5 dark:border-zinc-800/85 dark:hover:border-zinc-700'
                   }`}
                 >
                   <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-950 dark:text-white">
@@ -1005,7 +1005,7 @@ export default function HomeView({
     ];
     return (
       <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] flex flex-col">
-        <header className="sticky top-0 z-30 bg-[#fcfbf8]/75 backdrop-blur-xl dark:bg-[#0b0b0d]/70">
+        <header className="mist-header sticky top-0 z-30">
           <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-6 px-4 sm:px-6">
             <a href="#top" className="shrink-0 focus:outline-none"><MistLogo size="md" /></a>
             <nav aria-label="Primary" className="hidden md:flex items-center gap-1 text-sm font-medium text-zinc-600 dark:text-zinc-400">
@@ -1022,17 +1022,18 @@ export default function HomeView({
         </header>
 
         <main id="top" className="flex-1">
-          <section className="mist-hero-aurora mx-auto max-w-4xl px-4 sm:px-6 pt-16 pb-24 sm:pt-28 sm:pb-32 text-center">
+          <section className="mist-hero-aurora mx-auto max-w-5xl px-4 sm:px-6 pt-14 pb-20 sm:pt-24 sm:pb-28 text-center">
             <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}>
               <button type="button" onClick={onOpenVoiceChat} className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/80 py-1 pl-1 pr-3 text-xs font-medium text-zinc-700 shadow-sm backdrop-blur hover:bg-white dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-300 transition-colors cursor-pointer">
-                <span className="rounded-full mist-primary-gradient px-2 py-0.5 text-[10px] font-semibold text-white">New</span>
-                Build by voice in Voice Studio <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                <Mic className="ml-1 h-3.5 w-3.5 text-violet-600 dark:text-violet-400" aria-hidden="true" />
+                Start with your voice
+                <ArrowRight className="h-3 w-3" aria-hidden="true" />
               </button>
-              <h1 className="mt-6 font-display text-[40px] sm:text-6xl lg:text-7xl font-semibold leading-[1.02] text-zinc-950 dark:text-white [text-wrap:balance]">
-                Turn ideas into <span className="mist-gradient-text">websites</span>
+              <h1 className="mt-6 font-display text-[44px] sm:text-6xl lg:text-7xl font-semibold leading-[0.98] text-zinc-950 dark:text-white [text-wrap:balance]">
+                Build the web from one thought.
               </h1>
-              <p className="mx-auto mt-5 max-w-xl text-base sm:text-lg text-zinc-600 dark:text-zinc-400">
-                Describe it, watch Mist build it, then download the code and host it free.
+              <p className="mx-auto mt-5 max-w-2xl text-base sm:text-lg text-zinc-600 dark:text-zinc-400">
+                Describe a product, launch a page, or ship a playable experience. Mist writes the code while you stay in control.
               </p>
             </motion.div>
             <div className="mt-10 text-left">{composerBlock}</div>
@@ -1111,8 +1112,8 @@ export default function HomeView({
   return (
     <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] lg:flex">
       {/* Sidebar */}
-      <aside className="hidden lg:flex sticky top-0 h-screen w-64 shrink-0 flex-col gap-1 px-3 py-4">
-        <div className="px-2 pb-3"><MistLogo size="md" /></div>
+      <aside className="hidden lg:flex sticky top-0 h-screen w-64 shrink-0 flex-col gap-1 border-r border-zinc-200/70 px-3 py-4 dark:border-zinc-800/70">
+        <div className="px-2 pb-5"><MistLogo size="md" /></div>
         {navItems.map(({ icon: Icon, label, onClick }) => (
           <button key={label} type="button" onClick={onClick} className="flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-900/5 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white transition-colors cursor-pointer">
             <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -1149,7 +1150,7 @@ export default function HomeView({
       </aside>
 
       {/* Mobile top bar */}
-      <header className="lg:hidden sticky top-0 z-30 bg-[#fcfbf8]/80 backdrop-blur-xl dark:bg-[#0b0b0d]/75">
+      <header className="mist-header lg:hidden sticky top-0 z-30">
         <div className="flex h-14 items-center justify-between px-4">
           <MistLogo size="md" />
           <div className="flex items-center gap-1">
@@ -1176,8 +1177,8 @@ export default function HomeView({
 
       <main id="top" className="flex-1 min-w-0 lg:p-2">
         <div className="min-h-full overflow-hidden lg:rounded-[1.75rem] lg:border lg:border-zinc-200/70 bg-[#fcfbf8] dark:bg-[#0f0f11] lg:dark:border-zinc-800/70">
-          <section className="mist-hero-aurora mx-auto max-w-3xl px-4 sm:px-6 pt-14 pb-20 sm:pt-24 sm:pb-28">
-            <motion.h1 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="text-center font-display text-3xl sm:text-5xl font-semibold text-zinc-950 dark:text-white [text-wrap:balance]">
+          <section className="mist-hero-aurora mx-auto max-w-4xl px-4 sm:px-6 pt-12 pb-16 sm:pt-20 sm:pb-24">
+            <motion.h1 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="text-center font-display text-[34px] sm:text-5xl font-semibold leading-[1.05] text-zinc-950 dark:text-white [text-wrap:balance]">
               What will you build, {firstName}?
             </motion.h1>
             <div className="mt-8">{composerBlock}</div>
@@ -1219,7 +1220,7 @@ export default function HomeView({
               ) : (
                 <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                   {filteredProjects.map((project, index) => (
-                    <motion.div key={project.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, delay: Math.min(index * 0.03, 0.18) }} className="group">
+                    <motion.div key={project.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, delay: Math.min(index * 0.03, 0.18) }} className="mist-project-card group rounded-[1.35rem] p-2">
                       <button type="button" onClick={() => onOpenProject(project)} className="relative block aspect-[16/10] w-full overflow-hidden rounded-2xl border border-zinc-200/70 dark:border-zinc-800 cursor-pointer">
                         <div className={`absolute inset-0 bg-gradient-to-br ${thumbGradient(project.id)} opacity-90 group-hover:scale-105 transition-transform duration-500`} />
                         <span className="absolute inset-0 flex items-center justify-center font-display text-5xl font-semibold text-white/90">{project.name.charAt(0).toUpperCase()}</span>
@@ -1231,12 +1232,12 @@ export default function HomeView({
                       <div className="mt-3 flex items-start justify-between gap-2 px-1">
                         <div className="min-w-0">
                           <p className="truncate font-medium text-zinc-950 dark:text-white">{project.name}</p>
-                          <p className="truncate text-xs text-zinc-500">{project.files.length} files · {project.description || project.prompt}</p>
+                          <p className="truncate text-xs text-zinc-600 dark:text-zinc-400">{project.files.length} files · {project.description || project.prompt}</p>
                         </div>
                         <div className="flex shrink-0 items-center gap-0.5 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
                           <button type="button" aria-label={`Publish ${project.name}`} title="Publish (download)" onClick={() => onPublishProject(project)} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950 dark:hover:bg-zinc-800 dark:hover:text-white cursor-pointer"><Download className="h-4 w-4" aria-hidden="true" /></button>
                           <button type="button" aria-label={`Duplicate ${project.name}`} title="Duplicate" onClick={() => onDuplicateProject(project)} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950 dark:hover:bg-zinc-800 dark:hover:text-white cursor-pointer"><Copy className="h-4 w-4" aria-hidden="true" /></button>
-                          <button type="button" aria-label={`Delete ${project.name}`} title="Delete" onClick={() => onDeleteProject(project.id)} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/60 cursor-pointer"><Trash2 className="h-4 w-4" aria-hidden="true" /></button>
+                          <button type="button" aria-label={`Delete ${project.name}`} title="Delete" onClick={() => onDeleteProject(project.id)} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-600 hover:text-red-700 dark:text-zinc-300 dark:hover:text-red-300 cursor-pointer"><Trash2 className="h-4 w-4" aria-hidden="true" /></button>
                         </div>
                       </div>
                     </motion.div>
