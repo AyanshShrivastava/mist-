@@ -3,7 +3,9 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { SecurityValidationError } from './serverSecurity';
 
@@ -69,10 +71,14 @@ export class CloudflareR2ArtifactStore implements R2StorageOperations {
     secretAccessKey?: string;
     bucketName?: string;
   }) {
-    const accountId = options?.accountId || process.env.CLOUDFLARE_ACCOUNT_ID;
-    const accessKeyId = options?.accessKeyId || process.env.R2_ACCESS_KEY_ID;
-    const secretAccessKey = options?.secretAccessKey || process.env.R2_SECRET_ACCESS_KEY;
-    this.bucket = options?.bucketName || process.env.R2_BUCKET_NAME || 'mist-published-sites';
+    const accountId =
+      options?.accountId || process.env.CLOUDFLARE_ACCOUNT_ID || process.env.CLOUDFLARE_R2_ACCOUNT_ID;
+    const accessKeyId =
+      options?.accessKeyId || process.env.R2_ACCESS_KEY_ID || process.env.CLOUDFLARE_R2_ACCESS_KEY_ID;
+    const secretAccessKey =
+      options?.secretAccessKey || process.env.R2_SECRET_ACCESS_KEY || process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY;
+    this.bucket =
+      options?.bucketName || process.env.R2_BUCKET_NAME || process.env.CLOUDFLARE_R2_BUCKET || 'mist-published-sites';
 
     if (!accountId || !accessKeyId || !secretAccessKey) {
       throw new Error(
@@ -121,14 +127,32 @@ export class CloudflareR2ArtifactStore implements R2StorageOperations {
   }
 
   async deletePublishedSite(slug: string): Promise<boolean> {
-    const key = validateArtifactPath(slug, 'index.html');
+    const safeSlug = validateSiteSlug(slug);
+    const prefix = `sites/${safeSlug}/`;
     try {
-      await this.s3.send(
-        new DeleteObjectCommand({
+      const listed = await this.s3.send(
+        new ListObjectsV2Command({
           Bucket: this.bucket,
-          Key: key,
+          Prefix: prefix,
         }),
       );
+      if (listed.Contents && listed.Contents.length > 0) {
+        await this.s3.send(
+          new DeleteObjectsCommand({
+            Bucket: this.bucket,
+            Delete: {
+              Objects: listed.Contents.map((obj) => ({ Key: obj.Key! })),
+            },
+          }),
+        );
+      } else {
+        await this.s3.send(
+          new DeleteObjectCommand({
+            Bucket: this.bucket,
+            Key: `sites/${safeSlug}/index.html`,
+          }),
+        );
+      }
       return true;
     } catch {
       return false;
@@ -193,8 +217,16 @@ export class InMemoryR2ArtifactStore implements R2StorageOperations {
   }
 
   async deletePublishedSite(slug: string): Promise<boolean> {
-    const key = validateArtifactPath(slug, 'index.html');
-    return this.files.delete(key);
+    const safeSlug = validateSiteSlug(slug);
+    const prefix = `sites/${safeSlug}/`;
+    let anyDeleted = false;
+    for (const key of Array.from(this.files.keys())) {
+      if (key.startsWith(prefix) || key === `sites/${safeSlug}/index.html`) {
+        this.files.delete(key);
+        anyDeleted = true;
+      }
+    }
+    return anyDeleted;
   }
 
   async artifactExists(slug: string, relativePath: string = 'index.html'): Promise<boolean> {

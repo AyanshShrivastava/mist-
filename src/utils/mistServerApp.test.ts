@@ -37,12 +37,15 @@ async function startTestServer(options?: {
   aiRateLimitMax?: number;
   searchRateLimitMax?: number;
   trustProxy?: boolean;
+  publishBaseUrl?: string;
 }) {
   const users = createMockUsers();
   const store = createMemoryDeploymentStore();
+  const publishBaseUrl = options?.publishBaseUrl !== undefined ? options.publishBaseUrl : 'https://sites.mist.me';
   const app = createMistApp({
     deploymentStore: store,
     skipDnsLookup: true,
+    publishBaseUrl,
     trustProxy: options?.trustProxy ?? false,
     aiRateLimitMax: options?.aiRateLimitMax ?? 50,
     searchRateLimitMax: options?.searchRateLimitMax ?? 50,
@@ -284,7 +287,7 @@ test('Deployments isolate owner listings and enforce ownership while keeping pub
       },
     ];
 
-    // Alice publishes a deployment and receives a short /:slug URL
+    // Alice publishes a deployment and receives a dedicated publishing origin URL
     const createResp = await fetch(`${srv.baseUrl}/api/deployments`, {
       method: 'POST',
       headers: {
@@ -299,23 +302,35 @@ test('Deployments isolate owner listings and enforce ownership while keeping pub
       }),
     });
     assert.equal(createResp.status, 200);
-    const createJson = (await createResp.json()) as { url: string; legacyUrl: string };
-    assert.equal(createJson.url, '/alice-site');
-    assert.equal(createJson.legacyUrl, '/p/alice-site');
+    const createJson = (await createResp.json()) as { url: string; publishedUrl: string };
+    assert.equal(createJson.url, 'https://sites.mist.me/alice-site');
+    assert.equal(createJson.publishedUrl, 'https://sites.mist.me/alice-site');
 
-    // Public viewer fetches BOTH short /alice-site and legacy /p/alice-site without auth
-    const shortResp = await fetch(`${srv.baseUrl}/alice-site`);
-    assert.equal(shortResp.status, 200);
-    assert.ok((shortResp.headers.get('content-security-policy') || '').includes("frame-ancestors 'self'"));
-    const shortHtml = await shortResp.text();
-    assert.ok(shortHtml.includes('Alice Portfolio'));
+    // On builder origin: arbitrary HTML execution is strictly disabled
+    // 1. Vanity /:slug route never renders published HTML on builder hostname (falls through to next)
+    const builderShortResp = await fetch(`${srv.baseUrl}/alice-site`);
+    assert.notEqual(builderShortResp.status, 200);
 
-    const publicResp = await fetch(`${srv.baseUrl}/p/alice-site`);
-    assert.equal(publicResp.status, 200);
-    const html = await publicResp.text();
+    // 2. Legacy /p/:slug route on builder origin redirects (301) to dedicated publishing hostname
+    const builderRedirectResp = await fetch(`${srv.baseUrl}/p/alice-site`, { redirect: 'manual' });
+    assert.equal(builderRedirectResp.status, 301);
+    assert.equal(builderRedirectResp.headers.get('location'), 'https://sites.mist.me/alice-site');
+
+    // On dedicated publishing hostname (sites.mist.me): published HTML is served with strict sandbox CSP
+    const publishedResp = await fetch(`${srv.baseUrl}/alice-site`, {
+      headers: { 'x-forwarded-host': 'sites.mist.me' },
+    });
+    assert.equal(publishedResp.status, 200);
+    const publishedCsp = publishedResp.headers.get('content-security-policy') || '';
+    assert.ok(publishedCsp.includes('sandbox allow-scripts'));
+    assert.ok(publishedCsp.includes("frame-ancestors 'none'"));
+    assert.equal(publishedResp.headers.get('x-frame-options'), 'DENY');
+    assert.equal(publishedResp.headers.get('cross-origin-opener-policy'), 'same-origin');
+    assert.equal(publishedResp.headers.get('set-cookie'), null);
+    const html = await publishedResp.text();
     assert.ok(html.includes('Alice Portfolio'));
 
-    // Alice sees her deployment in GET /api/deployments with short URL
+    // Alice sees her deployment in GET /api/deployments with dedicated publishing URL
     const aliceList = (await (
       await fetch(`${srv.baseUrl}/api/deployments`, {
         headers: { Authorization: 'Bearer token-user-a' },
@@ -323,7 +338,7 @@ test('Deployments isolate owner listings and enforce ownership while keeping pub
     ).json()) as { deployments: Array<{ slug: string; url: string }> };
     assert.equal(aliceList.deployments.length, 1);
     assert.equal(aliceList.deployments[0].slug, 'alice-site');
-    assert.equal(aliceList.deployments[0].url, '/alice-site');
+    assert.equal(aliceList.deployments[0].url, 'https://sites.mist.me/alice-site');
 
     // Bob sees 0 deployments in GET /api/deployments
     const bobList = (await (

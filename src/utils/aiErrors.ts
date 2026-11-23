@@ -25,6 +25,7 @@ export interface ModelHealthIncident {
 export function redactSecrets(input: string): string {
   if (!input) return '';
   return input
+    .replace(/-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]+?-----END [A-Z ]+ PRIVATE KEY-----/g, '[REDACTED PRIVATE KEY]')
     .replace(/Bearer\s+[A-Za-z0-9._\-+=]+/gi, 'Bearer [REDACTED]')
     .replace(/X-Subscription-Token\s*[:=]\s*[^\s,;]+/gi, 'X-Subscription-Token: [REDACTED]')
     .replace(/\b(BSA[A-Za-z0-9_-]{8,})/g, 'BSA[REDACTED]')
@@ -35,7 +36,14 @@ export function redactSecrets(input: string): string {
     .replace(/\b(AIza[0-9A-Za-z_-]{12,})/g, 'AIza[REDACTED]')
     .replace(/\b(nvapi-[A-Za-z0-9_-]{8,})/g, 'nvapi-[REDACTED]')
     .replace(/\b(mist_sess_[A-Za-z0-9_-]{8,})/g, 'mist_sess_[REDACTED]')
-    .replace(/((?:[?&]|\b)(?:key|api_key|token|subscription_token)=)[^&\s,;]+/gi, '$1[REDACTED]');
+    .replace(/\b(sess_[A-Za-z0-9_-]{20,})/g, 'sess_[REDACTED]')
+    .replace(/\b(sk_(?:test|live)_[A-Za-z0-9_-]{20,})/g, 'sk_[REDACTED]')
+    .replace(/\b(VAPID_PRIVATE_KEY)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]')
+    .replace(/\b(AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]')
+    .replace(/\b(postgres|postgresql|mysql|mongodb(?:\+srv)?):\/\/[^\s:@/]+:[^\s@/]+@/gi, '$1://[REDACTED]:[REDACTED]@')
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, 'eyJ[REDACTED]')
+    .replace(/((?:[?&]|\b)(?:key|api_key|token|subscription_token|password|secret|vault_secret)=)[^&\s,;]+/gi, '$1[REDACTED]')
+    .replace(/\b(MIST_VAULT_SECRET|CLERK_SECRET_KEY|FIREBASE_SERVICE_ACCOUNT_JSON)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]');
 }
 
 export function classifyModelError(params: {

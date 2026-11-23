@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowRight,
   Check,
   CheckCircle2,
+  Cloud,
   Copy,
   Download,
   ExternalLink,
@@ -14,6 +16,10 @@ import {
   Link2,
   Loader2,
   LogOut,
+  Radio,
+  RefreshCw,
+  Rocket,
+  Server,
   Settings,
   ShieldAlert,
   ShieldCheck,
@@ -23,6 +29,7 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import { mistApi } from '../utils/apiClient';
 import type { MistUser as User } from '../types/mist';
 import type {
   AiProviderConfig,
@@ -630,6 +637,7 @@ const FREE_STATIC_HOSTS = [
 interface DeployModalProps {
   isOpen: boolean;
   project: MistProject | null;
+  user?: User | null;
   isDeploying: boolean;
   deployError: string | null;
   downloadedFileName: string | null;
@@ -638,9 +646,21 @@ interface DeployModalProps {
   onDownloadStandaloneHtml: (slug: string) => void;
 }
 
+interface RenderDeploymentState {
+  serviceId: string;
+  serviceName: string;
+  serviceUrl: string;
+  status: string;
+  repo: string;
+  branch: string;
+  updatedAt: string;
+  commit?: { id?: string; message?: string };
+}
+
 export function DeployModal({
   isOpen,
   project,
+  user,
   isDeploying,
   deployError,
   downloadedFileName,
@@ -648,17 +668,228 @@ export function DeployModal({
   onDownloadPublishZip,
   onDownloadStandaloneHtml,
 }: DeployModalProps) {
+  const [activeTab, setActiveTab] = useState<'render' | 'export'>('render');
   const [slug, setSlug] = useState(
     project?.publishedSlug || suggestShortSlug(project?.name || 'mist-site'),
   );
 
-  useEffect(() => {
-    if (isOpen && project) {
-      setSlug(project.publishedSlug || suggestShortSlug(project?.name || 'mist-site'));
-    }
-  }, [isOpen, project]);
+  // Render integration states
+  const [renderLoading, setRenderLoading] = useState(false);
+  const [renderStatus, setRenderStatus] = useState<{
+    connected: boolean;
+    keyHint?: string;
+    ownerId?: string;
+    ownerName?: string;
+    ownerEmail?: string;
+    workspaceType?: string;
+    connectedAt?: string;
+  } | null>(null);
+  const [renderApiKey, setRenderApiKey] = useState('');
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [disconnectLoading, setDisconnectLoading] = useState(false);
+
+  // Render deploy form states
+  const [repoUrl, setRepoUrl] = useState('');
+  const [branch, setBranch] = useState('main');
+  const [serviceName, setServiceName] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [buildCommand, setBuildCommand] = useState('npm run build');
+  const [publishPath, setPublishPath] = useState('dist');
+  const [isDeployingRender, setIsDeployingRender] = useState(false);
+  const [renderDeployError, setRenderDeployError] = useState<string | null>(null);
+  const [currentDeploy, setCurrentDeploy] = useState<RenderDeploymentState | null>(null);
+  const [copiedUrl, setCopiedUrl] = useState(false);
 
   const cleanSlug = sanitizeSlug(slug);
+
+  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const clearPollTimer = useCallback(() => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearPollTimer();
+    };
+  }, [clearPollTimer]);
+
+  // Load Render connection status whenever modal opens
+  const fetchRenderStatus = useCallback(async () => {
+    if (!user) {
+      setRenderStatus(null);
+      return;
+    }
+    setRenderLoading(true);
+    setConnectError(null);
+    try {
+      const res = await mistApi.getRenderStatus();
+      setRenderStatus(res);
+    } catch {
+      setRenderStatus({ connected: false });
+    } finally {
+      setRenderLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (isOpen) {
+      if (project) {
+        const initialSlug = project.publishedSlug || suggestShortSlug(project.name || 'mist-site');
+        setSlug(initialSlug);
+        setServiceName(sanitizeSlug(initialSlug));
+      }
+      void fetchRenderStatus();
+    } else {
+      clearPollTimer();
+      setRenderDeployError(null);
+      setConnectError(null);
+    }
+  }, [isOpen, project, fetchRenderStatus, clearPollTimer]);
+
+  const handleConnectRender = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!renderApiKey.trim()) {
+      setConnectError('Please enter your Render API key.');
+      return;
+    }
+    if (!renderApiKey.trim().startsWith('rnd_')) {
+      setConnectError('Render API keys must begin with "rnd_".');
+      return;
+    }
+    setIsConnecting(true);
+    setConnectError(null);
+    try {
+      const res = await mistApi.connectRender(renderApiKey.trim());
+      setRenderApiKey('');
+      setRenderStatus({
+        connected: true,
+        keyHint: res.keyHint,
+        ownerId: res.owner.id,
+        ownerName: res.owner.name,
+        ownerEmail: res.owner.email,
+        workspaceType: res.owner.type,
+        connectedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      setConnectError(err instanceof Error ? err.message : 'Failed to connect Render account.');
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const handleDisconnectRender = async () => {
+    setDisconnectLoading(true);
+    setConnectError(null);
+    try {
+      await mistApi.disconnectRender();
+      setRenderStatus({ connected: false });
+      setCurrentDeploy(null);
+      clearPollTimer();
+    } catch (err) {
+      setConnectError(err instanceof Error ? err.message : 'Failed to disconnect Render account.');
+    } finally {
+      setDisconnectLoading(false);
+    }
+  };
+
+  const pollServiceStatus = useCallback(
+    (serviceId: string) => {
+      clearPollTimer();
+      let pollCount = 0;
+      pollTimerRef.current = setInterval(async () => {
+        pollCount += 1;
+        if (pollCount > 60) {
+          clearPollTimer();
+          return;
+        }
+        try {
+          const res = await mistApi.getRenderService(serviceId);
+          if (res.service) {
+            const rawStatus = res.latestDeploy?.status || res.service.status || 'live';
+            const sUrl = res.service.url || `https://${res.service.name}.onrender.com`;
+            setCurrentDeploy({
+              serviceId: res.service.id,
+              serviceName: res.service.name,
+              serviceUrl: sUrl,
+              status: rawStatus,
+              repo: res.service.repo,
+              branch: res.service.branch,
+              updatedAt: new Date().toISOString(),
+              commit: res.latestDeploy?.commit,
+            });
+            if (rawStatus === 'live' || rawStatus === 'build_failed' || rawStatus === 'canceled') {
+              clearPollTimer();
+            }
+          }
+        } catch {
+          // ignore transient poll error
+        }
+      }, 3000);
+    },
+    [clearPollTimer],
+  );
+
+  const handleDeployToRender = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!repoUrl.trim()) {
+      setRenderDeployError('Please enter a GitHub repository URL (e.g., https://github.com/owner/repo).');
+      return;
+    }
+    if (!repoUrl.trim().startsWith('https://github.com/')) {
+      setRenderDeployError('Render requires a GitHub repository URL starting with https://github.com/');
+      return;
+    }
+    const cleanName = sanitizeSlug(serviceName || slug || project?.name || 'mist-site');
+    if (cleanName.length < 3) {
+      setRenderDeployError('Service name must be at least 3 characters.');
+      return;
+    }
+
+    setIsDeployingRender(true);
+    setRenderDeployError(null);
+    try {
+      const res = await mistApi.deployToRender({
+        repoUrl: repoUrl.trim(),
+        branch: branch.trim() || 'main',
+        serviceName: cleanName,
+        buildCommand: buildCommand.trim() || undefined,
+        publishPath: publishPath.trim() || undefined,
+      });
+
+      const sUrl = res.service.url || `https://${res.service.name}.onrender.com`;
+      const initialStatus = res.deploy?.status || res.service.status || 'created';
+
+      setCurrentDeploy({
+        serviceId: res.service.id,
+        serviceName: res.service.name,
+        serviceUrl: sUrl,
+        status: initialStatus,
+        repo: res.service.repo,
+        branch: res.service.branch,
+        updatedAt: new Date().toISOString(),
+      });
+
+      // Start polling status
+      pollServiceStatus(res.service.id);
+    } catch (err) {
+      setRenderDeployError(err instanceof Error ? err.message : 'Deployment to Render failed.');
+    } finally {
+      setIsDeployingRender(false);
+    }
+  };
+
+  const handleCopyUrl = (url: string) => {
+    navigator.clipboard.writeText(url).then(() => {
+      setCopiedUrl(true);
+      setTimeout(() => setCopiedUrl(false), 2000);
+    });
+  };
 
   return (
     <AnimatePresence>
@@ -684,14 +915,14 @@ export function DeployModal({
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
               <div className="flex items-center gap-2.5">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg mist-primary-gradient text-white shadow-sm">
-                  <Download className="h-4 w-4" aria-hidden="true" />
+                  <Rocket className="h-4 w-4" aria-hidden="true" />
                 </div>
                 <div>
                   <h2 id="deploy-modal-title" className="font-display text-base font-semibold text-zinc-950 dark:text-white">
-                    Publish &amp; Host Free
+                    Publish &amp; Deploy
                   </h2>
                   <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                    Standalone export · Zero traffic hits Mist&apos;s server
+                    Connect to Render or export standalone website code
                   </p>
                 </div>
               </div>
@@ -705,132 +936,506 @@ export function DeployModal({
               </button>
             </div>
 
+            {/* Navigation Tabs */}
+            <div className="flex border-b border-zinc-200 px-5 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setActiveTab('render')}
+                className={`flex items-center gap-2 border-b-2 py-3 px-1 text-xs font-medium cursor-pointer transition-colors ${
+                  activeTab === 'render'
+                    ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400'
+                    : 'border-transparent text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200'
+                }`}
+              >
+                <Server className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Deploy to Render</span>
+                {renderStatus?.connected && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 ring-2 ring-emerald-500/20" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('export')}
+                className={`ml-4 flex items-center gap-2 border-b-2 py-3 px-1 text-xs font-medium cursor-pointer transition-colors ${
+                  activeTab === 'export'
+                    ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400'
+                    : 'border-transparent text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200'
+                }`}
+              >
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Manual Export</span>
+              </button>
+            </div>
+
             <div className="space-y-4 p-5 text-xs">
-              {/* Auto-Download Confirmation & Re-download Actions */}
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50/90 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/35">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-start gap-2">
-                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-                    <div>
-                      <p className="font-semibold text-emerald-900 dark:text-emerald-200">
-                        {isDeploying
-                          ? 'Preparing your standalone publish bundle...'
-                          : downloadedFileName
-                            ? `Downloaded ${downloadedFileName}`
-                            : 'Ready to download standalone website bundle'}
+              {activeTab === 'render' && (
+                <div className="space-y-4">
+                  {!user ? (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50/90 p-4 dark:border-amber-900/60 dark:bg-amber-950/35">
+                      <div className="flex items-start gap-2.5">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                        <div>
+                          <p className="font-semibold text-amber-900 dark:text-amber-200">
+                            Authentication Required
+                          </p>
+                          <p className="mt-1 text-[11px] text-amber-800/90 dark:text-amber-300/90 leading-relaxed">
+                            Sign in to Mist to securely encrypt and store your personal Render API key in your server-side credential vault.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : renderLoading ? (
+                    <div className="flex items-center justify-center py-8 text-zinc-500">
+                      <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                      <span>Checking Render connection status...</span>
+                    </div>
+                  ) : !renderStatus?.connected ? (
+                    /* Connect Render Account */
+                    <div className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-900/60">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <KeyRound className="h-4 w-4 text-blue-500" />
+                          <h3 className="font-semibold text-zinc-900 dark:text-white">
+                            Connect Personal Render Account
+                          </h3>
+                        </div>
+                        <a
+                          href="https://dashboard.render.com/u/settings#api-keys"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                        >
+                          <span>Get API Key</span>
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      </div>
+
+                      <p className="text-[11px] text-zinc-600 dark:text-zinc-400 leading-relaxed">
+                        Enter your personal Render API key. Mist verifies your account against the official Render API and encrypts your key inside your personal AES-256-GCM vault on the server. Your key is never stored in browser storage.
                       </p>
-                      <p className="mt-0.5 text-[11px] text-emerald-800/90 dark:text-emerald-300/90 leading-relaxed">
-                        Includes ready-to-drop <code className="font-mono font-semibold">dist/index.html</code>, <code className="font-mono font-semibold">render.yaml</code>, full React source, and zero server dependencies.
+
+                      <form onSubmit={handleConnectRender} className="space-y-3 pt-1">
+                        <div>
+                          <label htmlFor="render-api-key" className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                            Render API Key
+                          </label>
+                          <div className="relative">
+                            <input
+                              id="render-api-key"
+                              type={showApiKey ? 'text' : 'password'}
+                              value={renderApiKey}
+                              onChange={(e) => setRenderApiKey(e.target.value)}
+                              placeholder="rnd_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                              className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 pr-10 font-mono text-xs text-zinc-950 placeholder-zinc-400 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-white"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowApiKey(!showApiKey)}
+                              className="absolute right-2.5 top-2.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 cursor-pointer"
+                              aria-label={showApiKey ? 'Hide key' : 'Show key'}
+                            >
+                              {showApiKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                            </button>
+                          </div>
+                        </div>
+
+                        {connectError && (
+                          <div className="rounded-lg bg-red-50 p-2 text-[11px] text-red-700 dark:bg-red-950/60 dark:text-red-300">
+                            {connectError}
+                          </div>
+                        )}
+
+                        <button
+                          type="submit"
+                          disabled={isConnecting}
+                          className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg mist-primary-gradient px-3 py-1.5 text-[11px] font-medium text-white shadow-sm disabled:opacity-50 cursor-pointer"
+                        >
+                          {isConnecting ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                          )}
+                          <span>{isConnecting ? 'Verifying Credential...' : 'Verify & Connect Account'}</span>
+                        </button>
+                      </form>
+                    </div>
+                  ) : (
+                    /* Render Account Connected Banner & Deploy Form */
+                    <div className="space-y-4">
+                      {/* Connection details bar */}
+                      <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50/80 p-3 dark:border-emerald-900/60 dark:bg-emerald-950/30">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold text-emerald-900 dark:text-emerald-200">
+                                {renderStatus.ownerName || 'Render Account'}
+                              </span>
+                              {renderStatus.workspaceType && (
+                                <span className="rounded bg-emerald-200/60 px-1.5 py-0.2 text-[9px] font-medium uppercase tracking-wide text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300">
+                                  {renderStatus.workspaceType}
+                                </span>
+                              )}
+                            </div>
+                            <p className="font-mono text-[10px] text-emerald-700 dark:text-emerald-400">
+                              Key: {renderStatus.keyHint || 'rnd_••••••••'}
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={disconnectLoading}
+                          onClick={handleDisconnectRender}
+                          className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2.5 py-1 text-[11px] font-medium text-red-600 hover:bg-red-50 dark:border-red-900/60 dark:bg-zinc-900 dark:text-red-400 dark:hover:bg-red-950/40 cursor-pointer disabled:opacity-50"
+                        >
+                          {disconnectLoading ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <LogOut className="h-3 w-3" />
+                          )}
+                          <span>Disconnect</span>
+                        </button>
+                      </div>
+
+                      {/* Deployment configuration form */}
+                      <form onSubmit={handleDeployToRender} className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/70 p-4 dark:border-zinc-800 dark:bg-zinc-900/50">
+                        <h3 className="font-semibold text-zinc-900 dark:text-white flex items-center gap-1.5">
+                          <Rocket className="h-3.5 w-3.5 text-blue-500" />
+                          <span>Create Render Static Site</span>
+                        </h3>
+
+                        <div>
+                          <label htmlFor="render-repo-url" className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                            GitHub Repository URL <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            id="render-repo-url"
+                            type="url"
+                            value={repoUrl}
+                            onChange={(e) => setRepoUrl(e.target.value)}
+                            placeholder="https://github.com/username/my-site-repo"
+                            className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 placeholder-zinc-400 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-white"
+                          />
+                          <p className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400">
+                            Public repositories build immediately. For private repositories, make sure you have installed the{' '}
+                            <a
+                              href="https://github.com/apps/render/installations/new"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-600 hover:underline dark:text-blue-400"
+                            >
+                              Render GitHub App
+                            </a>.
+                          </p>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label htmlFor="render-branch" className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                              Git Branch
+                            </label>
+                            <input
+                              id="render-branch"
+                              type="text"
+                              value={branch}
+                              onChange={(e) => setBranch(e.target.value)}
+                              placeholder="main"
+                              className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-white"
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor="render-service-name" className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                              Service Name
+                            </label>
+                            <input
+                              id="render-service-name"
+                              type="text"
+                              value={serviceName}
+                              onChange={(e) => setServiceName(sanitizeSlug(e.target.value))}
+                              placeholder={cleanSlug}
+                              className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-white"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Collapsible advanced build settings */}
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => setShowAdvanced(!showAdvanced)}
+                            className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400 flex items-center gap-1 cursor-pointer"
+                          >
+                            <Settings className="h-3 w-3" />
+                            <span>{showAdvanced ? 'Hide Build Settings' : 'Custom Build & Output Settings'}</span>
+                          </button>
+
+                          {showAdvanced && (
+                            <div className="mt-2.5 grid grid-cols-2 gap-3 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950">
+                              <div>
+                                <label htmlFor="render-build-cmd" className="block text-[10px] font-medium text-zinc-600 dark:text-zinc-400 mb-1">
+                                  Build Command
+                                </label>
+                                <input
+                                  id="render-build-cmd"
+                                  type="text"
+                                  value={buildCommand}
+                                  onChange={(e) => setBuildCommand(e.target.value)}
+                                  placeholder="npm run build"
+                                  className="w-full rounded border border-zinc-200 bg-transparent px-2 py-1 font-mono text-xs text-zinc-950 focus:outline-none dark:border-zinc-700 dark:text-white"
+                                />
+                              </div>
+                              <div>
+                                <label htmlFor="render-publish-path" className="block text-[10px] font-medium text-zinc-600 dark:text-zinc-400 mb-1">
+                                  Publish Directory
+                                </label>
+                                <input
+                                  id="render-publish-path"
+                                  type="text"
+                                  value={publishPath}
+                                  onChange={(e) => setPublishPath(e.target.value)}
+                                  placeholder="dist"
+                                  className="w-full rounded border border-zinc-200 bg-transparent px-2 py-1 font-mono text-xs text-zinc-950 focus:outline-none dark:border-zinc-700 dark:text-white"
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {renderDeployError && (
+                          <div className="rounded-lg bg-red-50 p-2.5 text-[11px] text-red-700 dark:bg-red-950/60 dark:text-red-300">
+                            {renderDeployError}
+                          </div>
+                        )}
+
+                        <div className="pt-1">
+                          <button
+                            type="submit"
+                            disabled={isDeployingRender}
+                            className="inline-flex min-h-[36px] w-full items-center justify-center gap-1.5 rounded-xl mist-primary-gradient px-4 py-2 text-xs font-medium text-white shadow-sm disabled:opacity-50 cursor-pointer"
+                          >
+                            {isDeployingRender ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Rocket className="h-4 w-4" />
+                            )}
+                            <span>{isDeployingRender ? 'Creating Render Static Site...' : 'Deploy to Render'}</span>
+                          </button>
+                        </div>
+                      </form>
+
+                      {/* Live Deploy Result and Status Card */}
+                      {currentDeploy && (
+                        <div className="rounded-xl border border-blue-200 bg-blue-50/90 p-4 dark:border-blue-900/60 dark:bg-blue-950/30 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              {currentDeploy.status === 'live' ? (
+                                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                              ) : currentDeploy.status === 'build_in_progress' || currentDeploy.status === 'created' ? (
+                                <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                              ) : (
+                                <AlertTriangle className="h-4 w-4 text-red-500" />
+                              )}
+                              <span className="font-semibold text-zinc-900 dark:text-white">
+                                {currentDeploy.serviceName}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                                  currentDeploy.status === 'live'
+                                    ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300'
+                                    : currentDeploy.status === 'build_in_progress' || currentDeploy.status === 'created'
+                                      ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-300'
+                                      : 'bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-300'
+                                }`}
+                              >
+                                {currentDeploy.status.replace(/_/g, ' ')}
+                              </span>
+
+                              <button
+                                type="button"
+                                title="Refresh status"
+                                onClick={() => pollServiceStatus(currentDeploy.serviceId)}
+                                className="rounded p-1 text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-800 cursor-pointer"
+                              >
+                                <RefreshCw className="h-3 w-3" />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div>
+                            <p className="text-[10px] text-zinc-500 dark:text-zinc-400 mb-1">Public URL:</p>
+                            <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
+                              <Globe className="h-3.5 w-3.5 text-blue-500 shrink-0" />
+                              <a
+                                href={currentDeploy.serviceUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="font-mono text-[11px] text-blue-600 hover:underline dark:text-blue-400 truncate flex-1"
+                              >
+                                {currentDeploy.serviceUrl}
+                              </a>
+                              <button
+                                type="button"
+                                onClick={() => handleCopyUrl(currentDeploy.serviceUrl)}
+                                className="text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 cursor-pointer shrink-0"
+                                title="Copy URL"
+                              >
+                                {copiedUrl ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between pt-1 text-[10px] text-zinc-500 dark:text-zinc-400">
+                            <span>Service ID: <code className="font-mono">{currentDeploy.serviceId}</code></span>
+                            <a
+                              href={`https://dashboard.render.com/static/${currentDeploy.serviceId}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400"
+                            >
+                              <span>View Logs in Render</span>
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'export' && (
+                <div className="space-y-4">
+                  {/* Auto-Download Confirmation & Re-download Actions */}
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/90 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/35">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2">
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                        <div>
+                          <p className="font-semibold text-emerald-900 dark:text-emerald-200">
+                            {isDeploying
+                              ? 'Preparing your standalone publish bundle...'
+                              : downloadedFileName
+                                ? `Downloaded ${downloadedFileName}`
+                                : 'Ready to download standalone website bundle'}
+                          </p>
+                          <p className="mt-0.5 text-[11px] text-emerald-800/90 dark:text-emerald-300/90 leading-relaxed">
+                            Includes ready-to-drop <code className="font-mono font-semibold">dist/index.html</code>, <code className="font-mono font-semibold">render.yaml</code>, full React source, and zero server dependencies.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={isDeploying}
+                        onClick={() => onDownloadPublishZip(cleanSlug)}
+                        className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg mist-primary-gradient px-3 py-1.5 text-[11px] font-medium text-white shadow-sm disabled:opacity-50 cursor-pointer"
+                      >
+                        {isDeploying ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                        )}
+                        <span>{downloadedFileName ? 'Download ZIP Again' : 'Download Publish ZIP'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isDeploying}
+                        onClick={() => onDownloadStandaloneHtml(cleanSlug)}
+                        className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-medium text-emerald-900 hover:bg-emerald-100/60 dark:border-emerald-800 dark:bg-zinc-900 dark:text-emerald-200 dark:hover:bg-zinc-800 disabled:opacity-50 cursor-pointer"
+                      >
+                        <FileCode2 className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Download Single index.html</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Project Site Name */}
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <label htmlFor="mist-deploy-slug" className="block font-medium text-zinc-700 dark:text-zinc-300">
+                        Package &amp; Site Name
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setSlug(suggestShortSlug(slug || project.name, 16))}
+                        className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400 cursor-pointer"
+                      >
+                        Shorten slug
+                      </button>
+                    </div>
+                    <div className="mt-1.5 flex items-center rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
+                      <span className="border-r border-zinc-200 px-3 py-2 font-mono text-zinc-500 dark:border-zinc-800">
+                        /
+                      </span>
+                      <input
+                        id="mist-deploy-slug"
+                        type="text"
+                        value={slug}
+                        onChange={(e) => setSlug(e.target.value)}
+                        className="flex-1 bg-transparent px-3 py-2 font-mono text-xs text-zinc-950 focus:outline-none dark:text-white"
+                      />
+                    </div>
+                  </div>
+
+                  {deployError && (
+                    <p role="alert" className="rounded-xl bg-red-50 p-2.5 text-red-700 dark:bg-red-950/60 dark:text-red-300">
+                      {deployError}
+                    </p>
+                  )}
+
+                  {/* Caution Callout */}
+                  <div
+                    role="note"
+                    className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50/90 p-3 text-[11px] text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200"
+                  >
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                    <div className="leading-relaxed">
+                      <p className="font-semibold">Host 100% Free With Zero Lock-in</p>
+                      <p className="mt-0.5 opacity-90">
+                        Always select the <strong>Free Static Site</strong> option on providers that do not require adding a credit card upfront (like Render Static Sites, Netlify Drop, Vercel Hobby, Cloudflare Pages, or GitHub Pages).
                       </p>
                     </div>
                   </div>
-                </div>
 
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={isDeploying}
-                    onClick={() => onDownloadPublishZip(cleanSlug)}
-                    className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg mist-primary-gradient px-3 py-1.5 text-[11px] font-medium text-white shadow-sm disabled:opacity-50 cursor-pointer"
-                  >
-                    {isDeploying ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                    ) : (
-                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    )}
-                    <span>{downloadedFileName ? 'Download ZIP Again' : 'Download Publish ZIP'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isDeploying}
-                    onClick={() => onDownloadStandaloneHtml(cleanSlug)}
-                    className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-medium text-emerald-900 hover:bg-emerald-100/60 dark:border-emerald-800 dark:bg-zinc-900 dark:text-emerald-200 dark:hover:bg-zinc-800 disabled:opacity-50 cursor-pointer"
-                  >
-                    <FileCode2 className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>Download Single index.html</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Project Site Name */}
-              <div>
-                <div className="flex items-center justify-between gap-2">
-                  <label htmlFor="mist-deploy-slug" className="block font-medium text-zinc-700 dark:text-zinc-300">
-                    Package &amp; Site Name
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => setSlug(suggestShortSlug(slug || project.name, 16))}
-                    className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400 cursor-pointer"
-                  >
-                    Shorten slug
-                  </button>
-                </div>
-                <div className="mt-1.5 flex items-center rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
-                  <span className="border-r border-zinc-200 px-3 py-2 font-mono text-zinc-500 dark:border-zinc-800">
-                    /
-                  </span>
-                  <input
-                    id="mist-deploy-slug"
-                    type="text"
-                    value={slug}
-                    onChange={(e) => setSlug(e.target.value)}
-                    className="flex-1 bg-transparent px-3 py-2 font-mono text-xs text-zinc-950 focus:outline-none dark:text-white"
-                  />
-                </div>
-              </div>
-
-              {deployError && (
-                <p role="alert" className="rounded-xl bg-red-50 p-2.5 text-red-700 dark:bg-red-950/60 dark:text-red-300">
-                  {deployError}
-                </p>
-              )}
-
-              {/* Caution Callout */}
-              <div
-                role="note"
-                className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50/90 p-3 text-[11px] text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200"
-              >
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
-                <div className="leading-relaxed">
-                  <p className="font-semibold">Host 100% Free With Zero Lock-in</p>
-                  <p className="mt-0.5 opacity-90">
-                    Always select the <strong>Free Static Site</strong> option on providers that do not require adding a credit card upfront (like Render Static Sites, Netlify Drop, Vercel Hobby, Cloudflare Pages, or GitHub Pages).
-                  </p>
-                </div>
-              </div>
-
-              {/* Direct Links to Free No-Card Hosts */}
-              <div>
-                <p className="mb-2 flex items-center gap-1.5 font-medium text-zinc-800 dark:text-zinc-200">
-                  <ShieldCheck className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-                  <span>Simple Steps &amp; Direct Links (Free Static Hosts · No Card Required)</span>
-                </p>
-                <div className="divide-y divide-zinc-200 rounded-xl border border-zinc-200 bg-zinc-50/70 dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900/50">
-                  {FREE_STATIC_HOSTS.map((host) => (
-                    <div key={host.name} className="flex items-start justify-between gap-3 p-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="font-semibold text-zinc-900 dark:text-white">{host.name}</span>
-                          <span className="text-[10px] text-zinc-500 dark:text-zinc-400">· {host.badge}</span>
+                  {/* Direct Links to Free No-Card Hosts */}
+                  <div>
+                    <p className="mb-2 flex items-center gap-1.5 font-medium text-zinc-800 dark:text-zinc-200">
+                      <ShieldCheck className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
+                      <span>Simple Steps &amp; Direct Links (Free Static Hosts · No Card Required)</span>
+                    </p>
+                    <div className="divide-y divide-zinc-200 rounded-xl border border-zinc-200 bg-zinc-50/70 dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-900/50">
+                      {FREE_STATIC_HOSTS.map((host) => (
+                        <div key={host.name} className="flex items-start justify-between gap-3 p-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="font-semibold text-zinc-900 dark:text-white">{host.name}</span>
+                              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">· {host.badge}</span>
+                            </div>
+                            <p className="mt-0.5 text-[11px] text-zinc-600 dark:text-zinc-400 leading-relaxed">
+                              {host.steps}
+                            </p>
+                          </div>
+                          <a
+                            href={host.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-blue-400 dark:hover:bg-zinc-800 shrink-0 whitespace-nowrap"
+                          >
+                            <span>Open</span>
+                            <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                          </a>
                         </div>
-                        <p className="mt-0.5 text-[11px] text-zinc-600 dark:text-zinc-400 leading-relaxed">
-                          {host.steps}
-                        </p>
-                      </div>
-                      <a
-                        href={host.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-blue-400 dark:hover:bg-zinc-800 shrink-0 whitespace-nowrap"
-                      >
-                        <span>Open</span>
-                        <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                      </a>
+                      ))}
                     </div>
-                  ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="sticky bottom-0 flex justify-end gap-2 border-t border-zinc-200 bg-white/95 pt-3 pb-1 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/95">
                 <button
@@ -918,25 +1523,31 @@ export function DeploymentsModal({
               {deployments.length > 0 && (
                 <div>
                   <p className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
-                    Previous Legacy Links
+                    Published Deployments
                   </p>
                   <div className="divide-y divide-zinc-200 dark:divide-zinc-800 rounded-xl border border-zinc-200 dark:border-zinc-800 px-3">
                     {deployments.map((dep) => (
                       <div key={dep.slug} className="flex items-center justify-between gap-3 py-2.5 text-xs">
                         <div className="min-w-0 flex-1">
                           <p className="font-semibold text-zinc-900 dark:text-white truncate">{dep.title}</p>
-                          <p className="font-mono text-[11px] text-zinc-500 truncate">{dep.url}</p>
+                          <p className="font-mono text-[11px] text-zinc-500 truncate">{dep.url || 'Standalone export only'}</p>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0">
-                          <a
-                            href={dep.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-800 dark:text-blue-400 dark:hover:bg-zinc-900"
-                          >
-                            <span>Visit</span>
-                            <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                          </a>
+                          {dep.url ? (
+                            <a
+                              href={dep.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-zinc-50 dark:border-zinc-800 dark:text-blue-400 dark:hover:bg-zinc-900"
+                            >
+                              <span>Visit</span>
+                              <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                            </a>
+                          ) : (
+                            <span className="rounded-md bg-zinc-100 px-2 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                              Export Only
+                            </span>
+                          )}
                           {onDeleteDeployment && (
                             <button
                               type="button"

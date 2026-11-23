@@ -131,6 +131,112 @@ export const mistApi = {
     await apiFetch<{ success: boolean }>('/api/user/vault', { method: 'DELETE' }, token);
   },
 
+  // Render Hosting Integration
+  async getRenderStatus(token?: string | null): Promise<{
+    connected: boolean;
+    owner?: { id: string; name: string; email?: string; type: 'user' | 'team' };
+    keyHint?: string;
+    connectedAt?: string;
+  }> {
+    return apiFetch('/api/render/status', { method: 'GET' }, token);
+  },
+
+  async connectRender(
+    apiKey: string,
+    token?: string | null,
+  ): Promise<{
+    ok: boolean;
+    connected: boolean;
+    owner: { id: string; name: string; email?: string; type: 'user' | 'team' };
+    workspaces: Array<{ id: string; name: string; email?: string; type: 'user' | 'team' }>;
+    keyHint: string;
+    connectedAt: string;
+  }> {
+    return apiFetch(
+      '/api/render/connect',
+      {
+        method: 'POST',
+        body: JSON.stringify({ apiKey }),
+      },
+      token,
+    );
+  },
+
+  async disconnectRender(token?: string | null): Promise<{ ok: boolean; connected: boolean }> {
+    return apiFetch('/api/render/disconnect', { method: 'POST' }, token);
+  },
+
+  async getRenderWorkspaces(token?: string | null): Promise<{
+    primaryOwner: { id: string; name: string; email?: string; type: 'user' | 'team' };
+    workspaces: Array<{ id: string; name: string; email?: string; type: 'user' | 'team' }>;
+  }> {
+    return apiFetch('/api/render/workspaces', { method: 'GET' }, token);
+  },
+
+  async deployToRender(
+    params: {
+      repoUrl: string;
+      branch?: string;
+      serviceName?: string;
+      ownerId?: string;
+      buildCommand?: string;
+      publishPath?: string;
+      autoDeploy?: 'commit' | 'checksPass' | 'off';
+    },
+    token?: string | null,
+  ): Promise<{
+    ok: boolean;
+    service: {
+      id: string;
+      name: string;
+      ownerId: string;
+      repo: string;
+      branch: string;
+      url: string;
+      dashboardUrl: string;
+      status: string;
+      createdAt: string;
+      updatedAt: string;
+    };
+    deploy?: { id: string; status: string } | null;
+  }> {
+    return apiFetch(
+      '/api/render/deploy',
+      {
+        method: 'POST',
+        body: JSON.stringify(params),
+      },
+      token,
+    );
+  },
+
+  async getRenderService(
+    serviceId: string,
+    token?: string | null,
+  ): Promise<{
+    service: {
+      id: string;
+      name: string;
+      ownerId: string;
+      repo: string;
+      branch: string;
+      url: string;
+      dashboardUrl: string;
+      status: string;
+      createdAt: string;
+      updatedAt: string;
+    };
+    latestDeploy?: {
+      id: string;
+      status: string;
+      createdAt: string;
+      finishedAt?: string;
+      commit?: { id?: string; message?: string };
+    } | null;
+  }> {
+    return apiFetch(`/api/render/services/${encodeURIComponent(serviceId)}`, { method: 'GET' }, token);
+  },
+
   // Projects CRUD
   async listProjects(token?: string | null): Promise<MistProject[]> {
     const res = await apiFetch<{ projects: MistProject[] }>('/api/projects', { method: 'GET' }, token);
@@ -170,8 +276,19 @@ export const mistApi = {
     await apiFetch<{ success: boolean }>(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' }, token);
   },
 
-  async syncProjects(projects: MistProject[], token?: string | null): Promise<{ synced: number }> {
-    return apiFetch<{ synced: number }>(
+  async syncProjects(
+    projects: MistProject[],
+    token?: string | null,
+  ): Promise<{
+    synced: number;
+    successfulProjectIds?: string[];
+    failedProjects?: Array<{ id: string; error: string }>;
+  }> {
+    return apiFetch<{
+      synced: number;
+      successfulProjectIds?: string[];
+      failedProjects?: Array<{ id: string; error: string }>;
+    }>(
       '/api/projects/sync',
       {
         method: 'POST',

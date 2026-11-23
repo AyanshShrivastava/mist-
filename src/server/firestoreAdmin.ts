@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { initializeApp, getApps, type App } from 'firebase-admin/app';
 import { getFirestore, FieldValue, Timestamp, type Firestore } from 'firebase-admin/firestore';
 import admin from 'firebase-admin';
@@ -12,6 +13,7 @@ import type {
 } from '../types/mist';
 import type { UserProfilePreferences, UserCredentialVaultDoc } from '../firebase/client';
 import type { DeploymentSummary, StoredDeployment } from '../utils/deploymentStore';
+import type { WebPushSubscription } from '../utils/notificationService';
 import { SecurityValidationError } from '../utils/serverSecurity';
 import { createSafeId } from '../utils/projectOps';
 
@@ -101,7 +103,7 @@ export interface AdminDatabaseOperations {
   saveUserVault(
     userId: string,
     email: string,
-    vault: { ciphertext: string; aiKeyHint?: string; searchKeyHint?: string },
+    vault: { ciphertext: string; aiKeyHint?: string; searchKeyHint?: string; renderKeyHint?: string },
   ): Promise<void>;
   deleteUserVault(userId: string): Promise<void>;
 
@@ -109,7 +111,14 @@ export interface AdminDatabaseOperations {
   getProject(userId: string, projectId: string): Promise<MistProject | null>;
   saveProject(userId: string, project: MistProject, options?: { isNew?: boolean }): Promise<void>;
   deleteProject(userId: string, projectId: string): Promise<void>;
-  syncProjects(userId: string, projects: MistProject[]): Promise<{ synced: number }>;
+  syncProjects(
+    userId: string,
+    projects: MistProject[],
+  ): Promise<{
+    synced: number;
+    successfulProjectIds: string[];
+    failedProjects: Array<{ id: string; error: string }>;
+  }>;
 
   listDeployments(userId: string): Promise<DeploymentSummary[]>;
   getDeployment(slug: string): Promise<StoredDeployment | null>;
@@ -122,9 +131,20 @@ export interface AdminDatabaseOperations {
       r2Bucket?: string;
       artifactPath?: string;
       htmlBundle?: string;
+      bytes?: number;
+      etag?: string;
     },
   ): Promise<void>;
   deleteDeployment(userId: string, slug: string): Promise<boolean>;
+
+  savePushSubscription(userId: string, subscription: WebPushSubscription): Promise<void>;
+  deletePushSubscription(userId: string, endpoint: string): Promise<boolean>;
+  listPushSubscriptions(userId?: string): Promise<WebPushSubscription[]>;
+  deletePushSubscriptionsByEndpoints(endpoints: string[]): Promise<number>;
+}
+
+function hashEndpoint(endpoint: string): string {
+  return crypto.createHash('sha256').update(endpoint.trim()).digest('hex');
 }
 
 function toIsoString(val: unknown): string {
@@ -240,13 +260,14 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
       ciphertext: d.ciphertext,
       aiKeyHint: typeof d.aiKeyHint === 'string' ? d.aiKeyHint : undefined,
       searchKeyHint: typeof d.searchKeyHint === 'string' ? d.searchKeyHint : undefined,
+      renderKeyHint: typeof d.renderKeyHint === 'string' ? d.renderKeyHint : undefined,
     };
   }
 
   async saveUserVault(
     userId: string,
     email: string,
-    vault: { ciphertext: string; aiKeyHint?: string; searchKeyHint?: string },
+    vault: { ciphertext: string; aiKeyHint?: string; searchKeyHint?: string; renderKeyHint?: string },
   ): Promise<void> {
     const vaultRef = this.db.collection('users').doc(userId).collection('private').doc('credentials');
     const now = FieldValue.serverTimestamp();
@@ -259,6 +280,7 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
       ciphertext: vault.ciphertext.slice(0, 16384),
       aiKeyHint: (vault.aiKeyHint || '').slice(0, 32),
       searchKeyHint: (vault.searchKeyHint || '').slice(0, 32),
+      renderKeyHint: (vault.renderKeyHint || '').slice(0, 32),
       updatedAt: now,
     };
 
@@ -426,6 +448,9 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
     if (snap.exists && snap.data()?.ownerId !== userId) {
       throw new SecurityValidationError(403, 'Access denied: You cannot overwrite another user project.');
     }
+    if (project.ownerId && project.ownerId !== userId) {
+      throw new SecurityValidationError(403, 'Access denied: Project ownership mismatch.');
+    }
 
     const safeName = (project.name || 'Untitled Website').slice(0, 120);
     const safeDesc = (project.description || '').slice(0, 500);
@@ -447,9 +472,17 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
     const batch = this.db.batch();
 
     if (!snap.exists) {
-      projectPayload.createdAt = now;
+      let createdTimestamp: any = now;
+      if (project.createdAt) {
+        const parsed = new Date(project.createdAt);
+        if (!isNaN(parsed.getTime())) {
+          createdTimestamp = Timestamp.fromDate(parsed);
+        }
+      }
+      projectPayload.createdAt = createdTimestamp;
       batch.set(projectRef, projectPayload);
     } else {
+      // Update mask: update only modified project metadata, never overwrite createdAt or ownerId!
       batch.update(projectRef, projectPayload);
     }
 
@@ -534,17 +567,34 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
     await batch.commit();
   }
 
-  async syncProjects(userId: string, projects: MistProject[]): Promise<{ synced: number }> {
-    let synced = 0;
+  async syncProjects(
+    userId: string,
+    projects: MistProject[],
+  ): Promise<{
+    synced: number;
+    successfulProjectIds: string[];
+    failedProjects: Array<{ id: string; error: string }>;
+  }> {
+    const successfulProjectIds: string[] = [];
+    const failedProjects: Array<{ id: string; error: string }> = [];
+
     for (const project of projects) {
       try {
         await this.saveProject(userId, project);
-        synced++;
+        successfulProjectIds.push(project.id);
       } catch (err) {
         console.warn(`[FirestoreAdmin] Sync failure for project ${project.id}:`, err);
+        failedProjects.push({
+          id: project.id,
+          error: err instanceof Error ? err.message : 'Save failed',
+        });
       }
     }
-    return { synced };
+    return {
+      synced: successfulProjectIds.length,
+      successfulProjectIds,
+      failedProjects,
+    };
   }
 
   async listDeployments(userId: string): Promise<DeploymentSummary[]> {
@@ -572,6 +622,8 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
       projectId: d.projectId || slug,
       title: d.title || 'Published Site',
       htmlBundle: d.htmlBundle || '',
+      r2Bucket: d.r2Bucket,
+      artifactPath: d.artifactPath,
       createdAt: toIsoString(d.createdAt),
       updatedAt: toIsoString(d.updatedAt || d.createdAt),
     };
@@ -586,6 +638,8 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
       r2Bucket?: string;
       artifactPath?: string;
       htmlBundle?: string;
+      bytes?: number;
+      etag?: string;
     },
   ): Promise<void> {
     const docRef = this.db.collection('deployments').doc(params.slug);
@@ -608,6 +662,15 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
     if (params.htmlBundle) {
       // Legacy fallback storage if provided
       payload.htmlBundle = params.htmlBundle.slice(0, 900000);
+    } else if (snap.exists && snap.data()?.htmlBundle) {
+      // Clean up legacy full HTML bundle from Firestore once stored in R2
+      payload.htmlBundle = FieldValue.delete();
+    }
+    if (typeof params.bytes === 'number') {
+      payload.bytes = params.bytes;
+    }
+    if (params.etag) {
+      payload.etag = params.etag;
     }
 
     if (!snap.exists) {
@@ -627,6 +690,77 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
     }
     await docRef.delete();
     return true;
+  }
+
+  async savePushSubscription(userId: string, subscription: WebPushSubscription): Promise<void> {
+    const docId = hashEndpoint(subscription.endpoint);
+    const ref = this.db.collection('push_subscriptions').doc(docId);
+    const snap = await ref.get();
+    if (snap.exists && snap.data()?.userId !== userId) {
+      throw new SecurityValidationError(403, 'Push subscription is registered to another account.');
+    }
+    const now = FieldValue.serverTimestamp();
+    await ref.set(
+      {
+        id: docId,
+        endpoint: subscription.endpoint,
+        userId,
+        keys: {
+          p256dh: subscription.keys.p256dh,
+          auth: subscription.keys.auth,
+        },
+        expirationTime: subscription.expirationTime ?? null,
+        updatedAt: now,
+        ...(snap.exists ? {} : { createdAt: now }),
+      },
+      { merge: true },
+    );
+  }
+
+  async deletePushSubscription(userId: string, endpoint: string): Promise<boolean> {
+    const docId = hashEndpoint(endpoint);
+    const ref = this.db.collection('push_subscriptions').doc(docId);
+    const snap = await ref.get();
+    if (!snap.exists) return false;
+    if (snap.data()?.userId !== userId) {
+      throw new SecurityValidationError(403, 'Access denied: Subscription belongs to another account.');
+    }
+    await ref.delete();
+    return true;
+  }
+
+  async listPushSubscriptions(userId?: string): Promise<WebPushSubscription[]> {
+    let query: FirebaseFirestore.Query = this.db.collection('push_subscriptions');
+    if (userId) {
+      query = query.where('userId', '==', userId);
+    }
+    const snap = await query.get();
+    return snap.docs.map((doc) => {
+      const d = doc.data();
+      return {
+        endpoint: d.endpoint,
+        userId: d.userId,
+        expirationTime: typeof d.expirationTime === 'number' ? d.expirationTime : null,
+        keys: {
+          p256dh: d.keys?.p256dh || '',
+          auth: d.keys?.auth || '',
+        },
+        createdAt: toIsoString(d.createdAt),
+      };
+    });
+  }
+
+  async deletePushSubscriptionsByEndpoints(endpoints: string[]): Promise<number> {
+    if (!endpoints.length) return 0;
+    let deleted = 0;
+    const batch = this.db.batch();
+    for (const ep of endpoints) {
+      const docId = hashEndpoint(ep);
+      batch.delete(this.db.collection('push_subscriptions').doc(docId));
+      deleted++;
+    }
+    await batch.commit();
+    return deleted;
   }
 }
 
@@ -675,7 +809,7 @@ export class InMemoryAdminStore implements AdminDatabaseOperations {
   async saveUserVault(
     userId: string,
     email: string,
-    vault: { ciphertext: string; aiKeyHint?: string; searchKeyHint?: string },
+    vault: { ciphertext: string; aiKeyHint?: string; searchKeyHint?: string; renderKeyHint?: string },
   ): Promise<void> {
     this.vaults.set(userId, {
       ownerId: userId,
@@ -684,6 +818,7 @@ export class InMemoryAdminStore implements AdminDatabaseOperations {
       ciphertext: vault.ciphertext,
       aiKeyHint: vault.aiKeyHint,
       searchKeyHint: vault.searchKeyHint,
+      renderKeyHint: vault.renderKeyHint,
     });
   }
 
@@ -715,11 +850,22 @@ export class InMemoryAdminStore implements AdminDatabaseOperations {
     if (existing && existing.ownerId !== userId) {
       throw new SecurityValidationError(403, 'Access denied: You cannot overwrite another user project.');
     }
+    if (project.ownerId && project.ownerId !== userId) {
+      throw new SecurityValidationError(403, 'Access denied: Project ownership mismatch.');
+    }
     const now = new Date().toISOString();
+    let createdAt = existing?.createdAt;
+    if (!createdAt) {
+      if (project.createdAt && !isNaN(new Date(project.createdAt).getTime())) {
+        createdAt = new Date(project.createdAt).toISOString();
+      } else {
+        createdAt = now;
+      }
+    }
     this.projects.set(project.id, {
       ...project,
       ownerId: userId,
-      createdAt: existing?.createdAt || now,
+      createdAt,
       updatedAt: now,
     });
   }
@@ -733,13 +879,33 @@ export class InMemoryAdminStore implements AdminDatabaseOperations {
     this.projects.delete(projectId);
   }
 
-  async syncProjects(userId: string, projects: MistProject[]): Promise<{ synced: number }> {
-    let synced = 0;
+  async syncProjects(
+    userId: string,
+    projects: MistProject[],
+  ): Promise<{
+    synced: number;
+    successfulProjectIds: string[];
+    failedProjects: Array<{ id: string; error: string }>;
+  }> {
+    const successfulProjectIds: string[] = [];
+    const failedProjects: Array<{ id: string; error: string }> = [];
+
     for (const p of projects) {
-      await this.saveProject(userId, p);
-      synced++;
+      try {
+        await this.saveProject(userId, p);
+        successfulProjectIds.push(p.id);
+      } catch (err) {
+        failedProjects.push({
+          id: p.id,
+          error: err instanceof Error ? err.message : 'Save failed',
+        });
+      }
     }
-    return { synced };
+    return {
+      synced: successfulProjectIds.length,
+      successfulProjectIds,
+      failedProjects,
+    };
   }
 
   async listDeployments(userId: string): Promise<DeploymentSummary[]> {
@@ -771,6 +937,8 @@ export class InMemoryAdminStore implements AdminDatabaseOperations {
       r2Bucket?: string;
       artifactPath?: string;
       htmlBundle?: string;
+      bytes?: number;
+      etag?: string;
     },
   ): Promise<void> {
     const existing = this.deployments.get(params.slug);
@@ -799,5 +967,42 @@ export class InMemoryAdminStore implements AdminDatabaseOperations {
     }
     this.deployments.delete(slug);
     return true;
+  }
+
+  public pushSubscriptions = new Map<string, WebPushSubscription>();
+
+  async savePushSubscription(userId: string, subscription: WebPushSubscription): Promise<void> {
+    const existing = this.pushSubscriptions.get(subscription.endpoint);
+    if (existing && existing.userId && existing.userId !== userId) {
+      throw new SecurityValidationError(403, 'Push subscription is registered to another account.');
+    }
+    this.pushSubscriptions.set(subscription.endpoint, {
+      ...subscription,
+      userId,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    });
+  }
+
+  async deletePushSubscription(userId: string, endpoint: string): Promise<boolean> {
+    const existing = this.pushSubscriptions.get(endpoint);
+    if (!existing) return false;
+    if (existing.userId && existing.userId !== userId) {
+      throw new SecurityValidationError(403, 'Access denied: Subscription belongs to another account.');
+    }
+    return this.pushSubscriptions.delete(endpoint);
+  }
+
+  async listPushSubscriptions(userId?: string): Promise<WebPushSubscription[]> {
+    const all = Array.from(this.pushSubscriptions.values());
+    if (!userId) return all;
+    return all.filter((s) => s.userId === userId);
+  }
+
+  async deletePushSubscriptionsByEndpoints(endpoints: string[]): Promise<number> {
+    let count = 0;
+    for (const ep of endpoints) {
+      if (this.pushSubscriptions.delete(ep)) count++;
+    }
+    return count;
   }
 }

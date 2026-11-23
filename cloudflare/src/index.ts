@@ -25,6 +25,7 @@ export interface Env {
     } | null>;
   };
   APEX_DOMAIN?: string;
+  PUBLISH_DOMAIN?: string;
   HEROKU_API_ORIGIN?: string;
   MIST_EDGE_ORIGIN_SECRET?: string;
 }
@@ -52,25 +53,41 @@ export function isValidSlug(slug: string): boolean {
 }
 
 /**
- * Extracts and classifies the subdomain from the hostname given an apex domain.
+ * Extracts and classifies the subdomain from the hostname given an apex domain
+ * and optional dedicated wildcard publishing domain.
  */
 export function extractSubdomain(
   hostname: string,
   apexDomain = 'mist.me',
-): { isApex: boolean; subdomain: string | null } {
-  const host = hostname.toLowerCase().split(':')[0]!;
-  const apex = apexDomain.toLowerCase().split(':')[0]!;
+  publishDomain?: string,
+): { isApex: boolean; isPublishDomainApex?: boolean; subdomain: string | null } {
+  const host = (hostname || '').toLowerCase().split(':')[0]!;
+  const apex = (apexDomain || 'mist.me').toLowerCase().split(':')[0]!;
+  const publish = publishDomain ? publishDomain.replace(/^\*\./, '').toLowerCase().split(':')[0]! : null;
 
+  // 1. If a dedicated publishing domain is configured (e.g. sites.mist.me or mist-sites.com)
+  if (publish && publish !== apex) {
+    if (host === publish) {
+      return { isApex: false, isPublishDomainApex: true, subdomain: null };
+    }
+    if (host.endsWith(`.${publish}`)) {
+      const sub = host.slice(0, -(publish.length + 1));
+      return { isApex: false, subdomain: sub };
+    }
+  }
+
+  // 2. Apex / local development checks
   if (host === apex || host === 'localhost' || host === '127.0.0.1') {
     return { isApex: true, subdomain: null };
   }
 
+  // 3. Subdomain of apex domain (e.g. my-app.mist.me)
   if (host.endsWith(`.${apex}`)) {
     const sub = host.slice(0, -(apex.length + 1));
     return { isApex: false, subdomain: sub };
   }
 
-  // Fallback for custom or local testing subdomains (e.g. test.localhost)
+  // 4. Local testing subdomains (e.g. test.localhost)
   if (host.endsWith('.localhost')) {
     const sub = host.slice(0, -('.localhost'.length));
     return { isApex: false, subdomain: sub };
@@ -375,11 +392,18 @@ export async function handlePublishedSite(
   headers.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=86400');
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+  headers.set(
+    'Content-Security-Policy',
+    "sandbox allow-scripts allow-forms allow-popups; default-src 'unsafe-inline' 'unsafe-eval' data: blob: https:; img-src * data: blob: https:; media-src * data: blob: https:; style-src * 'unsafe-inline'; font-src * data: https:; connect-src *; object-src 'none'; base-uri 'none'; frame-ancestors 'none';",
+  );
+  headers.delete('Set-Cookie');
   if (object.httpEtag) {
     headers.set('ETag', object.httpEtag);
   }
 
-  return new Response(object.body, {
+  return new Response(request.method === 'HEAD' ? null : object.body, {
     status: 200,
     headers,
   });
@@ -392,6 +416,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const apexDomain = env.APEX_DOMAIN || 'mist.me';
+    const publishDomain = env.PUBLISH_DOMAIN;
 
     // 1. Edge health check
     if (url.pathname === '/cdn-health' || url.pathname === '/__edge/health') {
@@ -400,6 +425,7 @@ export default {
           status: 'healthy',
           edge: 'cloudflare-worker',
           apexDomain,
+          publishDomain: publishDomain || apexDomain,
           timestamp: new Date().toISOString(),
         }),
         {
@@ -409,15 +435,30 @@ export default {
       );
     }
 
-    // 2. Classify domain (apex vs subdomain)
-    const { isApex, subdomain } = extractSubdomain(url.hostname, apexDomain);
+    // 2. Classify domain (apex vs subdomain vs publish domain apex)
+    const { isApex, isPublishDomainApex, subdomain } = extractSubdomain(url.hostname, apexDomain, publishDomain);
 
-    // 3. Subdomain branch: Published projects (<slug>.mist.me)
+    // If request reached the apex of the publishing domain (e.g. sites.mist.me or mist-sites.com without slug)
+    if (isPublishDomainApex) {
+      return Response.redirect(`https://${apexDomain}/`, 302);
+    }
+
+    // 3. Subdomain branch: Published projects (<slug>.mist.me or <slug>.<publishDomain>)
     if (!isApex && subdomain) {
       return handlePublishedSite(subdomain, request, url, env);
     }
 
     // 4. Apex domain branch: mist.me
+    // Disallow arbitrary published site HTML on apex and redirect legacy /p/:slug to subdomain
+    if (url.pathname.startsWith('/p/')) {
+      const slug = url.pathname.slice(3).split('/')[0];
+      if (slug && isValidSlug(slug)) {
+        const targetDomain = publishDomain ? publishDomain.replace(/^\*\./, '') : apexDomain;
+        return Response.redirect(`https://${slug}.${targetDomain}/`, 301);
+      }
+      return new Response('Not Found: Published website routes are disabled on apex origin.', { status: 404 });
+    }
+
     // Route /api/* and /sw.js to Heroku API
     if (url.pathname.startsWith('/api/') || url.pathname === '/sw.js') {
       return proxyToHeroku(request, url, env);

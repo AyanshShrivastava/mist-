@@ -36,6 +36,8 @@
   // Environment variables
   "vars": {
     "APEX_DOMAIN": "mist.me",
+    // Configurable wildcard publishing domain (e.g. "mist.me" for *.mist.me, or dedicated "mist-sites.com" for *.mist-sites.com)
+    "PUBLISH_DOMAIN": "mist.me",
     "HEROKU_API_ORIGIN": "https://mist-control-plane-api.herokuapp.com"
   }
 }

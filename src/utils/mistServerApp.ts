@@ -26,24 +26,40 @@ import {
 import { classifyModelError, type ModelHealthIncident } from './aiErrors';
 import { maskApiKey, normalizeProjectFilePath, resolveAppEntryPath } from './projectOps';
 import {
+  BODY_LIMITS,
+  BUILDER_CSP,
+  createBodySizeLimitMiddleware,
   createClerkAuthMiddleware,
   createEdgeOriginSecretMiddleware,
   createFirebaseAuthMiddleware,
+  createOptionalAuthMiddleware,
   createPreviewAiSession,
   createRateLimiter,
+  enforceHostOnlyCookies,
   enforceSameOriginOnMutations,
+  getEffectiveHost,
   getFirebaseAppletConfig,
+  handleBodyParserErrors,
+  isPublishingHostname,
   resolvePreviewAiSession,
   revokeAllUserPreviewSessions,
   revokePreviewAiSession,
   sanitizeErrorMessage,
   sealUserVaultPayload,
   SecurityValidationError,
+  sendPublishedSiteHtml,
+  sendSecurityErrorResponse,
   unsealUserVaultPayload,
+  validateAiProviderConfig,
+  validateExternalUrlSyntax,
   validateProjectFilesPayload,
+  validateProjectPayload,
+  validateVaultPayload,
+  validateWebSearchConfig,
   verifyClerkAuthHeader,
   verifyFirebaseAuthHeader,
   type AuthenticatedRequest,
+  type SharedRateLimitAdapter,
   type VerifiedClerkUser,
   type VerifiedFirebaseUser,
 } from './serverSecurity';
@@ -60,6 +76,18 @@ import {
   formatDeploymentUrl,
   type DeploymentStore,
 } from './deploymentStore';
+import {
+  validateRenderApiKey,
+  validateGitHubRepoUrl,
+  validateRenderServiceName,
+  verifyRenderApiKey,
+  createRenderStaticSite,
+  getRenderService,
+  getRenderLatestDeploy,
+  triggerRenderDeploy,
+  listRenderStaticSites,
+} from './renderClient';
+import type { RenderCredentialConfig, VaultPlainPayload } from './serverSecurity';
 import {
   FirestoreAdminStore,
   InMemoryAdminStore,
@@ -1023,6 +1051,7 @@ export interface MistAppDeps {
   adminStore?: AdminDatabaseOperations;
   r2Store?: R2StorageOperations;
   edgeOriginSecret?: string;
+  publishBaseUrl?: string;
   verifyAuthHeader?: (authHeader?: string) => Promise<VerifiedClerkUser>;
   aiFetchImpl?: typeof fetch;
   searchFetchImpl?: typeof fetch;
@@ -1035,10 +1064,20 @@ export interface MistAppDeps {
   deployRateLimitMax?: number;
   searchRateLimitMax?: number;
   notificationRateLimitMax?: number;
+  testNotificationRateLimitMax?: number;
+  bundleRateLimitMax?: number;
+  renderRateLimitMax?: number;
+  rateLimitAdapter?: SharedRateLimitAdapter;
+  renderFetchImpl?: typeof fetch;
 }
 
 export function createMistApp(deps: MistAppDeps = {}): Express {
   const app = express();
+
+  const publishBaseUrl = deps.publishBaseUrl ?? process.env.PUBLISH_BASE_URL?.trim();
+
+  // Host-only cookie protection: prevents any parent-domain cookie leakage to published subdomains
+  app.use(enforceHostOnlyCookies(publishBaseUrl));
 
   let adminStore = deps.adminStore;
   if (!adminStore) {
@@ -1073,8 +1112,13 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
   const aiFetchImpl = deps.aiFetchImpl;
   const searchFetchImpl = deps.searchFetchImpl ?? deps.aiFetchImpl;
   const searchService = deps.searchService || defaultWebSearchService;
-  const notificationService = deps.notificationService || defaultNotificationService;
+  const notificationService =
+    deps.notificationService ||
+    new PushNotificationService({
+      store: adminStore,
+    });
   const skipDnsLookup = deps.skipDnsLookup;
+  const renderFetchImpl = deps.renderFetchImpl;
 
   const configuredTrustProxy =
     deps.trustProxy !== undefined
@@ -1087,19 +1131,36 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
   app.set('trust proxy', configuredTrustProxy);
 
   app.disable('x-powered-by');
-  app.use((_req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), payment=()');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
-    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
-    res.setHeader('X-DNS-Prefetch-Control', 'off');
+  app.use((req, res, next) => {
+    const hostHeader = getEffectiveHost(req);
+    const pubCheck = isPublishingHostname(hostHeader, publishBaseUrl);
+    (req as any).isPublishingHost = pubCheck.isPublishing;
+    (req as any).publishingSlug = pubCheck.slug;
+
+    if (pubCheck.isPublishing) {
+      // Dedicated publishing hostname:
+      // Block builder API and control plane endpoints
+      if (req.path.startsWith('/api/') || req.path === '/sw.js') {
+        res.status(404).json({ error: 'Mist API is not accessible on published website domains.' });
+        return;
+      }
+    } else {
+      // Builder hostname: apply Builder CSP and strict application security headers
+      res.setHeader('Content-Security-Policy', BUILDER_CSP);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+      res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), payment=()');
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+      res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+      res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+      res.setHeader('X-DNS-Prefetch-Control', 'off');
+    }
     next();
   });
   app.use(createEdgeOriginSecretMiddleware({ expectedSecret: deps.edgeOriginSecret }));
   app.use(enforceSameOriginOnMutations);
   app.use(express.json({ limit: '6mb' }));
+  app.use(handleBodyParserErrors);
 
   // Explicit health check endpoints
   app.get('/api/health', (_req, res) => {
@@ -1118,36 +1179,66 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
     verifyHeaderFn: verifyAuth,
   });
 
+  const optionalAuth = createOptionalAuthMiddleware({
+    verifyHeaderFn: verifyAuth,
+  });
+
+  const sharedAdapter = deps.rateLimitAdapter;
 
   const aiRateLimiter = createRateLimiter({
     windowMs: 60_000,
     maxRequests: deps.aiRateLimitMax ?? 60,
     label: 'AI',
+    adapter: sharedAdapter,
   });
   const catalogRateLimiter = createRateLimiter({
     windowMs: 60_000,
     maxRequests: deps.catalogRateLimitMax ?? 120,
     label: 'model catalog',
+    adapter: sharedAdapter,
   });
   const deployRateLimiter = createRateLimiter({
     windowMs: 60_000,
     maxRequests: deps.deployRateLimitMax ?? 30,
     label: 'deployment',
+    adapter: sharedAdapter,
   });
   const searchRateLimiter = createRateLimiter({
     windowMs: 60_000,
     maxRequests: deps.searchRateLimitMax ?? 40,
     label: 'web search',
+    adapter: sharedAdapter,
   });
   const notificationRateLimiter = createRateLimiter({
     windowMs: 60_000,
     maxRequests: deps.notificationRateLimitMax ?? 60,
     label: 'notifications',
+    adapter: sharedAdapter,
+  });
+  const testNotificationRateLimiter = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: deps.testNotificationRateLimitMax ?? 15,
+    label: 'test push notifications',
+    adapter: sharedAdapter,
   });
   const bundleRateLimiter = createRateLimiter({
     windowMs: 60_000,
-    maxRequests: 30,
+    maxRequests: deps.bundleRateLimitMax ?? 30,
+    userMaxRequests: (deps.bundleRateLimitMax ?? 30) * 2,
     label: 'bundling',
+    adapter: sharedAdapter,
+  });
+  const syncRateLimiter = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: 50,
+    label: 'project synchronization',
+    adapter: sharedAdapter,
+  });
+  const renderRateLimiter = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: deps.renderRateLimitMax ?? 30,
+    label: 'Render',
+    adapter: sharedAdapter,
   });
 
   const recentModelIncidents = new Map<string, ModelHealthIncident>();
@@ -1262,30 +1353,42 @@ Return JSON: { "content": "..." }`;
     }
   });
 
-  app.post('/api/bundle', bundleRateLimiter, async (req, res) => {
-    try {
-      const { files, title, includeInspector, enableAppAi, standaloneExport } = req.body as {
-        files: ProjectFile[];
-        title?: string;
-        includeInspector?: boolean;
-        enableAppAi?: boolean;
-        standaloneExport?: boolean;
-      };
-      const validatedFiles = validateProjectFilesPayload(files);
-      const isStandalone = Boolean(standaloneExport);
-      const result = await bundleProjectToHtml({
-        files: validatedFiles,
-        title: title || 'Mist Preview',
-        includeInspector: isStandalone ? false : includeInspector !== false,
-        enableAppAi: isStandalone ? false : Boolean(enableAppAi),
-        standaloneExport: isStandalone,
-      });
-      res.json(result);
-    } catch (err) {
-      const status = err instanceof SecurityValidationError ? err.status : 500;
-      res.status(status).json({ error: sanitizeErrorMessage(err) || 'Bundling failed' });
-    }
-  });
+  app.post(
+    '/api/bundle',
+    optionalAuth,
+    bundleRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.BUNDLE, 'Bundle request'),
+    async (req, res) => {
+      try {
+        const { files, title, includeInspector, enableAppAi, standaloneExport } = req.body as {
+          files: ProjectFile[];
+          title?: string;
+          includeInspector?: boolean;
+          enableAppAi?: boolean;
+          standaloneExport?: boolean;
+        };
+        const validatedFiles = validateProjectFilesPayload(files);
+        const isStandalone = Boolean(standaloneExport);
+
+        const bundlePromise = bundleProjectToHtml({
+          files: validatedFiles,
+          title: (title || 'Mist Preview').slice(0, 120),
+          includeInspector: isStandalone ? false : includeInspector !== false,
+          enableAppAi: isStandalone ? false : Boolean(enableAppAi),
+          standaloneExport: isStandalone,
+        });
+
+        const timeoutPromise = new Promise<{ html: string; bundleError?: string }>((_, reject) =>
+          setTimeout(() => reject(new SecurityValidationError(504, 'Bundling operation timed out after 30s.')), 30_000),
+        );
+
+        const result = await Promise.race([bundlePromise, timeoutPromise]);
+        res.json(result);
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 500);
+      }
+    },
+  );
 
   app.get('/api/ai/status', (_req, res) => {
     res.json({
@@ -1329,6 +1432,7 @@ Return JSON: { "content": "..." }`;
     '/api/ai/models',
     requireVerifiedAuth,
     catalogRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_CONFIG, 'Catalog request'),
     async (req: AuthenticatedRequest, res) => {
       const { baseUrl, apiKey, forceRefresh } = req.body as {
         baseUrl?: string;
@@ -1337,6 +1441,7 @@ Return JSON: { "content": "..." }`;
       };
       const targetUrl = (baseUrl || 'https://openrouter.ai/api/v1').trim();
       try {
+        validateExternalUrlSyntax(targetUrl);
         const result = await fetchGatewayModelsCatalog({
           baseUrl: targetUrl,
           apiKey,
@@ -1346,8 +1451,7 @@ Return JSON: { "content": "..." }`;
         });
         res.json(result);
       } catch (err) {
-        const status = err instanceof SecurityValidationError ? err.status : 502;
-        res.status(status).json({ error: sanitizeErrorMessage(err) });
+        sendSecurityErrorResponse(res, err, 502);
       }
     },
   );
@@ -1357,6 +1461,7 @@ Return JSON: { "content": "..." }`;
     '/api/user/vault/seal',
     requireVerifiedAuth,
     catalogRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.VAULT, 'Vault request'),
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
@@ -1368,11 +1473,15 @@ Return JSON: { "content": "..." }`;
           aiConfig?: AiProviderConfig;
           searchConfig?: WebSearchConfig;
         };
+        const validated = validateVaultPayload({
+          aiConfig: aiConfig ? normalizeProviderConfigToStudio(aiConfig) : undefined,
+          searchConfig: searchConfig ? normalizeWebSearchConfig(searchConfig) : undefined,
+        });
         const sealed = sealUserVaultPayload({
           uid: user.userId,
           email: user.email,
-          aiConfig: aiConfig ? normalizeProviderConfigToStudio(aiConfig) : undefined,
-          searchConfig: searchConfig ? normalizeWebSearchConfig(searchConfig) : undefined,
+          aiConfig: validated.aiConfig,
+          searchConfig: validated.searchConfig,
         });
         await adminStore.saveUserVault(user.userId, user.email, {
           ciphertext: sealed.encryptedPayload,
@@ -1381,8 +1490,7 @@ Return JSON: { "content": "..." }`;
         });
         res.json(sealed);
       } catch (err) {
-        const status = err instanceof SecurityValidationError ? err.status : 400;
-        res.status(status).json({ error: sanitizeErrorMessage(err) || 'Failed to seal credential vault.' });
+        sendSecurityErrorResponse(res, err, 400);
       }
     },
   );
@@ -1391,6 +1499,7 @@ Return JSON: { "content": "..." }`;
     '/api/user/vault/unseal',
     requireVerifiedAuth,
     catalogRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.VAULT, 'Vault request'),
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
@@ -1412,6 +1521,26 @@ Return JSON: { "content": "..." }`;
           email: user.email,
           encryptedPayload,
         });
+
+        // Key rotation & migration: if decrypted with a previous key or legacy fallback, seamlessly re-encrypt
+        if (unsealed.needsReencryption) {
+          try {
+            const resealed = sealUserVaultPayload({
+              uid: user.userId,
+              email: user.email,
+              aiConfig: unsealed.aiConfig,
+              searchConfig: unsealed.searchConfig,
+            });
+            await adminStore.saveUserVault(user.userId, user.email, {
+              ciphertext: resealed.encryptedPayload,
+              aiKeyHint: resealed.aiKeyHint,
+              searchKeyHint: resealed.searchKeyHint,
+            });
+          } catch (reencryptErr) {
+            console.warn('[Mist Vault] Silent re-encryption update skipped:', sanitizeErrorMessage(reencryptErr));
+          }
+        }
+
         res.json({
           aiConfig: unsealed.aiConfig ? normalizeProviderConfigToStudio(unsealed.aiConfig) : undefined,
           searchConfig: unsealed.searchConfig
@@ -1451,6 +1580,375 @@ Return JSON: { "content": "..." }`;
         res.json({ success: true });
       } catch (err) {
         res.status(500).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  // --- Real Connect to Render Integration Endpoints ---
+
+  app.post(
+    '/api/render/connect',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.VAULT, 'Render connect request'),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'An account email is required to connect Render.' });
+          return;
+        }
+        const { apiKey } = req.body as { apiKey?: string };
+        const validatedKey = validateRenderApiKey(apiKey);
+
+        // Verify key against official Render API (GET /v1/owners)
+        const verification = await verifyRenderApiKey(validatedKey, {
+          fetchImpl: renderFetchImpl,
+        });
+
+        // Unseal existing vault if present to preserve AI & search configs
+        const vaultDoc = await adminStore.getUserVault(user.userId);
+        let unsealed: VaultPlainPayload = {};
+        if (vaultDoc?.ciphertext) {
+          try {
+            unsealed = unsealUserVaultPayload({
+              uid: user.userId,
+              email: user.email,
+              encryptedPayload: vaultDoc.ciphertext,
+            });
+          } catch {
+            // Start clean if existing ciphertext was invalid
+          }
+        }
+
+        const renderConfig: RenderCredentialConfig = {
+          apiKey: validatedKey,
+          ownerId: verification.primaryOwner.id,
+          ownerName: verification.primaryOwner.name,
+          ownerEmail: verification.primaryOwner.email,
+          workspaceType: verification.primaryOwner.type,
+          connectedAt: new Date().toISOString(),
+        };
+
+        const sealed = sealUserVaultPayload({
+          uid: user.userId,
+          email: user.email,
+          aiConfig: unsealed.aiConfig,
+          searchConfig: unsealed.searchConfig,
+          renderConfig,
+        });
+
+        await adminStore.saveUserVault(user.userId, user.email, {
+          ciphertext: sealed.encryptedPayload,
+          aiKeyHint: sealed.aiKeyHint,
+          searchKeyHint: sealed.searchKeyHint,
+          renderKeyHint: sealed.renderKeyHint,
+        });
+
+        res.json({
+          ok: true,
+          connected: true,
+          owner: verification.primaryOwner,
+          workspaces: verification.owners,
+          keyHint: sealed.renderKeyHint,
+          connectedAt: renderConfig.connectedAt,
+        });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.get(
+    '/api/render/status',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.json({ connected: false });
+          return;
+        }
+        const vaultDoc = await adminStore.getUserVault(user.userId);
+        if (!vaultDoc?.ciphertext) {
+          res.json({ connected: false });
+          return;
+        }
+        let unsealed: VaultPlainPayload;
+        try {
+          unsealed = unsealUserVaultPayload({
+            uid: user.userId,
+            email: user.email,
+            encryptedPayload: vaultDoc.ciphertext,
+          });
+        } catch {
+          res.json({ connected: false });
+          return;
+        }
+
+        if (!unsealed.renderConfig || !unsealed.renderConfig.apiKey) {
+          res.json({ connected: false });
+          return;
+        }
+
+        res.json({
+          connected: true,
+          owner: {
+            id: unsealed.renderConfig.ownerId,
+            name: unsealed.renderConfig.ownerName,
+            email: unsealed.renderConfig.ownerEmail,
+            type: unsealed.renderConfig.workspaceType || 'user',
+          },
+          ownerId: unsealed.renderConfig.ownerId,
+          ownerName: unsealed.renderConfig.ownerName,
+          ownerEmail: unsealed.renderConfig.ownerEmail,
+          workspaceType: unsealed.renderConfig.workspaceType || 'user',
+          keyHint: maskApiKey(unsealed.renderConfig.apiKey),
+          connectedAt: unsealed.renderConfig.connectedAt,
+        });
+      } catch (err) {
+        res.status(500).json({ error: sanitizeErrorMessage(err) });
+      }
+    },
+  );
+
+  app.post(
+    '/api/render/disconnect',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'An account email is required.' });
+          return;
+        }
+        const vaultDoc = await adminStore.getUserVault(user.userId);
+        if (!vaultDoc?.ciphertext) {
+          res.json({ ok: true, connected: false });
+          return;
+        }
+        const unsealed = unsealUserVaultPayload({
+          uid: user.userId,
+          email: user.email,
+          encryptedPayload: vaultDoc.ciphertext,
+        });
+
+        const sealed = sealUserVaultPayload({
+          uid: user.userId,
+          email: user.email,
+          aiConfig: unsealed.aiConfig,
+          searchConfig: unsealed.searchConfig,
+          renderConfig: undefined,
+        });
+
+        await adminStore.saveUserVault(user.userId, user.email, {
+          ciphertext: sealed.encryptedPayload,
+          aiKeyHint: sealed.aiKeyHint,
+          searchKeyHint: sealed.searchKeyHint,
+          renderKeyHint: '',
+        });
+
+        res.json({ ok: true, connected: false });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.get(
+    '/api/render/workspaces',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'An account email is required.' });
+          return;
+        }
+        const vaultDoc = await adminStore.getUserVault(user.userId);
+        if (!vaultDoc?.ciphertext) {
+          res.status(400).json({ error: 'Render account is not connected.' });
+          return;
+        }
+        const unsealed = unsealUserVaultPayload({
+          uid: user.userId,
+          email: user.email,
+          encryptedPayload: vaultDoc.ciphertext,
+        });
+        if (!unsealed.renderConfig?.apiKey) {
+          res.status(400).json({ error: 'Render account is not connected.' });
+          return;
+        }
+
+        const verification = await verifyRenderApiKey(unsealed.renderConfig.apiKey, {
+          fetchImpl: renderFetchImpl,
+        });
+        res.json({
+          primaryOwner: verification.primaryOwner,
+          workspaces: verification.owners,
+        });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.post(
+    '/api/render/deploy',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_CONFIG, 'Render deploy request'),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'An account email is required.' });
+          return;
+        }
+        const vaultDoc = await adminStore.getUserVault(user.userId);
+        if (!vaultDoc?.ciphertext) {
+          res.status(400).json({ error: 'Render account is not connected. Connect your Render API key first.' });
+          return;
+        }
+        const unsealed = unsealUserVaultPayload({
+          uid: user.userId,
+          email: user.email,
+          encryptedPayload: vaultDoc.ciphertext,
+        });
+        if (!unsealed.renderConfig?.apiKey) {
+          res.status(400).json({ error: 'Render account is not connected. Connect your Render API key first.' });
+          return;
+        }
+
+        const { repoUrl, branch, serviceName, ownerId, buildCommand, publishPath, autoDeploy } = req.body || {};
+        const targetOwnerId = (ownerId || unsealed.renderConfig.ownerId || '').trim();
+
+        const service = await createRenderStaticSite(
+          unsealed.renderConfig.apiKey,
+          {
+            name: serviceName || 'mist-site',
+            ownerId: targetOwnerId,
+            repo: repoUrl,
+            branch: branch || 'main',
+            buildCommand: buildCommand || 'npm run build',
+            publishPath: publishPath || 'dist',
+            autoDeploy: autoDeploy || 'commit',
+          },
+          { fetchImpl: renderFetchImpl },
+        );
+
+        let deployInfo: { id: string; status: string } | null = null;
+        try {
+          deployInfo = await triggerRenderDeploy(unsealed.renderConfig.apiKey, service.id, {
+            fetchImpl: renderFetchImpl,
+          });
+        } catch {
+          // Render auto-triggers initial deploy on static site creation
+        }
+
+        // Notify user via Web Push if configured
+        notificationService
+          .sendNotificationToUser(user.userId, {
+            title: 'Render Deployment Initiated! 🚀',
+            body: `Service "${service.name}" is building on Render at ${service.url}`,
+            data: { url: service.url },
+            tag: `render-${service.id}`,
+          })
+          .catch((notifyErr) => {
+            console.warn('[Mist Notifications] Render deploy push notice failed:', notifyErr);
+          });
+
+        res.json({
+          ok: true,
+          service,
+          deploy: deployInfo,
+        });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.get(
+    '/api/render/services/:serviceId',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'An account email is required.' });
+          return;
+        }
+        const vaultDoc = await adminStore.getUserVault(user.userId);
+        if (!vaultDoc?.ciphertext) {
+          res.status(400).json({ error: 'Render account is not connected.' });
+          return;
+        }
+        const unsealed = unsealUserVaultPayload({
+          uid: user.userId,
+          email: user.email,
+          encryptedPayload: vaultDoc.ciphertext,
+        });
+        if (!unsealed.renderConfig?.apiKey) {
+          res.status(400).json({ error: 'Render account is not connected.' });
+          return;
+        }
+
+        const serviceId = req.params.serviceId;
+        const service = await getRenderService(unsealed.renderConfig.apiKey, serviceId, {
+          fetchImpl: renderFetchImpl,
+        });
+        const latestDeploy = await getRenderLatestDeploy(unsealed.renderConfig.apiKey, serviceId, {
+          fetchImpl: renderFetchImpl,
+        });
+
+        res.json({
+          ok: true,
+          service,
+          latestDeploy,
+        });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.get(
+    '/api/render/services',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'An account email is required.' });
+          return;
+        }
+        const vaultDoc = await adminStore.getUserVault(user.userId);
+        if (!vaultDoc?.ciphertext) {
+          res.status(400).json({ error: 'Render account is not connected.' });
+          return;
+        }
+        const unsealed = unsealUserVaultPayload({
+          uid: user.userId,
+          email: user.email,
+          encryptedPayload: vaultDoc.ciphertext,
+        });
+        if (!unsealed.renderConfig?.apiKey) {
+          res.status(400).json({ error: 'Render account is not connected.' });
+          return;
+        }
+
+        const services = await listRenderStaticSites(unsealed.renderConfig.apiKey, {
+          fetchImpl: renderFetchImpl,
+        });
+        res.json({ services });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
       }
     },
   );
@@ -1530,16 +2028,12 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        const project = req.body?.project as MistProject;
-        if (!project || !project.id) {
-          res.status(400).json({ error: 'Valid project data is required.' });
-          return;
-        }
-        await adminStore.saveProject(user.userId, project, { isNew: true });
-        res.status(201).json({ success: true, project });
+        const validated = validateProjectPayload(req.body?.project);
+        await adminStore.saveProject(user.userId, validated, { isNew: true });
+        res.status(201).json({ success: true, project: validated });
       } catch (err) {
         const status = err instanceof SecurityValidationError ? err.status : 500;
-        res.status(status).json({ error: sanitizeErrorMessage(err) });
+        res.status(status).json({ success: false, error: sanitizeErrorMessage(err) });
       }
     },
   );
@@ -1551,17 +2045,18 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        const project = req.body?.project as MistProject;
-        if (!project) {
-          res.status(400).json({ error: 'Valid project data is required.' });
+        const raw = req.body?.project;
+        if (!raw || typeof raw !== 'object') {
+          res.status(400).json({ success: false, error: 'Valid project data is required.' });
           return;
         }
-        project.id = req.params.id;
-        await adminStore.saveProject(user.userId, project);
-        res.json({ success: true, project });
+        (raw as any).id = req.params.id;
+        const validated = validateProjectPayload(raw);
+        await adminStore.saveProject(user.userId, validated);
+        res.json({ success: true, project: validated });
       } catch (err) {
         const status = err instanceof SecurityValidationError ? err.status : 500;
-        res.status(status).json({ error: sanitizeErrorMessage(err) });
+        res.status(status).json({ success: false, error: sanitizeErrorMessage(err) });
       }
     },
   );
@@ -1585,15 +2080,46 @@ Return JSON: { "content": "..." }`;
   app.post(
     '/api/projects/sync',
     requireVerifiedAuth,
-    catalogRateLimiter,
+    syncRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.PROJECT_SYNC, 'Sync request'),
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        const projects = Array.isArray(req.body?.projects) ? req.body.projects : [];
-        const result = await adminStore.syncProjects(user.userId, projects);
-        res.json({ success: true, synced: result.synced });
+        const rawProjects = Array.isArray(req.body?.projects) ? req.body.projects : [];
+        if (rawProjects.length > 50) {
+          res.status(400).json({
+            success: false,
+            error: 'Sync batch exceeds maximum allowed projects (50).',
+          });
+          return;
+        }
+
+        const validatedProjects: MistProject[] = [];
+        const failedProjects: Array<{ id: string; error: string }> = [];
+
+        for (const raw of rawProjects) {
+          try {
+            validatedProjects.push(validateProjectPayload(raw));
+          } catch (valErr) {
+            failedProjects.push({
+              id: String((raw as any)?.id || 'unknown'),
+              error: sanitizeErrorMessage(valErr) || 'Invalid project payload',
+            });
+          }
+        }
+
+        const result = await adminStore.syncProjects(user.userId, validatedProjects);
+        const combinedFailed = [...failedProjects, ...result.failedProjects];
+        const allSucceeded = combinedFailed.length === 0;
+
+        res.status(allSucceeded ? 200 : (result.synced > 0 ? 207 : 400)).json({
+          success: allSucceeded,
+          synced: result.synced,
+          successfulProjectIds: result.successfulProjectIds,
+          failedProjects: combinedFailed,
+        });
       } catch (err) {
-        res.status(500).json({ error: sanitizeErrorMessage(err) });
+        res.status(500).json({ success: false, error: sanitizeErrorMessage(err) });
       }
     },
   );
@@ -1604,15 +2130,16 @@ Return JSON: { "content": "..." }`;
     '/api/ai/session',
     requireVerifiedAuth,
     aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_SESSION, 'Session request'),
     async (req: AuthenticatedRequest, res) => {
       try {
         const { providerConfig } = req.body as { providerConfig?: AiProviderConfig };
-        const { config } = await resolveByokRequestParams(providerConfig, { skipDnsLookup });
+        const validatedConfig = providerConfig ? validateAiProviderConfig(providerConfig) : undefined;
+        const { config } = await resolveByokRequestParams(validatedConfig, { skipDnsLookup });
         const session = createPreviewAiSession(config, req.authUser?.uid);
         res.json(session);
       } catch (err) {
-        const status = getHttpStatusFromError(err);
-        res.status(status).json({ error: sanitizeErrorMessage(err) });
+        sendSecurityErrorResponse(res, err, getHttpStatusFromError(err));
       }
     },
   );
@@ -1645,8 +2172,16 @@ Return JSON: { "content": "..." }`;
     '/api/ai/test-provider',
     requireVerifiedAuth,
     aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_CONFIG, 'Provider test request'),
     async (req: AuthenticatedRequest, res) => {
-      const config = normalizeProviderConfigToStudio(req.body as AiProviderConfig);
+      let validatedRaw: AiProviderConfig;
+      try {
+        validatedRaw = validateAiProviderConfig(req.body);
+      } catch (valErr) {
+        sendSecurityErrorResponse(res, valErr, 400);
+        return;
+      }
+      const config = normalizeProviderConfigToStudio(validatedRaw);
       const provider = config.provider;
       const model = config.model;
       const abortController = new AbortController();
@@ -1685,6 +2220,7 @@ Return JSON: { "content": "..." }`;
     '/api/search',
     requireVerifiedAuth,
     searchRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.SEARCH, 'Search request'),
     async (req: AuthenticatedRequest, res) => {
       const { query, queries, searchConfig } = req.body as {
         query?: string;
@@ -1702,6 +2238,22 @@ Return JSON: { "content": "..." }`;
         return;
       }
 
+      // Check max search queries per request
+      if (queryList.length > 5) {
+        res.status(400).json({ error: 'Exceeded maximum of 5 search queries per request.' });
+        return;
+      }
+
+      let validatedSearchConfig: WebSearchConfig | undefined;
+      if (searchConfig) {
+        try {
+          validatedSearchConfig = validateWebSearchConfig(searchConfig);
+        } catch (valErr) {
+          sendSecurityErrorResponse(res, valErr, 400);
+          return;
+        }
+      }
+
       const abortController = new AbortController();
       res.on('close', () => {
         if (!res.writableEnded) abortController.abort();
@@ -1709,7 +2261,7 @@ Return JSON: { "content": "..." }`;
 
       try {
         const { outcome } = await searchService.search({
-          rawConfig: searchConfig,
+          rawConfig: validatedSearchConfig || searchConfig,
           queries: queryList,
           signal: abortController.signal,
           fetchImpl: searchFetchImpl,
@@ -1724,8 +2276,7 @@ Return JSON: { "content": "..." }`;
           res.status(err.status).json({ error: err.message, code: err.code });
           return;
         }
-        const status = getHttpStatusFromError(err);
-        res.status(status).json({ error: sanitizeErrorMessage(err) || 'Web search failed.' });
+        sendSecurityErrorResponse(res, err, getHttpStatusFromError(err));
       }
     },
   );
@@ -1734,15 +2285,25 @@ Return JSON: { "content": "..." }`;
     '/api/search/test',
     requireVerifiedAuth,
     searchRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.SEARCH, 'Search test request'),
     async (req: AuthenticatedRequest, res) => {
       const { searchConfig } = req.body as { searchConfig?: WebSearchConfig };
+      let validatedSearchConfig: WebSearchConfig | undefined;
+      if (searchConfig) {
+        try {
+          validatedSearchConfig = validateWebSearchConfig(searchConfig);
+        } catch (valErr) {
+          sendSecurityErrorResponse(res, valErr, 400);
+          return;
+        }
+      }
       const abortController = new AbortController();
       res.on('close', () => {
         if (!res.writableEnded) abortController.abort();
       });
 
       try {
-        const normalizedSearchCfg = normalizeWebSearchConfig(searchConfig);
+        const normalizedSearchCfg = normalizeWebSearchConfig(validatedSearchConfig || searchConfig);
         const testQuery =
           normalizedSearchCfg.provider === 'duckduckgo'
             ? 'typescript'
@@ -2019,6 +2580,7 @@ Return JSON: { "content": "..." }`;
     '/api/ai/generate/stream',
     requireVerifiedAuth,
     aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_PROMPT, 'Generation stream request'),
     async (req: AuthenticatedRequest, res) => {
       const { prompt, providerConfig, enableAppAi, searchConfig, searchMode } = req.body as {
         prompt: string;
@@ -2032,7 +2594,16 @@ Return JSON: { "content": "..." }`;
         'on_request',
         typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
       );
-      const config = normalizeProviderConfigToStudio(providerConfig);
+      let validatedProviderCfg: AiProviderConfig | undefined;
+      let validatedSearchCfg: WebSearchConfig | undefined;
+      try {
+        if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
+        if (searchConfig) validatedSearchCfg = validateWebSearchConfig(searchConfig);
+      } catch (valErr) {
+        sendSecurityErrorResponse(res, valErr, 400);
+        return;
+      }
+      const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
 
       const abortController = new AbortController();
       res.on('close', () => {
@@ -2162,6 +2733,7 @@ Return JSON: { "content": "..." }`;
     '/api/ai/generate',
     requireVerifiedAuth,
     aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_PROMPT, 'Generation request'),
     async (req: AuthenticatedRequest, res) => {
       const { prompt, providerConfig, enableAppAi, searchConfig, searchMode } = req.body as {
         prompt: string;
@@ -2175,7 +2747,16 @@ Return JSON: { "content": "..." }`;
         'on_request',
         typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
       );
-      const config = normalizeProviderConfigToStudio(providerConfig);
+      let validatedProviderCfg: AiProviderConfig | undefined;
+      let validatedSearchCfg: WebSearchConfig | undefined;
+      try {
+        if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
+        if (searchConfig) validatedSearchCfg = validateWebSearchConfig(searchConfig);
+      } catch (valErr) {
+        sendSecurityErrorResponse(res, valErr, 400);
+        return;
+      }
+      const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
       const abortController = new AbortController();
       res.on('close', () => {
         if (!res.writableEnded) abortController.abort();
@@ -2234,6 +2815,7 @@ Return JSON: { "content": "..." }`;
     '/api/ai/refine/stream',
     requireVerifiedAuth,
     aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_PROMPT, 'Refinement stream request'),
     async (req: AuthenticatedRequest, res) => {
       const {
         instruction,
@@ -2257,7 +2839,16 @@ Return JSON: { "content": "..." }`;
         'on_request',
         typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
       );
-      const config = normalizeProviderConfigToStudio(providerConfig);
+      let validatedProviderCfg: AiProviderConfig | undefined;
+      let validatedSearchCfg: WebSearchConfig | undefined;
+      try {
+        if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
+        if (searchConfig) validatedSearchCfg = validateWebSearchConfig(searchConfig);
+      } catch (valErr) {
+        sendSecurityErrorResponse(res, valErr, 400);
+        return;
+      }
+      const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
 
       const abortController = new AbortController();
       res.on('close', () => {
@@ -2377,6 +2968,7 @@ Return JSON: { "content": "..." }`;
     '/api/ai/refine',
     requireVerifiedAuth,
     aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_PROMPT, 'Refinement request'),
     async (req: AuthenticatedRequest, res) => {
       const {
         instruction,
@@ -2400,7 +2992,16 @@ Return JSON: { "content": "..." }`;
         'on_request',
         typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
       );
-      const config = normalizeProviderConfigToStudio(providerConfig);
+      let validatedProviderCfg: AiProviderConfig | undefined;
+      let validatedSearchCfg: WebSearchConfig | undefined;
+      try {
+        if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
+        if (searchConfig) validatedSearchCfg = validateWebSearchConfig(searchConfig);
+      } catch (valErr) {
+        sendSecurityErrorResponse(res, valErr, 400);
+        return;
+      }
+      const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
       const abortController = new AbortController();
       res.on('close', () => {
         if (!res.writableEnded) abortController.abort();
@@ -2458,6 +3059,7 @@ Return JSON: { "content": "..." }`;
     '/api/ai/voice-turn',
     requireVerifiedAuth,
     aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_PROMPT, 'Voice turn request'),
     async (req: AuthenticatedRequest, res) => {
       const { messages, mode, projectName, providerConfig } = req.body as {
         messages: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -2465,7 +3067,14 @@ Return JSON: { "content": "..." }`;
         projectName?: string;
         providerConfig?: AiProviderConfig;
       };
-      const config = normalizeProviderConfigToStudio(providerConfig);
+      let validatedProviderCfg: AiProviderConfig | undefined;
+      try {
+        if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
+      } catch (valErr) {
+        sendSecurityErrorResponse(res, valErr, 400);
+        return;
+      }
+      const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
 
       try {
         const sys =
@@ -2506,89 +3115,110 @@ Return JSON: { "content": "..." }`;
   );
 
   // Live BYOK AI runtime endpoint: accepts EITHER a valid ephemeral preview sessionToken OR verified Firebase Auth Bearer
-  app.post('/api/app-ai', aiRateLimiter, async (req: AuthenticatedRequest, res) => {
-    const { prompt, messages, systemInstruction, jsonMode, sessionToken, providerConfig } = req.body as {
-      prompt?: string;
-      messages?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
-      systemInstruction?: string;
-      jsonMode?: boolean;
-      sessionToken?: string;
-      providerConfig?: AiProviderConfig;
-    };
+  app.post(
+    '/api/app-ai',
+    aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_PROMPT, 'App AI request'),
+    async (req: AuthenticatedRequest, res) => {
+      const { prompt, messages, systemInstruction, jsonMode, sessionToken, providerConfig } = req.body as {
+        prompt?: string;
+        messages?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+        systemInstruction?: string;
+        jsonMode?: boolean;
+        sessionToken?: string;
+        providerConfig?: AiProviderConfig;
+      };
 
-    const headerToken =
-      typeof req.headers['x-mist-session'] === 'string' ? req.headers['x-mist-session'] : undefined;
-    const sessionResolved = resolvePreviewAiSession(sessionToken || headerToken);
+      const headerToken =
+        typeof req.headers['x-mist-session'] === 'string' ? req.headers['x-mist-session'] : undefined;
+      const sessionResolved = resolvePreviewAiSession(sessionToken || headerToken);
 
-    let authUser: VerifiedFirebaseUser | null = null;
-    if (!sessionResolved) {
-      try {
-        authUser = await verifyAuth(req.headers.authorization);
-        if (!authUser.emailVerified) {
-          res.status(403).json({ error: 'A verified Google account is required to invoke App AI.' });
+      let authUser: VerifiedFirebaseUser | null = null;
+      if (!sessionResolved) {
+        try {
+          authUser = await verifyAuth(req.headers.authorization);
+          if (!authUser.emailVerified) {
+            res.status(403).json({ error: 'A verified Google account is required to invoke App AI.' });
+            return;
+          }
+          req.authUser = authUser;
+        } catch (authErr) {
+          sendSecurityErrorResponse(res, authErr, 401);
           return;
         }
-        req.authUser = authUser;
-      } catch (authErr) {
-        const status = authErr instanceof SecurityValidationError ? authErr.status : 401;
-        res.status(status).json({ error: sanitizeErrorMessage(authErr) || 'Authentication or active preview session required.' });
-        return;
       }
-    }
 
-    const config = sessionResolved
-      ? normalizeProviderConfigToStudio(sessionResolved)
-      : normalizeProviderConfigToStudio(providerConfig);
-
-    try {
-      const trimmedPrompt = (prompt || '').trim();
-      const hasMessages = Array.isArray(messages) && messages.length > 0;
-      if (!trimmedPrompt && !hasMessages) {
-        res.status(400).json({ error: 'Provide either prompt or messages.' });
+      let validatedProviderCfg: AiProviderConfig | undefined;
+      try {
+        if (!sessionResolved && providerConfig) {
+          validatedProviderCfg = validateAiProviderConfig(providerConfig);
+        }
+      } catch (valErr) {
+        sendSecurityErrorResponse(res, valErr, 400);
         return;
       }
 
-      const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        {
-          role: 'system',
-          content:
-            systemInstruction ||
-            'You are a concise, helpful backend AI powering an interactive web application built with Mist.',
-        },
-        ...(hasMessages ? messages! : [{ role: 'user' as const, content: trimmedPrompt }]),
-      ];
+      const config = sessionResolved
+        ? normalizeProviderConfigToStudio(sessionResolved)
+        : normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
 
-      const text = await callByokCompletionRaw({
-        config,
-        messages: chatMessages,
-        jsonMode: Boolean(jsonMode),
-        temperature: 0.6,
-        maxTokens: 2048,
-        fetchImpl: aiFetchImpl,
-        skipDnsLookup,
+      const abortController = new AbortController();
+      res.on('close', () => {
+        if (!res.writableEnded) abortController.abort();
       });
 
-      clearIncident(config.provider, config.model);
-      res.json({
-        text,
-        provider: config.name || config.provider,
-        model: config.model,
-      });
-    } catch (err) {
-      const status = getHttpStatusFromError(err);
-      const message = sanitizeErrorMessage(err) || 'App AI runtime failed';
-      const incident = classifyModelError({
-        status,
-        message,
-        provider: config.provider,
-        model: config.model,
-      });
-      recordIncident(incident);
-      res.status(status).json({ error: incident.message, incident });
-    }
-  });
+      try {
+        const trimmedPrompt = (prompt || '').trim();
+        const hasMessages = Array.isArray(messages) && messages.length > 0;
+        if (!trimmedPrompt && !hasMessages) {
+          res.status(400).json({ error: 'Provide either prompt or messages.' });
+          return;
+        }
 
-  // --- 5. Durable Owner-Isolated Deployments API & Public Slug Hosting (/p/:slug) ---
+        const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+          {
+            role: 'system',
+            content:
+              systemInstruction ||
+              'You are a concise, helpful backend AI powering an interactive web application built with Mist.',
+          },
+          ...(hasMessages ? messages! : [{ role: 'user' as const, content: trimmedPrompt }]),
+        ];
+
+        const text = await callByokCompletionRaw({
+          config,
+          messages: chatMessages,
+          jsonMode: Boolean(jsonMode),
+          temperature: 0.6,
+          maxTokens: 2048,
+          timeoutMs: 45_000,
+          signal: abortController.signal,
+          fetchImpl: aiFetchImpl,
+          skipDnsLookup,
+        });
+
+        clearIncident(config.provider, config.model);
+        res.json({
+          text,
+          provider: config.name || config.provider,
+          model: config.model,
+        });
+      } catch (err) {
+        const status = getHttpStatusFromError(err);
+        const message = sanitizeErrorMessage(err) || 'App AI runtime failed';
+        const incident = classifyModelError({
+          status,
+          message,
+          provider: config.provider,
+          model: config.model,
+        });
+        recordIncident(incident);
+        res.status(status).json({ error: incident.message, incident });
+      }
+    },
+  );
+
+  // --- 5. Durable Owner-Isolated Deployments API & Dedicated Publishing Host Routing ---
   app.get(
     '/api/deployments',
     requireVerifiedAuth,
@@ -2596,7 +3226,7 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        const list = await deploymentStore.listByOwner(user.uid, user.idToken);
+        const list = await deploymentStore.listByOwner(user.uid, user.idToken, publishBaseUrl);
         res.json({ deployments: list });
       } catch (err) {
         const status = err instanceof SecurityValidationError ? err.status : 500;
@@ -2609,6 +3239,7 @@ Return JSON: { "content": "..." }`;
     '/api/deployments',
     requireVerifiedAuth,
     deployRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.DEPLOYMENT, 'Deploy request'),
     async (req: AuthenticatedRequest, res) => {
       try {
         const authUser = req.authUser!;
@@ -2625,6 +3256,22 @@ Return JSON: { "content": "..." }`;
           .replace(/^-+|-+$/g, '');
         if (cleanSlug.length < 2 || cleanSlug.length > 80) {
           res.status(400).json({ error: 'Deployment slug must be 2 to 80 URL-safe characters.' });
+          return;
+        }
+
+        if (!publishBaseUrl) {
+          res.status(400).json({
+            error:
+              'Public website publishing is disabled because PUBLISH_BASE_URL is not configured. Use project export (ZIP or standalone HTML) to host externally.',
+          });
+          return;
+        }
+
+        const publishedUrl = formatDeploymentUrl(cleanSlug, publishBaseUrl);
+        if (!publishedUrl) {
+          res.status(400).json({
+            error: 'Invalid publishing domain configuration or slug.',
+          });
           return;
         }
 
@@ -2654,9 +3301,6 @@ Return JSON: { "content": "..." }`;
           authUser.idToken,
         );
 
-        const publishedUrl = `https://${cleanSlug}.mist.me`;
-        const shortUrl = formatDeploymentUrl(saved.slug, process.env.PUBLIC_APP_URL);
-
         // Fire-and-forget push notification to owner
         notificationService
           .sendNotificationToUser(authUser.userId, {
@@ -2671,10 +3315,9 @@ Return JSON: { "content": "..." }`;
 
         res.json({
           slug: saved.slug,
-          url: shortUrl,
+          url: publishedUrl,
           subdomainUrl: publishedUrl,
           publishedUrl,
-          legacyUrl: `/p/${saved.slug}`,
           title: saved.title,
           updatedAt: saved.updatedAt,
           htmlBundle: saved.htmlBundle,
@@ -2711,38 +3354,87 @@ Return JSON: { "content": "..." }`;
   app.post(
     '/api/projects/sync-dump',
     requireVerifiedAuth,
+    syncRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.PROJECT_SYNC, 'Sync dump request'),
     async (req: AuthenticatedRequest, res) => {
       try {
         const authUser = req.authUser!;
-        const { projects } = req.body as { projects?: MistProject[] };
+        const { projects } = req.body as { projects?: unknown[] };
         if (!Array.isArray(projects) || projects.length === 0) {
-          res.json({ ok: true, syncedProjects: 0, syncedFiles: 0 });
+          res.json({
+            ok: true,
+            success: true,
+            syncedProjects: 0,
+            syncedFiles: 0,
+            successfulProjectIds: [],
+            failedProjects: [],
+            user: authUser.email || authUser.userId,
+            userEmail: authUser.email,
+          });
           return;
         }
 
-        let totalFiles = 0;
-        let syncedProjects = 0;
-        for (const project of projects) {
-          if (!project || !project.id) continue;
-          await adminStore.saveProject(authUser.userId, project);
-          syncedProjects++;
-          totalFiles += (project.files || []).length;
+        // Limit maximum projects per batch
+        if (projects.length > 50) {
+          res.status(400).json({
+            ok: false,
+            success: false,
+            error: 'Sync batch exceeds maximum allowed projects (50).',
+          });
+          return;
         }
 
-        console.log(
-          `[Mist SyncDump] App exit sync: dumped ${totalFiles} files across ${syncedProjects} projects for user ${authUser.email || authUser.userId} (${authUser.userId}) to Firebase`,
-        );
+        const successfulProjectIds: string[] = [];
+        const failedProjects: Array<{ id: string; error: string }> = [];
+        let totalFiles = 0;
 
-        res.json({
-          ok: true,
-          syncedProjects,
+        for (const rawProject of projects) {
+          try {
+            const validated = validateProjectPayload(rawProject);
+            await adminStore.saveProject(authUser.userId, validated);
+            successfulProjectIds.push(validated.id);
+            totalFiles += validated.files.length;
+          } catch (err) {
+            const rawId = (rawProject as any)?.id;
+            console.warn(`[Mist SyncDump] Failed to save project ${rawId}:`, err);
+            failedProjects.push({
+              id: typeof rawId === 'string' && rawId ? rawId : 'unknown',
+              error: sanitizeErrorMessage(err) || 'Failed to save project',
+            });
+          }
+        }
+
+        const allSucceeded = failedProjects.length === 0;
+        const anySucceeded = successfulProjectIds.length > 0;
+        const statusCode = allSucceeded ? 200 : (anySucceeded ? 207 : 400);
+
+        if (allSucceeded) {
+          console.log(
+            `[Mist SyncDump] App exit sync: dumped ${totalFiles} files across ${successfulProjectIds.length} projects for user ${authUser.email || authUser.userId} (${authUser.userId}) to Firebase`,
+          );
+        } else {
+          console.warn(
+            `[Mist SyncDump] App exit sync partial failure: ${successfulProjectIds.length} succeeded, ${failedProjects.length} failed for user ${authUser.email || authUser.userId}`,
+          );
+        }
+
+        res.status(statusCode).json({
+          ok: allSucceeded,
+          success: allSucceeded,
+          syncedProjects: successfulProjectIds.length,
           syncedFiles: totalFiles,
+          successfulProjectIds,
+          failedProjects,
           user: authUser.email || authUser.userId,
           userEmail: authUser.email,
         });
       } catch (err) {
         const status = err instanceof SecurityValidationError ? err.status : 500;
-        res.status(status).json({ error: sanitizeErrorMessage(err) || 'Sync dump failed' });
+        res.status(status).json({
+          ok: false,
+          success: false,
+          error: sanitizeErrorMessage(err) || 'Sync dump failed',
+        });
       }
     },
   );
@@ -2769,18 +3461,28 @@ Return JSON: { "content": "..." }`;
     '/api/notifications/subscribe',
     requireVerifiedAuth,
     notificationRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.NOTIFICATIONS, 'Subscription request'),
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        const { subscription } = req.body as { subscription?: WebPushSubscription };
-        if (!subscription || !subscription.endpoint || !subscription.keys) {
+        const { subscription } = req.body as { subscription?: unknown };
+        if (!subscription || typeof subscription !== 'object') {
           res.status(400).json({ error: 'Valid PushSubscription payload with keys is required.' });
           return;
         }
-        const record = notificationService.addSubscription(subscription, user.userId);
+        const rawSub = subscription as Record<string, unknown>;
+        const record = await notificationService.addSubscription(
+          {
+            endpoint: String(rawSub.endpoint || ''),
+            expirationTime: typeof rawSub.expirationTime === 'number' ? rawSub.expirationTime : null,
+            keys: rawSub.keys as any,
+          },
+          user.userId,
+        );
         res.json({ ok: true, subscription: record });
       } catch (err) {
-        res.status(400).json({ error: sanitizeErrorMessage(err) || 'Failed to subscribe.' });
+        const status = err instanceof SecurityValidationError ? err.status : 400;
+        res.status(status).json({ error: sanitizeErrorMessage(err) || 'Failed to subscribe.' });
       }
     },
   );
@@ -2789,56 +3491,80 @@ Return JSON: { "content": "..." }`;
     '/api/notifications/unsubscribe',
     requireVerifiedAuth,
     notificationRateLimiter,
-    (req: AuthenticatedRequest, res) => {
-      const { endpoint } = req.body as { endpoint?: string };
-      if (!endpoint) {
-        res.status(400).json({ error: 'Endpoint is required.' });
-        return;
+    createBodySizeLimitMiddleware(BODY_LIMITS.NOTIFICATIONS, 'Unsubscribe request'),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const { endpoint } = req.body as { endpoint?: string };
+        if (!endpoint || typeof endpoint !== 'string') {
+          res.status(400).json({ error: 'Endpoint is required.' });
+          return;
+        }
+        const removed = await notificationService.removeSubscription(endpoint, user.userId);
+        res.json({ ok: true, removed });
+      } catch (err) {
+        const status = err instanceof SecurityValidationError ? err.status : 400;
+        res.status(status).json({ error: sanitizeErrorMessage(err) || 'Failed to unsubscribe.' });
       }
-      const removed = notificationService.removeSubscription(endpoint);
-      res.json({ ok: true, removed });
     },
   );
 
   app.post(
     '/api/notifications/test',
     requireVerifiedAuth,
-    notificationRateLimiter,
+    testNotificationRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.NOTIFICATIONS, 'Test notification request'),
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        const { subscription } = req.body as { subscription?: WebPushSubscription };
+        const { subscription } = req.body as { subscription?: unknown };
 
-        if (subscription && subscription.endpoint && subscription.keys) {
-          const result = await notificationService.sendNotification(subscription, {
-            title: 'Mist Notification 🔔',
-            body: 'Web Push with VAPID is working successfully on Mist!',
-            icon: '/favicon.ico',
-            badge: '/favicon.ico',
-            data: { url: '/' },
-            tag: 'test-notification',
-          });
-          if (!result.success) {
-            res
-              .status(result.statusCode || 500)
-              .json({ error: result.error || 'Failed to deliver notification.' });
+        const testPayload: NotificationPayload = {
+          title: 'Mist Notification 🔔',
+          body: 'Web Push with VAPID is working successfully on Mist!',
+          icon: '/favicon.ico',
+          badge: '/favicon.ico',
+          data: { url: '/' },
+          tag: 'test-notification',
+        };
+
+        // If client provides a subscription in request body:
+        // Validate and associate with user.userId before sending (ownership & SSRF check!)
+        if (subscription && typeof subscription === 'object') {
+          const rawSub = subscription as Record<string, unknown>;
+          if (rawSub.endpoint && rawSub.keys) {
+            const verifiedSub = await notificationService.addSubscription(
+              {
+                endpoint: String(rawSub.endpoint || ''),
+                expirationTime: typeof rawSub.expirationTime === 'number' ? rawSub.expirationTime : null,
+                keys: rawSub.keys as any,
+              },
+              user.userId,
+            );
+
+            const result = await notificationService.sendNotification(verifiedSub, testPayload);
+            if (!result.success) {
+              res
+                .status(result.statusCode || 500)
+                .json({ error: result.error || 'Failed to deliver notification.' });
+              return;
+            }
+            res.json({ ok: true });
             return;
           }
-          res.json({ ok: true });
-          return;
         }
 
+        // Send to all verified subscriptions for this user account
         if (user?.userId) {
-          const { sent, failed } = await notificationService.sendNotificationToUser(user.userId, {
-            title: 'Mist Notification 🔔',
-            body: 'Web Push with VAPID is working successfully on Mist!',
-            icon: '/favicon.ico',
-            badge: '/favicon.ico',
-            data: { url: '/' },
-            tag: 'test-notification',
-          });
+          const { sent, failed } = await notificationService.sendNotificationToUser(user.userId, testPayload);
+          if (sent === 0 && failed === 0) {
+            res.status(400).json({
+              error: 'No active push subscriptions found for this account. Subscribe to push notifications first.',
+            });
+            return;
+          }
           if (sent === 0 && failed > 0) {
-            res.status(502).json({ error: 'Failed to deliver push notification to your device.' });
+            res.status(502).json({ error: 'Failed to deliver push notification to your registered devices.' });
             return;
           }
           res.json({ ok: true, sent, failed });
@@ -2849,7 +3575,22 @@ Return JSON: { "content": "..." }`;
           error: 'An active push subscription or verified sign-in is required to test notifications.',
         });
       } catch (err) {
-        res.status(500).json({ error: sanitizeErrorMessage(err) || 'Test notification failed.' });
+        const status = err instanceof SecurityValidationError ? err.status : 500;
+        res.status(status).json({ error: sanitizeErrorMessage(err) || 'Test notification failed.' });
+      }
+    },
+  );
+
+  app.post(
+    '/api/notifications/cleanup',
+    requireVerifiedAuth,
+    notificationRateLimiter,
+    async (_req: AuthenticatedRequest, res) => {
+      try {
+        const cleaned = await notificationService.cleanupExpiredSubscriptions();
+        res.json({ ok: true, cleaned });
+      } catch (err) {
+        res.status(500).json({ error: sanitizeErrorMessage(err) || 'Cleanup failed.' });
       }
     },
   );
@@ -2882,18 +3623,35 @@ Return JSON: { "content": "..." }`;
     'manifest.webmanifest',
   ]);
 
-  const sendDeploymentHtml = (res: express.Response, htmlBundle: string) => {
-    // Isolate published websites into an opaque origin via sandbox (omitting allow-same-origin)
-    // to strictly prevent untrusted generated scripts from accessing Mist's cookies, localStorage, or auth tokens.
-    res.setHeader(
-      'Content-Security-Policy',
-      "sandbox allow-scripts allow-forms allow-popups; default-src 'unsafe-inline' 'unsafe-eval' data: blob: https:; img-src 'self' data: blob: https:; connect-src *; object-src 'none'; base-uri 'none'; frame-ancestors 'self';",
-    );
-    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(htmlBundle);
-  };
+  // Dedicated publishing host root handler for wildcard subdomains (e.g. https://<slug>.mist-published.com/)
+  app.get('/', async (req, res, next) => {
+    const reqHost = getEffectiveHost(req);
+    const { isPublishing, slug } = isPublishingHostname(reqHost, publishBaseUrl);
+    if (!isPublishing || !slug) {
+      // Normal builder root request -> pass through to SPA handler
+      next();
+      return;
+    }
+
+    try {
+      const record = await deploymentStore.getPublic(slug);
+      if (!record) {
+        res
+          .status(404)
+          .setHeader('Content-Type', 'text/html; charset=utf-8')
+          .send(
+            `<!doctype html><html><body style="font-family:system-ui,sans-serif;padding:48px;max-width:560px;margin:0 auto;background:#09090b;color:#f4f4f5;"><h1>Site not found</h1><p style="color:#a1a1aa;">No Mist deployment exists for <code>${encodeURIComponent(slug)}</code>.</p></body></html>`,
+          );
+        return;
+      }
+      sendPublishedSiteHtml(res, record.htmlBundle);
+    } catch (err) {
+      const status = err instanceof SecurityValidationError ? err.status : 500;
+      res.status(status).setHeader('Content-Type', 'text/plain; charset=utf-8').send(
+        sanitizeErrorMessage(err) || 'Unable to load deployment.',
+      );
+    }
+  });
 
   app.get('/p/:slug', async (req, res) => {
     const cleanSlug = (req.params.slug || '')
@@ -2905,37 +3663,63 @@ Return JSON: { "content": "..." }`;
       return;
     }
 
-    const apexDomain = process.env.APEX_DOMAIN?.trim() || 'mist.me';
-    const reqHost = (req.headers.host || '').toLowerCase();
-    const publishedHost = `${cleanSlug}.${apexDomain}`;
-    // In production with custom apex domain, redirect requests from main app host to isolated published subdomain
-    if (process.env.NODE_ENV === 'production' && reqHost && !reqHost.startsWith(`${cleanSlug}.`)) {
-      res.redirect(301, `https://${publishedHost}`);
+    const reqHost = getEffectiveHost(req);
+    const { isPublishing } = isPublishingHostname(reqHost, publishBaseUrl);
+
+    if (isPublishing) {
+      // Served on dedicated publishing hostname:
+      try {
+        const record = await deploymentStore.getPublic(cleanSlug);
+        if (!record) {
+          res
+            .status(404)
+            .setHeader('Content-Type', 'text/html; charset=utf-8')
+            .send(
+              `<!doctype html><html><body style="font-family:system-ui,sans-serif;padding:48px;max-width:560px;margin:0 auto;background:#09090b;color:#f4f4f5;"><h1>Site not found</h1><p style="color:#a1a1aa;">No Mist deployment exists at <code>/p/${encodeURIComponent(cleanSlug)}</code>.</p></body></html>`,
+            );
+          return;
+        }
+        sendPublishedSiteHtml(res, record.htmlBundle);
+      } catch (err) {
+        const status = err instanceof SecurityValidationError ? err.status : 500;
+        res.status(status).setHeader('Content-Type', 'text/plain; charset=utf-8').send(
+          sanitizeErrorMessage(err) || 'Unable to load deployment.',
+        );
+      }
       return;
     }
 
-    try {
-      const record = await deploymentStore.getPublic(cleanSlug);
-      if (!record) {
-        res
-          .status(404)
-          .setHeader('Content-Type', 'text/html; charset=utf-8')
-          .send(
-            `<!doctype html><html><body style="font-family:system-ui,sans-serif;padding:48px;max-width:560px;margin:0 auto;background:#09090b;color:#f4f4f5;"><h1>Site not found</h1><p style="color:#a1a1aa;">No Mist deployment exists at <code>/${cleanSlug}</code>.</p><a href="/" style="color:#60a5fa;">Return to Mist</a></body></html>`,
-          );
+    // On builder hostname:
+    // NEVER execute arbitrary published HTML on the main Mist application origin!
+    if (publishBaseUrl) {
+      const targetUrl = formatDeploymentUrl(cleanSlug, publishBaseUrl);
+      if (targetUrl) {
+        res.redirect(301, targetUrl);
         return;
       }
-      sendDeploymentHtml(res, record.htmlBundle);
-    } catch (err) {
-      const status = err instanceof SecurityValidationError ? err.status : 500;
-      res.status(status).setHeader('Content-Type', 'text/plain; charset=utf-8').send(
-        sanitizeErrorMessage(err) || 'Unable to load deployment.',
-      );
     }
+
+    res
+      .status(404)
+      .setHeader('Content-Type', 'text/html; charset=utf-8')
+      .send(
+        `<!doctype html><html><body style="font-family:system-ui,sans-serif;padding:48px;max-width:560px;margin:0 auto;background:#09090b;color:#f4f4f5;"><h1>Public publishing is disabled</h1><p style="color:#a1a1aa;">Public site hosting is disabled on this origin. Configure <code>PUBLISH_BASE_URL</code> or export the project to host externally.</p></body></html>`,
+      );
   });
 
-  // Short vanity deployment route (e.g. https://domain.com/my-site) — falls through to SPA if not a published slug
+  // Short vanity route /:slug:
+  // On dedicated publishing host: serve the published site HTML
+  // On builder hostname: MUST NEVER execute arbitrary published HTML! Falls through to SPA router.
   app.get('/:slug', async (req, res, next) => {
+    const reqHost = getEffectiveHost(req);
+    const { isPublishing } = isPublishingHostname(reqHost, publishBaseUrl);
+
+    // If on builder hostname, NEVER execute published HTML! Fall through to SPA.
+    if (!isPublishing) {
+      next();
+      return;
+    }
+
     const rawSlug = String(req.params.slug || '');
     const lowerSlug = rawSlug.toLowerCase();
     if (
@@ -2953,13 +3737,24 @@ Return JSON: { "content": "..." }`;
     try {
       const record = await deploymentStore.getPublic(lowerSlug);
       if (!record) {
-        next();
+        res
+          .status(404)
+          .setHeader('Content-Type', 'text/html; charset=utf-8')
+          .send(
+            `<!doctype html><html><body style="font-family:system-ui,sans-serif;padding:48px;max-width:560px;margin:0 auto;background:#09090b;color:#f4f4f5;"><h1>Site not found</h1><p style="color:#a1a1aa;">No Mist deployment exists for <code>${encodeURIComponent(lowerSlug)}</code>.</p></body></html>`,
+          );
         return;
       }
-      sendDeploymentHtml(res, record.htmlBundle);
+      sendPublishedSiteHtml(res, record.htmlBundle);
     } catch {
       next();
     }
+  });
+
+  // Centralized Error Handling Middleware: guarantees consistent JSON error response schema
+  // and prevents Express from leaking unformatted HTML or stack traces.
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    sendSecurityErrorResponse(res, err, 500);
   });
 
   return app;

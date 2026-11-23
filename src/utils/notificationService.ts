@@ -1,6 +1,8 @@
 import * as webpush from 'web-push';
 import fs from 'node:fs';
 import path from 'node:path';
+import net from 'node:net';
+import { SecurityValidationError } from './serverSecurity';
 
 export interface WebPushKeys {
   p256dh: string;
@@ -35,18 +37,177 @@ export interface VapidConfig {
   isGenerated: boolean;
 }
 
+export interface PushSubscriptionStore {
+  savePushSubscription(userId: string, subscription: WebPushSubscription): Promise<void>;
+  deletePushSubscription(userId: string, endpoint: string): Promise<boolean>;
+  listPushSubscriptions(userId?: string): Promise<WebPushSubscription[]>;
+  deletePushSubscriptionsByEndpoints(endpoints: string[]): Promise<number>;
+}
+
 export interface PushNotificationServiceOptions {
   publicKey?: string;
   privateKey?: string;
   subject?: string;
   cacheFilePath?: string;
+  store?: PushSubscriptionStore;
+  allowLocalEndpointsForTesting?: boolean;
+}
+
+/**
+ * Validates push subscription endpoint to protect against SSRF and arbitrary outbound requests.
+ * Only recognized Web Push gateways (Google FCM, Mozilla Autopush, Apple APNs, Microsoft WNS) are allowed.
+ */
+export function validatePushSubscriptionEndpoint(
+  endpoint: string,
+  options?: { allowLocalForTesting?: boolean },
+): string {
+  if (!endpoint || typeof endpoint !== 'string') {
+    throw new SecurityValidationError(400, 'Push subscription endpoint must be a non-empty string.');
+  }
+
+  const trimmed = endpoint.trim();
+  if (trimmed.length > 2048) {
+    throw new SecurityValidationError(400, 'Push subscription endpoint exceeds maximum length (2048 characters).');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new SecurityValidationError(400, 'Push subscription endpoint is not a valid URL.');
+  }
+
+  // Allow local mock endpoints only if explicitly enabled in tests
+  if (options?.allowLocalForTesting && (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost')) {
+    return trimmed;
+  }
+
+  // Protocol must strictly be HTTPS
+  if (parsed.protocol !== 'https:') {
+    throw new SecurityValidationError(400, 'Push subscription endpoint must use HTTPS protocol.');
+  }
+
+  // No embedded user credentials
+  if (parsed.username || parsed.password) {
+    throw new SecurityValidationError(400, 'Push subscription endpoint must not contain user credentials.');
+  }
+
+  const host = parsed.hostname.toLowerCase();
+
+  // Reject raw IP addresses (IPv4 or IPv6)
+  if (net.isIP(host) || /^\[.*\]$/.test(host) || /^[0-9.]+$/.test(host)) {
+    throw new SecurityValidationError(400, 'Push subscription endpoint cannot be an IP address.');
+  }
+
+  // Standard HTTPS port only
+  if (parsed.port && parsed.port !== '443') {
+    throw new SecurityValidationError(400, 'Push subscription endpoint cannot use custom ports.');
+  }
+
+  // Hostname must match known Web Push provider domains
+  const isAllowedPushProvider =
+    host === 'fcm.googleapis.com' ||
+    host === 'android.googleapis.com' ||
+    /^([a-z0-9-]+\.)*fcm\.googleapis\.com$/i.test(host) ||
+    host === 'updates.push.services.mozilla.com' ||
+    /^([a-z0-9-]+\.)*push\.services\.mozilla\.com$/i.test(host) ||
+    host === 'web.push.apple.com' ||
+    /^([a-z0-9-]+\.)*push\.apple\.com$/i.test(host) ||
+    /^([a-z0-9-]+\.)*(notify|wns)\.windows\.com$/i.test(host);
+
+  if (!isAllowedPushProvider) {
+    throw new SecurityValidationError(
+      400,
+      `Push subscription endpoint domain "${host}" is not a recognized Web Push service provider. Arbitrary outbound requests are forbidden.`,
+    );
+  }
+
+  return trimmed;
+}
+
+/**
+ * Validates client-submitted cryptographic keys.
+ */
+export function validatePushSubscriptionKeys(keys: unknown): WebPushKeys {
+  if (!keys || typeof keys !== 'object') {
+    throw new SecurityValidationError(400, 'Push subscription keys must be an object.');
+  }
+  const { p256dh, auth } = keys as Record<string, unknown>;
+  if (typeof p256dh !== 'string' || !p256dh.trim()) {
+    throw new SecurityValidationError(400, 'Push subscription p256dh key must be a non-empty string.');
+  }
+  if (typeof auth !== 'string' || !auth.trim()) {
+    throw new SecurityValidationError(400, 'Push subscription auth key must be a non-empty string.');
+  }
+  const cleanP256dh = p256dh.trim();
+  const cleanAuth = auth.trim();
+
+  // Validate base64/base64url characters and reasonable lengths
+  if (!/^[A-Za-z0-9_-]+={0,2}$/.test(cleanP256dh) || cleanP256dh.length < 20 || cleanP256dh.length > 256) {
+    throw new SecurityValidationError(400, 'Invalid p256dh cryptographic key format.');
+  }
+  if (!/^[A-Za-z0-9_-]+={0,2}$/.test(cleanAuth) || cleanAuth.length < 10 || cleanAuth.length > 128) {
+    throw new SecurityValidationError(400, 'Invalid auth cryptographic key format.');
+  }
+
+  return { p256dh: cleanP256dh, auth: cleanAuth };
+}
+
+/**
+ * Validates and sanitizes notification payloads.
+ */
+export function validateNotificationPayload(raw: unknown): NotificationPayload {
+  if (!raw || typeof raw !== 'object') {
+    throw new SecurityValidationError(400, 'Notification payload must be an object.');
+  }
+  const p = raw as Record<string, unknown>;
+  const title = typeof p.title === 'string' && p.title.trim() ? p.title.trim().slice(0, 120) : 'Mist Notification';
+  const body = typeof p.body === 'string' ? p.body.trim().slice(0, 500) : '';
+  const icon = typeof p.icon === 'string' ? p.icon.trim().slice(0, 256) : '/favicon.ico';
+  const badge = typeof p.badge === 'string' ? p.badge.trim().slice(0, 256) : '/favicon.ico';
+  const tag = typeof p.tag === 'string' ? p.tag.trim().slice(0, 64) : 'mist-notification';
+
+  let dataUrl = '/';
+  if (p.data && typeof p.data === 'object') {
+    const rawUrl = (p.data as Record<string, unknown>).url;
+    if (typeof rawUrl === 'string') {
+      const trimmedUrl = rawUrl.trim();
+      // Ensure url is a safe relative path or https URL
+      if (trimmedUrl.startsWith('/') && !trimmedUrl.startsWith('//') && !trimmedUrl.includes('\\')) {
+        dataUrl = trimmedUrl.slice(0, 500);
+      } else if (trimmedUrl.startsWith('https://')) {
+        try {
+          const u = new URL(trimmedUrl);
+          if (u.protocol === 'https:') {
+            dataUrl = u.toString().slice(0, 500);
+          }
+        } catch {
+          dataUrl = '/';
+        }
+      }
+    }
+  }
+
+  return {
+    title,
+    body,
+    icon,
+    badge,
+    tag,
+    data: { url: dataUrl },
+    timestamp: typeof p.timestamp === 'number' && Number.isFinite(p.timestamp) ? p.timestamp : Date.now(),
+  };
 }
 
 export class PushNotificationService {
   private vapidConfig: VapidConfig;
   private subscriptions: Map<string, WebPushSubscription> = new Map();
+  private store?: PushSubscriptionStore;
+  private allowLocalEndpointsForTesting: boolean;
 
   constructor(options: PushNotificationServiceOptions = {}) {
+    this.store = options.store;
+    this.allowLocalEndpointsForTesting = Boolean(options.allowLocalEndpointsForTesting);
     this.vapidConfig = this.resolveVapidKeys(options);
     this.initWebPush();
   }
@@ -70,7 +231,14 @@ export class PushNotificationService {
       };
     }
 
-    // Try reading cached keys from local scratch/file if available to survive restarts
+    // Require persistent VAPID keys in production - never auto-generate ephemeral keys in prod
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'Production environment requires persistent VAPID keys. Please configure VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY.',
+      );
+    }
+
+    // Development fallback: try reading cached keys from local scratch/file if available to survive restarts
     const cacheFile = options.cacheFilePath || path.resolve(process.cwd(), '.vapid-cache.json');
     if (fs.existsSync(cacheFile)) {
       try {
@@ -89,7 +257,7 @@ export class PushNotificationService {
       }
     }
 
-    // Generate fresh VAPID keys
+    // Generate fresh development VAPID keys
     const generated = webpush.generateVAPIDKeys();
     const config: VapidConfig = {
       publicKey: generated.publicKey,
@@ -104,12 +272,11 @@ export class PushNotificationService {
       // Non-fatal if filesystem is read-only
     }
 
-    console.info('[Mist Notifications] Auto-generated VAPID keys for Web Push:');
+    // NEVER log private keys
+    console.info('[Mist Notifications] Auto-generated development VAPID keys for Web Push:');
     console.info(`  VAPID_PUBLIC_KEY:  ${config.publicKey}`);
     console.info('  VAPID_PRIVATE_KEY: [REDACTED]');
     console.info(`  VAPID_SUBJECT:     ${config.subject}`);
-    console.info('[Mist Notifications] To persist across AI Studio restarts at mistdev.ai.studio:');
-    console.info('  Add VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY to the Google AI Studio Secrets / Environment Variables panel.');
 
     return config;
   }
@@ -138,34 +305,60 @@ export class PushNotificationService {
     return webpush.generateVAPIDKeys();
   }
 
-  public addSubscription(
+  public async addSubscription(
     sub: { endpoint: string; expirationTime?: number | null; keys: WebPushKeys },
-    userId?: string,
-  ): WebPushSubscription {
-    if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
-      throw new Error('Invalid push subscription object: missing endpoint or cryptographic keys.');
+    userId: string,
+  ): Promise<WebPushSubscription> {
+    if (!userId || typeof userId !== 'string') {
+      throw new SecurityValidationError(401, 'An authenticated user account is required to register a push subscription.');
     }
 
+    const cleanEndpoint = validatePushSubscriptionEndpoint(sub.endpoint, {
+      allowLocalForTesting: this.allowLocalEndpointsForTesting,
+    });
+    const cleanKeys = validatePushSubscriptionKeys(sub.keys);
+
     const record: WebPushSubscription = {
-      endpoint: sub.endpoint,
-      expirationTime: sub.expirationTime,
-      keys: {
-        p256dh: sub.keys.p256dh,
-        auth: sub.keys.auth,
-      },
-      userId: userId || undefined,
+      endpoint: cleanEndpoint,
+      expirationTime: typeof sub.expirationTime === 'number' ? sub.expirationTime : undefined,
+      keys: cleanKeys,
+      userId,
       createdAt: new Date().toISOString(),
     };
 
-    this.subscriptions.set(sub.endpoint, record);
+    if (this.store) {
+      await this.store.savePushSubscription(userId, record);
+    }
+    this.subscriptions.set(cleanEndpoint, record);
     return record;
   }
 
-  public removeSubscription(endpoint: string): boolean {
-    return this.subscriptions.delete(endpoint);
+  public async removeSubscription(endpoint: string, userId?: string): Promise<boolean> {
+    const cleanEndpoint = (endpoint || '').trim();
+    if (!cleanEndpoint) return false;
+
+    if (this.store && userId) {
+      const removed = await this.store.deletePushSubscription(userId, cleanEndpoint);
+      this.subscriptions.delete(cleanEndpoint);
+      return removed;
+    }
+
+    const existing = this.subscriptions.get(cleanEndpoint);
+    if (existing && userId && existing.userId && existing.userId !== userId) {
+      throw new SecurityValidationError(403, 'Access denied: Subscription belongs to another account.');
+    }
+
+    return this.subscriptions.delete(cleanEndpoint);
   }
 
-  public getSubscriptions(userId?: string): WebPushSubscription[] {
+  public async getSubscriptions(userId?: string): Promise<WebPushSubscription[]> {
+    if (this.store) {
+      const stored = await this.store.listPushSubscriptions(userId);
+      for (const s of stored) {
+        this.subscriptions.set(s.endpoint, s);
+      }
+      return stored;
+    }
     const all = Array.from(this.subscriptions.values());
     if (!userId) return all;
     return all.filter((s) => s.userId === userId);
@@ -176,15 +369,11 @@ export class PushNotificationService {
     payload: NotificationPayload,
   ): Promise<{ success: boolean; statusCode?: number; error?: string }> {
     try {
-      const payloadString = JSON.stringify({
-        title: payload.title || 'Mist',
-        body: payload.body || '',
-        icon: payload.icon || '/favicon.ico',
-        badge: payload.badge || '/favicon.ico',
-        tag: payload.tag || 'mist-notification',
-        data: payload.data || { url: '/' },
-        timestamp: payload.timestamp || Date.now(),
+      validatePushSubscriptionEndpoint(sub.endpoint, {
+        allowLocalForTesting: this.allowLocalEndpointsForTesting,
       });
+      const validPayload = validateNotificationPayload(payload);
+      const payloadString = JSON.stringify(validPayload);
 
       const pushSub = {
         endpoint: sub.endpoint,
@@ -201,9 +390,12 @@ export class PushNotificationService {
       const statusCode = errorObj.statusCode || 500;
       const message = errorObj.message || String(err);
 
-      // If subscription expired or was invalidated (404 Not Found or 410 Gone)
+      // If subscription expired or was invalidated (404 Not Found or 410 Gone), automatically drop it
       if (statusCode === 404 || statusCode === 410) {
-        this.removeSubscription(sub.endpoint);
+        if (this.store) {
+          await this.store.deletePushSubscriptionsByEndpoints([sub.endpoint]);
+        }
+        this.subscriptions.delete(sub.endpoint);
       }
 
       return {
@@ -218,7 +410,7 @@ export class PushNotificationService {
     userId: string,
     payload: NotificationPayload,
   ): Promise<{ sent: number; failed: number }> {
-    const userSubs = this.getSubscriptions(userId);
+    const userSubs = await this.getSubscriptions(userId);
     let sent = 0;
     let failed = 0;
 
@@ -234,10 +426,33 @@ export class PushNotificationService {
     return { sent, failed };
   }
 
+  public async cleanupExpiredSubscriptions(): Promise<number> {
+    const now = Date.now();
+    const expiredEndpoints: string[] = [];
+    const all = await this.getSubscriptions();
+
+    for (const sub of all) {
+      if (sub.expirationTime && sub.expirationTime <= now) {
+        expiredEndpoints.push(sub.endpoint);
+      }
+    }
+
+    if (expiredEndpoints.length > 0) {
+      if (this.store) {
+        await this.store.deletePushSubscriptionsByEndpoints(expiredEndpoints);
+      }
+      for (const ep of expiredEndpoints) {
+        this.subscriptions.delete(ep);
+      }
+    }
+
+    return expiredEndpoints.length;
+  }
+
   public async broadcast(
     payload: NotificationPayload,
   ): Promise<{ sent: number; failed: number }> {
-    const all = Array.from(this.subscriptions.values());
+    const all = await this.getSubscriptions();
     let sent = 0;
     let failed = 0;
 

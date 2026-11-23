@@ -1,3 +1,11 @@
+/**
+ * Client-Side Profile & Vault Data Operations.
+ *
+ * NOTE: Firebase Auth is completely removed from the frontend client.
+ * Clerk is the sole authentication provider. All profile preferences and
+ * vault operations route via authenticated backend endpoints (/api/user/*)
+ * verified using Clerk session tokens. Direct client-side Firestore access is disabled.
+ */
 import type {
   AiProviderId,
   AppAiMode,
@@ -26,6 +34,7 @@ export interface UserCredentialVaultDoc {
   ciphertext: string;
   aiKeyHint?: string;
   searchKeyHint?: string;
+  renderKeyHint?: string;
 }
 
 export async function fetchUserProfilePreferences(

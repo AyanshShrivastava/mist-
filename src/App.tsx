@@ -73,14 +73,13 @@ import {
   dequeueProjectFromBatchedSync,
   flushBatchedSyncNow,
   flushBatchedSyncOnAppExit,
+  getProjectsStorageKey,
   initLocalCacheQueue,
   queueProjectForBatchedSync,
   setBatchedSyncUserProvider,
 } from './firebase/batchedProjectSync';
 
-export function getProjectsStorageKey(userId?: string | null): string {
-  return userId ? `mist_projects_${userId}` : 'mist_projects_anonymous';
-}
+export { getProjectsStorageKey };
 
 const LEGACY_STORAGE_PROVIDER_KEY = 'mist_provider_v1';
 const LEGACY_STORAGE_SEARCH_KEY = 'mist_search_v1';
@@ -101,8 +100,18 @@ function loadLocalProjects(userId?: string | null): MistProject[] {
   try {
     const key = getProjectsStorageKey(userId);
     let raw = localStorage.getItem(key);
+    // Only fall back to legacy shared keys if userId is explicitly anonymous (null/undefined)
     if (!raw && !userId) {
       raw = localStorage.getItem('mist_projects_v1') || localStorage.getItem('mist_projects');
+      if (raw) {
+        try {
+          localStorage.setItem('mist_projects_anonymous', raw);
+          localStorage.removeItem('mist_projects_v1');
+          localStorage.removeItem('mist_projects');
+        } catch {
+          // ignore
+        }
+      }
     }
     if (!raw) return [];
     const parsed = JSON.parse(raw);
@@ -248,9 +257,10 @@ export default function App() {
   const [authPromptReason, setAuthPromptReason] = useState<string | null>(null);
   const pendingGeneratePromptRef = useRef<string | null>(null);
 
-  const [projects, setProjects] = useState<MistProject[]>(() => loadLocalProjects());
+  const [projects, setProjects] = useState<MistProject[]>(() => loadLocalProjects(clerkUser?.id || null));
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
+  const activeAccountUidRef = useRef<string | null>(clerkUser?.id || null);
 
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activePage, setActivePage] = useState<'home' | 'settings'>('home');
@@ -364,11 +374,11 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Encrypt & persist BYOK AI + Search credentials to Firestore bound to the signed-in Google email
+  // Encrypt & persist BYOK AI + Search credentials to Firestore bound to the verified Clerk account
   const syncCredentialsToAccountVault = useCallback(
-    async (firebaseUser: MistUser, nextAi: AiProviderConfig, nextSearch: WebSearchConfig) => {
+    async (currentUser: MistUser, nextAi: AiProviderConfig, nextSearch: WebSearchConfig) => {
       try {
-        const idToken = await firebaseUser.getIdToken();
+        const idToken = await currentUser.getIdToken();
         const resp = await fetch('/api/user/vault/seal', {
           method: 'POST',
           headers: {
@@ -384,7 +394,7 @@ export default function App() {
           searchKeyHint?: string;
         };
         if (sealed.encryptedPayload) {
-          await saveUserEncryptedVault(firebaseUser, {
+          await saveUserEncryptedVault(currentUser, {
             ciphertext: sealed.encryptedPayload,
             aiKeyHint: sealed.aiKeyHint,
             searchKeyHint: sealed.searchKeyHint,
@@ -416,23 +426,17 @@ export default function App() {
   // Persist local projects cache scoped to active account
   useEffect(() => {
     try {
-      const key = getProjectsStorageKey(user?.uid);
+      const key = getProjectsStorageKey(activeAccountUidRef.current);
       localStorage.setItem(key, JSON.stringify(projects));
     } catch {
       // ignore quota errors
     }
-  }, [projects, user?.uid]);
+  }, [projects]);
 
   // Local-First Batched Sync: NO 10-second interval!
   // Syncs strictly when user closes or exits the app (tab close, reload, or backgrounding)
   useEffect(() => {
     initLocalCacheQueue(user?.uid);
-    if (user?.uid) {
-      const localScoped = loadLocalProjects(user.uid);
-      if (localScoped.length > 0) {
-        setProjects(localScoped);
-      }
-    }
 
     const handleFlushOnExit = () => {
       void flushBatchedSyncOnAppExit(user).catch(() => {});
@@ -548,15 +552,18 @@ export default function App() {
         prev.map((p) => {
           if (p.id !== activeProjectId) return p;
           updatedProject = { ...updater(p), updatedAt: new Date().toISOString() };
+          if (user?.uid) {
+            updatedProject.ownerId = user.uid;
+          }
           return updatedProject;
         }),
       );
 
-      if (user && updatedProject) {
-        queueProjectForBatchedSync(updatedProject);
+      if (updatedProject) {
+        queueProjectForBatchedSync(updatedProject, user?.uid);
       }
     },
-    [activeProjectId, user],
+    [activeProjectId, user?.uid],
   );
 
   const handleCancelGeneration = useCallback(() => {
@@ -830,15 +837,60 @@ export default function App() {
     if (!clerkUserLoaded) return;
 
     if (!clerkSignedIn || !clerkUser) {
+      const prevUid = activeAccountUidRef.current;
+      if (prevUid) {
+        try {
+          localStorage.setItem(getProjectsStorageKey(prevUid), JSON.stringify(projectsRef.current));
+        } catch {
+          // ignore
+        }
+      }
+
       setUser(null);
+      activeAccountUidRef.current = null;
+      setBatchedSyncUserProvider(() => null);
       setDeployments([]);
       clearKnownCloudProjects();
       scrubLegacyCredentialStorage();
+
+      // Cleanly switch to anonymous guest drafts
+      const anonProjects = loadLocalProjects(null);
+      setProjects(anonProjects);
+      projectsRef.current = anonProjects;
+      initLocalCacheQueue(null);
+
+      if (activeProjectId && !anonProjects.some((p) => p.id === activeProjectId)) {
+        setActiveProjectId(null);
+      }
       return;
     }
 
     setAuthError(null);
     setAuthPromptReason(null);
+
+    const newUid = clerkUser.id;
+    const prevUid = activeAccountUidRef.current;
+
+    if (prevUid !== newUid) {
+      // Preserve previous account's projects before switching
+      try {
+        localStorage.setItem(getProjectsStorageKey(prevUid), JSON.stringify(projectsRef.current));
+      } catch {
+        // ignore
+      }
+
+      activeAccountUidRef.current = newUid;
+
+      // Load new user's local projects (NEVER transfer previous account's or anonymous projects!)
+      const newLocalProjects = loadLocalProjects(newUid);
+      setProjects(newLocalProjects);
+      projectsRef.current = newLocalProjects;
+      initLocalCacheQueue(newUid);
+
+      if (activeProjectId && !newLocalProjects.some((p) => p.id === activeProjectId)) {
+        setActiveProjectId(null);
+      }
+    }
 
     const mistUser: MistUser = {
       id: clerkUser.id,
@@ -955,19 +1007,28 @@ export default function App() {
 
         const cloudProjects = await listUserProjectsFromFirestore(mistUser.uid, token);
         const cloudIds = new Set(cloudProjects.map((p) => p.id));
-        const localOnly = projectsRef.current.filter((p) => !cloudIds.has(p.id));
 
-        setProjects((local) => {
-          const merged = new Map<string, MistProject>();
-          for (const p of local) merged.set(p.id, p);
-          for (const cp of cloudProjects) merged.set(cp.id, cp);
-          return Array.from(merged.values()).sort((a, b) =>
-            b.updatedAt.localeCompare(a.updatedAt),
-          );
-        });
+        // Load mistUser's own local projects (NEVER anonymous or other accounts!)
+        const userLocal = loadLocalProjects(mistUser.uid);
+        const userLocalOnly = userLocal.filter((p) => !cloudIds.has(p.id));
 
-        if (localOnly.length > 0) {
-          await syncLocalProjectsToFirestore(localOnly, cloudIds, token);
+        const merged = new Map<string, MistProject>();
+        for (const p of userLocal) merged.set(p.id, p);
+        for (const cp of cloudProjects) merged.set(cp.id, cp);
+        const mergedList = Array.from(merged.values()).sort((a, b) =>
+          b.updatedAt.localeCompare(a.updatedAt),
+        );
+
+        setProjects(mergedList);
+        projectsRef.current = mergedList;
+        try {
+          localStorage.setItem(getProjectsStorageKey(mistUser.uid), JSON.stringify(mergedList));
+        } catch {
+          // ignore
+        }
+
+        if (userLocalOnly.length > 0) {
+          await syncLocalProjectsToFirestore(userLocalOnly, cloudIds, token, mistUser.uid);
         }
 
         await refreshDeployments(mistUser);
@@ -1007,11 +1068,12 @@ export default function App() {
 
   const handleDuplicateProject = (target: MistProject) => {
     const copy = duplicateProjectData(target);
+    if (user?.uid) {
+      copy.ownerId = user.uid;
+    }
     setProjects((prev) => [copy, ...prev]);
     navigateToProject(copy.id);
-    if (user) {
-      queueProjectForBatchedSync(copy);
-    }
+    queueProjectForBatchedSync(copy, user?.uid);
   };
 
   const handleDeleteProject = (projectId: string) => {
@@ -1019,8 +1081,8 @@ export default function App() {
     if (activeProjectId === projectId) {
       setActiveProjectId(null);
     }
-    dequeueProjectFromBatchedSync(projectId);
-    if (user) {
+    dequeueProjectFromBatchedSync(projectId, user?.uid);
+    if (user?.uid) {
       void deleteProjectFromFirestore(projectId).catch(() => {});
     }
   };
@@ -1639,6 +1701,7 @@ export default function App() {
       <DeployModal
         isOpen={deployOpen}
         project={deployProject}
+        user={user}
         isDeploying={isDeploying}
         deployError={deployError}
         downloadedFileName={downloadedFileName}

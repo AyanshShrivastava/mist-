@@ -129,6 +129,9 @@ test('handlePublishedSite serves R2 artifact and supports SPA fallback', async (
   assert.equal(rootRes.status, 200);
   assert.equal(rootRes.headers.get('content-type'), 'text/html; charset=utf-8');
   assert.equal(rootRes.headers.get('etag'), '"mock-etag-123"');
+  assert.equal(rootRes.headers.get('x-frame-options'), 'DENY');
+  assert.ok((rootRes.headers.get('content-security-policy') || '').includes('sandbox allow-scripts'));
+  assert.ok((rootRes.headers.get('content-security-policy') || '').includes("frame-ancestors 'none'"));
   assert.match(rootRes.headers.get('cache-control') || '', /public/);
   const rootBody = await rootRes.text();
   assert.match(rootBody, /Published HTML/);
@@ -256,4 +259,60 @@ test('Worker fetch handler routes /cdn-health, apex static assets, and subdomain
   assert.equal(subRes.status, 404);
   const subBody = await subRes.text();
   assert.match(subBody, /Project Unavailable/);
+
+  // 4. Legacy /p/:slug on apex domain redirects to isolated subdomain
+  const apexLegacyRes = await worker.fetch(new Request('https://mist.me/p/my-site'), env);
+  assert.equal(apexLegacyRes.status, 301);
+  assert.equal(apexLegacyRes.headers.get('location'), 'https://my-site.mist.me/');
+});
+
+test('Dedicated wildcard publishing domain and HEAD request routing', async () => {
+  const r2Storage = new Map<string, string>();
+  r2Storage.set('sites/portfolio-2026/index.html', '<!DOCTYPE html><html><body>Alice 2026 Portfolio</body></html>');
+
+  const env: Env = {
+    APEX_DOMAIN: 'mist.me',
+    PUBLISH_DOMAIN: 'mist-sites.com',
+    PUBLISHED_BUCKET: {
+      get: async (key: string) => {
+        const content = r2Storage.get(key);
+        if (!content) return null;
+        return {
+          body: new Response(content).body!,
+          httpEtag: '"mock-etag-portfolio"',
+          httpMetadata: { contentType: 'text/html; charset=utf-8' },
+        };
+      },
+    },
+  };
+
+  // 1. Dedicated publishing domain wildcard routing
+  const pubReq = new Request('https://portfolio-2026.mist-sites.com/');
+  const pubRes = await worker.fetch(pubReq, env);
+  assert.equal(pubRes.status, 200);
+  assert.equal(pubRes.headers.get('content-type'), 'text/html; charset=utf-8');
+  assert.equal(pubRes.headers.get('etag'), '"mock-etag-portfolio"');
+  const pubHtml = await pubRes.text();
+  assert.match(pubHtml, /Alice 2026 Portfolio/);
+
+  // 2. HEAD request on published site returns 200 with headers but empty body
+  const headReq = new Request('https://portfolio-2026.mist-sites.com/', { method: 'HEAD' });
+  const headRes = await worker.fetch(headReq, env);
+  assert.equal(headRes.status, 200);
+  assert.equal(headRes.headers.get('content-type'), 'text/html; charset=utf-8');
+  assert.equal(headRes.headers.get('x-frame-options'), 'DENY');
+  const headBody = await headRes.text();
+  assert.equal(headBody, '');
+
+  // 3. Request hitting the bare publishing domain redirects to the builder application
+  const barePubReq = new Request('https://mist-sites.com/');
+  const barePubRes = await worker.fetch(barePubReq, env);
+  assert.equal(barePubRes.status, 302);
+  assert.equal(barePubRes.headers.get('location'), 'https://mist.me/');
+
+  // 4. Legacy redirect respects dedicated publishing domain
+  const legacyReq = new Request('https://mist.me/p/portfolio-2026');
+  const legacyRes = await worker.fetch(legacyReq, env);
+  assert.equal(legacyRes.status, 301);
+  assert.equal(legacyRes.headers.get('location'), 'https://portfolio-2026.mist-sites.com/');
 });

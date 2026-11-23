@@ -4,6 +4,8 @@ import {
   resolveIdentities,
   executeMigration,
   formatReport,
+  executeRollback,
+  formatRollbackReport,
   type FirebaseUserRecord,
   type ClerkUserRecord,
 } from '../../scripts/migrate-identities';
@@ -219,4 +221,177 @@ test('executeMigration in dry-run mode inspects documents and plans updates with
   for (const op of committedOps) {
     assert.equal(op.data.migratedFromUid, 'fb-user-1');
   }
+});
+
+test('executeRollback in dry-run and apply modes inspects and reverts migrated records cleanly', async () => {
+  const committedBatches: any[] = [];
+
+  const migratedProjectDocs = [
+    {
+      id: 'p1',
+      data: () => ({
+        ownerId: 'user_clerk_1',
+        migratedFromUid: 'fb-user-1',
+        migratedAt: '2026-11-23T00:00:00.000Z',
+      }),
+      ref: {
+        id: 'p1',
+        collection: (sub: string) => ({
+          get: async () => ({
+            size: sub === 'files' ? 2 : 1,
+            docs:
+              sub === 'files'
+                ? [
+                    {
+                      id: 'f1',
+                      data: () => ({
+                        ownerId: 'user_clerk_1',
+                        migratedFromUid: 'fb-user-1',
+                      }),
+                      ref: { id: 'f1' },
+                    },
+                    {
+                      id: 'f2',
+                      data: () => ({
+                        ownerId: 'user_clerk_1',
+                        migratedFromUid: 'fb-user-1',
+                      }),
+                      ref: { id: 'f2' },
+                    },
+                  ]
+                : [
+                    {
+                      id: 'm1',
+                      data: () => ({
+                        ownerId: 'user_clerk_1',
+                        migratedFromUid: 'fb-user-1',
+                      }),
+                      ref: { id: 'm1' },
+                    },
+                  ],
+          }),
+        }),
+      },
+    },
+    {
+      id: 'p2',
+      data: () => ({ ownerId: 'user_clerk_2' }), // Unmigrated project
+      ref: {
+        id: 'p2',
+        collection: () => ({ get: async () => ({ size: 0, docs: [] }) }),
+      },
+    },
+  ];
+
+  const migratedDeploymentDocs = [
+    {
+      id: 'd1',
+      data: () => ({
+        ownerId: 'user_clerk_1',
+        migratedFromUid: 'fb-user-1',
+      }),
+      ref: { id: 'd1' },
+    },
+  ];
+
+  const migratedPrefsDocs = [
+    {
+      id: 'user_clerk_1',
+      data: () => ({
+        uid: 'user_clerk_1',
+        migratedFromUid: 'fb-user-1',
+      }),
+      ref: { id: 'user_clerk_1' },
+    },
+  ];
+
+  const migratedVaultDocs = [
+    {
+      id: 'user_clerk_1',
+      data: () => ({
+        ownerId: 'user_clerk_1',
+        migratedFromUid: 'fb-user-1',
+      }),
+      ref: { id: 'user_clerk_1' },
+    },
+  ];
+
+  const mockDb = {
+    collection: (name: string) => ({
+      get: async () => {
+        if (name === 'projects') return { size: migratedProjectDocs.length, docs: migratedProjectDocs };
+        if (name === 'deployments') return { size: migratedDeploymentDocs.length, docs: migratedDeploymentDocs };
+        if (name === 'user_preferences') return { size: migratedPrefsDocs.length, docs: migratedPrefsDocs };
+        if (name === 'vault') return { size: migratedVaultDocs.length, docs: migratedVaultDocs };
+        return { size: 0, docs: [] };
+      },
+      doc: (id: string) => ({ id, isDocRef: true }),
+    }),
+    batch: () => {
+      const ops: any[] = [];
+      return {
+        update: (ref: any, data: any) => ops.push({ type: 'update', ref, data }),
+        delete: (ref: any) => ops.push({ type: 'delete', ref }),
+        commit: async () => {
+          committedBatches.push(ops);
+        },
+      };
+    },
+  } as any;
+
+  // 1. DRY RUN
+  const dryReport = await executeRollback({
+    dryRun: true,
+    firestore: mockDb,
+  });
+
+  assert.equal(dryReport.dryRun, true);
+  assert.equal(dryReport.applied, false);
+  assert.equal(dryReport.revertedCounts.projects, 1);
+  assert.equal(dryReport.revertedCounts.projectFiles, 2);
+  assert.equal(dryReport.revertedCounts.projectMessages, 1);
+  assert.equal(dryReport.revertedCounts.deployments, 1);
+  assert.equal(dryReport.revertedCounts.userPreferences, 1);
+  assert.equal(dryReport.revertedCounts.vaults, 1);
+  assert.equal(dryReport.documentsToRevert, 7);
+  assert.equal(dryReport.documentsReverted, 0, 'No documents should be modified in dry-run mode');
+  assert.equal(committedBatches.length, 0, 'No batches committed in dry run');
+
+  const formattedDry = formatRollbackReport(dryReport);
+  assert.match(formattedDry, /DRY RUN/);
+  assert.match(formattedDry, /Zero database writes executed/);
+
+  // 2. APPLY MODE
+  const applyReport = await executeRollback({
+    apply: true,
+    dryRun: false,
+    firestore: mockDb,
+  });
+
+  assert.equal(applyReport.dryRun, false);
+  assert.equal(applyReport.applied, true);
+  assert.equal(applyReport.documentsToRevert, 7);
+  assert.equal(applyReport.documentsReverted, 7);
+  assert.equal(applyReport.batchesCommitted, 1);
+  assert.equal(committedBatches.length, 1);
+
+  const ops = committedBatches[0];
+  assert.equal(ops.length, 7);
+
+  // Verify updates restored old Firebase UID
+  const updateOps = ops.filter((o: any) => o.type === 'update');
+  assert.equal(updateOps.length, 5); // 1 project + 2 files + 1 msg + 1 deployment
+  for (const op of updateOps) {
+    assert.equal(op.data.ownerId, 'fb-user-1');
+  }
+
+  // Verify cloned clerk docs were deleted (clean reversal)
+  const deleteOps = ops.filter((o: any) => o.type === 'delete');
+  assert.equal(deleteOps.length, 2); // 1 pref + 1 vault
+  assert.equal(deleteOps[0].ref.id, 'user_clerk_1');
+  assert.equal(deleteOps[1].ref.id, 'user_clerk_1');
+
+  const formattedApply = formatRollbackReport(applyReport);
+  assert.match(formattedApply, /APPLY COMPLETE/);
+  assert.match(formattedApply, /7 documents reverted in 1 batches/);
 });

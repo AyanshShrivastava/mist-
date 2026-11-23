@@ -26,14 +26,27 @@ export interface DeploymentSummary {
   updatedAt: string;
 }
 
-export function formatDeploymentUrl(slug: string, publicBaseUrl?: string): string {
-  const cleanSlug = slug.replace(/^\/+/, '');
-  const cleanBase = (publicBaseUrl || '').trim().replace(/\/+$/, '');
-  return cleanBase ? `${cleanBase}/${cleanSlug}` : `/${cleanSlug}`;
+export function formatDeploymentUrl(slug: string, publishBaseUrl?: string): string {
+  const cleanSlug = (slug || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!cleanSlug) return '';
+
+  const cleanBase = (publishBaseUrl || '').trim().replace(/\/+$/, '');
+  if (!cleanBase) {
+    // Strictly prevent same-origin publishing fallback
+    return '';
+  }
+
+  if (cleanBase.includes('*')) {
+    return cleanBase.replace('*', cleanSlug);
+  }
+  return `${cleanBase}/${cleanSlug}`;
 }
 
 export interface DeploymentStore {
-  listByOwner(ownerUid: string, idToken?: string): Promise<DeploymentSummary[]>;
+  listByOwner(ownerUid: string, idToken?: string, publishBaseUrl?: string): Promise<DeploymentSummary[]>;
   getPublic(slug: string): Promise<StoredDeployment | null>;
   upsertOwned(
     input: {
@@ -88,16 +101,30 @@ export function createFirestoreDeploymentStore(options?: {
           return metadata;
         }
       }
+      if (r2) {
+        const html = await r2.getPublishedHtml(slug);
+        if (html) {
+          return {
+            slug,
+            ownerUid: 'unknown',
+            projectId: slug,
+            title: slug,
+            htmlBundle: html,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+      }
       return null;
     },
 
-    async listByOwner(ownerUid: string): Promise<DeploymentSummary[]> {
+    async listByOwner(ownerUid: string, _idToken?: string, publishBaseUrl?: string): Promise<DeploymentSummary[]> {
       const { adminDb } = getStores();
       if (!adminDb) return [];
       const list = await adminDb.listDeployments(ownerUid);
+      const baseUrl = publishBaseUrl ?? process.env.PUBLISH_BASE_URL?.trim();
       return list.map((item) => ({
         ...item,
-        url: formatDeploymentUrl(item.slug, process.env.PUBLIC_APP_URL),
+        url: formatDeploymentUrl(item.slug, baseUrl),
       }));
     },
 
@@ -105,7 +132,16 @@ export function createFirestoreDeploymentStore(options?: {
       const { adminDb, r2 } = getStores();
       const slug = input.slug;
 
-      let artifactInfo: { key: string } | undefined;
+      // 1. Enforce ownership check BEFORE any R2 write: prevent user A from overwriting user B's site
+      if (adminDb) {
+        const existing = await adminDb.getDeployment(slug);
+        if (existing && existing.ownerUid !== input.ownerUid) {
+          throw new SecurityValidationError(403, 'Deployment slug belongs to another user.');
+        }
+      }
+
+      // 2. Upload HTML bundle to Cloudflare R2
+      let artifactInfo: { key: string; bytes?: number; etag?: string } | undefined;
       if (r2) {
         artifactInfo = await r2.uploadPublishedSite(slug, input.htmlBundle);
         const exists = await r2.artifactExists(slug);
@@ -114,6 +150,7 @@ export function createFirestoreDeploymentStore(options?: {
         }
       }
 
+      // 3. Store publishing metadata and ownership in Firestore (omitting full htmlBundle when R2 is active)
       if (adminDb) {
         await adminDb.saveDeployment(input.ownerUid, {
           slug,
@@ -121,7 +158,9 @@ export function createFirestoreDeploymentStore(options?: {
           title: input.title,
           r2Bucket: process.env.R2_BUCKET_NAME || 'mist-published-sites',
           artifactPath: artifactInfo?.key || `sites/${slug}/index.html`,
-          htmlBundle: input.htmlBundle,
+          htmlBundle: r2 ? undefined : input.htmlBundle,
+          bytes: artifactInfo?.bytes,
+          etag: artifactInfo?.etag,
         });
       }
 
@@ -140,11 +179,18 @@ export function createFirestoreDeploymentStore(options?: {
 
     async deleteOwned(slug: string, ownerUid: string): Promise<boolean> {
       const { adminDb, r2 } = getStores();
-      if (r2) {
-        await r2.deletePublishedSite(slug).catch(() => {});
-      }
+      // Ownership check is strictly enforced in adminDb.deleteDeployment FIRST
       if (adminDb) {
-        return adminDb.deleteDeployment(ownerUid, slug);
+        const deleted = await adminDb.deleteDeployment(ownerUid, slug);
+        if (deleted && r2) {
+          await r2.deletePublishedSite(slug).catch((err) => {
+            console.warn(`[Mist Deployment] Failed to delete R2 artifact for ${slug}:`, err);
+          });
+        }
+        return deleted;
+      }
+      if (r2) {
+        return r2.deletePublishedSite(slug);
       }
       return true;
     },
@@ -161,15 +207,16 @@ export function createMemoryDeploymentStore(): DeploymentStore {
     async getPublic(slug: string) {
       return map.get(slug) || null;
     },
-    async listByOwner(ownerUid: string) {
+    async listByOwner(ownerUid: string, _idToken?: string, publishBaseUrl?: string) {
       const list: DeploymentSummary[] = [];
+      const baseUrl = publishBaseUrl ?? process.env.PUBLISH_BASE_URL?.trim();
       for (const dep of map.values()) {
         if (dep.ownerUid === ownerUid) {
           list.push({
             slug: dep.slug,
             projectId: dep.projectId,
             title: dep.title,
-            url: formatDeploymentUrl(dep.slug, process.env.PUBLIC_APP_URL),
+            url: formatDeploymentUrl(dep.slug, baseUrl),
             updatedAt: dep.updatedAt,
           });
         }

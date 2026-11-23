@@ -50,6 +50,7 @@ export interface ChatMessage {
 
 export interface MistProject {
   id: string;
+  ownerId?: string;
   name: string;
   description: string;
   prompt: string;
@@ -166,13 +167,21 @@ export interface StudioSettings {
   notifyOnAnswerDone?: boolean;
 }
 
+/**
+ * Canonical Authenticated User in Mist.
+ * Clerk is the sole authentication provider.
+ * Firebase Auth is completely removed from the client and backend.
+ */
 export interface MistUser {
+  /** Canonical Clerk User ID (e.g. 'user_2...') */
   id: string;
+  /** Canonical Clerk User ID (alias for id) */
   uid: string;
   email: string | null;
   displayName: string | null;
   photoURL?: string | null;
   emailVerified: boolean;
+  /** Resolves the active Clerk session JWT token for authenticating backend API requests */
   getIdToken: () => Promise<string | null>;
 }
 

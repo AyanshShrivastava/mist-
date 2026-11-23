@@ -1,5 +1,5 @@
 // Mist Service Worker for Web Push Notifications (VAPID)
-self.addEventListener('install', (event) => {
+self.addEventListener('install', () => {
   self.skipWaiting();
 });
 
@@ -20,11 +20,30 @@ self.addEventListener('push', (event) => {
   if (event.data) {
     try {
       const parsed = event.data.json();
-      data = { ...data, ...parsed };
+      if (parsed && typeof parsed === 'object') {
+        data = {
+          title: typeof parsed.title === 'string' ? parsed.title.slice(0, 120) : data.title,
+          body: typeof parsed.body === 'string' ? parsed.body.slice(0, 500) : data.body,
+          icon: typeof parsed.icon === 'string' ? parsed.icon.slice(0, 256) : data.icon,
+          badge: typeof parsed.badge === 'string' ? parsed.badge.slice(0, 256) : data.badge,
+          tag: typeof parsed.tag === 'string' ? parsed.tag.slice(0, 64) : data.tag,
+          data: parsed.data && typeof parsed.data === 'object' ? parsed.data : data.data,
+        };
+      }
     } catch {
-      data.body = event.data.text() || data.body;
+      data.body = (event.data.text() || data.body).slice(0, 500);
     }
   }
+
+  // Ensure target URL is safe relative path
+  let targetUrl = '/';
+  if (data.data && typeof data.data.url === 'string') {
+    const rawUrl = data.data.url.trim();
+    if (rawUrl.startsWith('/') && !rawUrl.startsWith('//') && !rawUrl.includes('\\')) {
+      targetUrl = rawUrl;
+    }
+  }
+  data.data = { url: targetUrl };
 
   const title = data.title || 'Mist';
   const options = {
@@ -33,7 +52,7 @@ self.addEventListener('push', (event) => {
     badge: data.badge || '/favicon.ico',
     tag: data.tag || 'mist-notification',
     renotify: true,
-    data: data.data || { url: '/' },
+    data: data.data,
   };
 
   event.waitUntil(self.registration.showNotification(title, options));
@@ -41,7 +60,13 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const targetUrl = event.notification.data?.url || '/';
+  let targetUrl = '/';
+  if (event.notification.data && typeof event.notification.data.url === 'string') {
+    const raw = event.notification.data.url.trim();
+    if (raw.startsWith('/') && !raw.startsWith('//') && !raw.includes('\\')) {
+      targetUrl = raw;
+    }
+  }
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {

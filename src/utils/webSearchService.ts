@@ -15,6 +15,7 @@ import { redactSecrets } from './aiErrors';
 import {
   safeFetchExternal,
   SecurityValidationError,
+  validateWebSearchConfig,
 } from './serverSecurity';
 
 export const MAX_SEARCH_REQUESTS_PER_INTERACTION = 3;
@@ -809,7 +810,21 @@ export class WebSearchService {
     outcome: WebSearchOutcome;
     requestsUsed: number;
   }> {
-    const config = normalizeWebSearchConfig(params.rawConfig);
+    if (params.signal?.aborted) {
+      throw new WebSearchError(499, 'CANCELLED', 'Web search was cancelled by caller.');
+    }
+    let validatedConfig: WebSearchConfig | undefined;
+    if (params.rawConfig) {
+      try {
+        validatedConfig = validateWebSearchConfig(params.rawConfig);
+      } catch (valErr) {
+        if (valErr instanceof SecurityValidationError) {
+          throw new WebSearchError(400, 'INVALID_CONFIG', valErr.message);
+        }
+        throw valErr;
+      }
+    }
+    const config = normalizeWebSearchConfig(validatedConfig || params.rawConfig);
     const providerLabel = config.name || 'Web Search';
     const timeoutMs = params.timeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS;
     const maxRequests = Math.min(

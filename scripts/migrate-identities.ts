@@ -555,24 +555,295 @@ export function formatReport(report: MigrationReport): string {
   return lines.join('\n');
 }
 
+export interface RollbackOptions {
+  dryRun?: boolean;
+  apply?: boolean;
+  batchSize?: number;
+  verbose?: boolean;
+  firestore?: Firestore;
+}
+
+export interface RollbackReport {
+  dryRun: boolean;
+  applied: boolean;
+  revertedCounts: {
+    projects: number;
+    projectFiles: number;
+    projectMessages: number;
+    deployments: number;
+    userPreferences: number;
+    vaults: number;
+  };
+  documentsToRevert: number;
+  documentsReverted: number;
+  batchesCommitted: number;
+  errors: string[];
+}
+
+/**
+ * Reverts a previously applied identity migration by restoring `migratedFromUid`
+ * ownership on projects, files, messages, and deployments, and removing cloned
+ * modern preference and vault records.
+ */
+export async function executeRollback(options: RollbackOptions = {}): Promise<RollbackReport> {
+  const isApply = Boolean(options.apply && !options.dryRun);
+  const dryRun = !isApply;
+  const batchSize = Math.min(options.batchSize || 400, 400);
+  const verbose = Boolean(options.verbose);
+
+  const report: RollbackReport = {
+    dryRun,
+    applied: isApply,
+    revertedCounts: {
+      projects: 0,
+      projectFiles: 0,
+      projectMessages: 0,
+      deployments: 0,
+      userPreferences: 0,
+      vaults: 0,
+    },
+    documentsToRevert: 0,
+    documentsReverted: 0,
+    batchesCommitted: 0,
+    errors: [],
+  };
+
+  const db = options.firestore || initAdminFirestore();
+
+  interface PendingRollbackOp {
+    type: 'update' | 'delete';
+    ref: FirebaseFirestore.DocumentReference;
+    data?: Record<string, any>;
+  }
+
+  const pendingOps: PendingRollbackOp[] = [];
+
+  // 1. Revert Projects and subcollections
+  try {
+    const projectsSnap = await db.collection('projects').get();
+    for (const doc of projectsSnap.docs) {
+      const data = doc.data();
+      if (data.migratedFromUid) {
+        report.revertedCounts.projects++;
+        pendingOps.push({
+          type: 'update',
+          ref: doc.ref,
+          data: {
+            ownerId: data.migratedFromUid,
+            migratedFromUid: FieldValue.delete(),
+            migratedAt: FieldValue.delete(),
+            rolledBackAt: isApply ? FieldValue.serverTimestamp() : new Date().toISOString(),
+          },
+        });
+      }
+
+      // Check subcollections
+      try {
+        const filesSnap = await doc.ref.collection('files').get();
+        for (const fileDoc of filesSnap.docs) {
+          const fileData = fileDoc.data();
+          if (fileData.migratedFromUid) {
+            report.revertedCounts.projectFiles++;
+            pendingOps.push({
+              type: 'update',
+              ref: fileDoc.ref,
+              data: {
+                ownerId: fileData.migratedFromUid,
+                migratedFromUid: FieldValue.delete(),
+                migratedAt: FieldValue.delete(),
+                rolledBackAt: isApply ? FieldValue.serverTimestamp() : new Date().toISOString(),
+              },
+            });
+          }
+        }
+
+        const messagesSnap = await doc.ref.collection('messages').get();
+        for (const msgDoc of messagesSnap.docs) {
+          const msgData = msgDoc.data();
+          if (msgData.migratedFromUid) {
+            report.revertedCounts.projectMessages++;
+            pendingOps.push({
+              type: 'update',
+              ref: msgDoc.ref,
+              data: {
+                ownerId: msgData.migratedFromUid,
+                migratedFromUid: FieldValue.delete(),
+                migratedAt: FieldValue.delete(),
+                rolledBackAt: isApply ? FieldValue.serverTimestamp() : new Date().toISOString(),
+              },
+            });
+          }
+        }
+      } catch (err: any) {
+        report.errors.push(`Error checking subcollections for project ${doc.id}: ${err.message}`);
+      }
+    }
+  } catch (err: any) {
+    report.errors.push(`Error inspecting projects for rollback: ${err.message}`);
+  }
+
+  // 2. Revert Deployments
+  try {
+    const deploymentsSnap = await db.collection('deployments').get();
+    for (const doc of deploymentsSnap.docs) {
+      const data = doc.data();
+      if (data.migratedFromUid) {
+        report.revertedCounts.deployments++;
+        pendingOps.push({
+          type: 'update',
+          ref: doc.ref,
+          data: {
+            ownerId: data.migratedFromUid,
+            migratedFromUid: FieldValue.delete(),
+            migratedAt: FieldValue.delete(),
+            rolledBackAt: isApply ? FieldValue.serverTimestamp() : new Date().toISOString(),
+          },
+        });
+      }
+    }
+  } catch (err: any) {
+    report.errors.push(`Error inspecting deployments for rollback: ${err.message}`);
+  }
+
+  // 3. User Preferences (Remove copy created with modern Clerk ID; historical UID doc remains intact)
+  try {
+    const prefsSnap = await db.collection('user_preferences').get();
+    for (const doc of prefsSnap.docs) {
+      const data = doc.data();
+      if (data.migratedFromUid) {
+        report.revertedCounts.userPreferences++;
+        pendingOps.push({
+          type: 'delete',
+          ref: doc.ref,
+        });
+      }
+    }
+  } catch (err: any) {
+    report.errors.push(`Error inspecting user preferences for rollback: ${err.message}`);
+  }
+
+  // 4. Vault (Remove copy created with modern Clerk ID; historical UID doc remains intact)
+  try {
+    const vaultsSnap = await db.collection('vault').get();
+    for (const doc of vaultsSnap.docs) {
+      const data = doc.data();
+      if (data.migratedFromUid) {
+        report.revertedCounts.vaults++;
+        pendingOps.push({
+          type: 'delete',
+          ref: doc.ref,
+        });
+      }
+    }
+  } catch (err: any) {
+    report.errors.push(`Error inspecting vault for rollback: ${err.message}`);
+  }
+
+  report.documentsToRevert = pendingOps.length;
+
+  // 5. If --apply, commit operations in chunks of batchSize
+  if (isApply && pendingOps.length > 0) {
+    for (let i = 0; i < pendingOps.length; i += batchSize) {
+      const chunk = pendingOps.slice(i, i + batchSize);
+      const batch = db.batch();
+      for (const op of chunk) {
+        if (op.type === 'update' && op.data) {
+          batch.update(op.ref, op.data);
+        } else if (op.type === 'delete') {
+          batch.delete(op.ref);
+        }
+      }
+      await batch.commit();
+      report.batchesCommitted += 1;
+      report.documentsReverted += chunk.length;
+      if (verbose) {
+        console.log(`[Rollback] Committed batch ${report.batchesCommitted} (${chunk.length} operations)`);
+      }
+    }
+  }
+
+  return report;
+}
+
+/**
+ * Formats rollback report as human-readable markdown / CLI table.
+ */
+export function formatRollbackReport(report: RollbackReport): string {
+  const lines: string[] = [];
+  lines.push('===============================================================');
+  lines.push(`   MIST IDENTITY ROLLBACK REPORT (${report.dryRun ? 'DRY RUN' : 'APPLIED'})`);
+  lines.push('===============================================================');
+  lines.push('');
+  lines.push(`Mode:                     ${report.dryRun ? 'DRY RUN (no database writes)' : 'LIVE APPLY (changes committed)'}`);
+  lines.push(`Documents to Revert:      ${report.documentsToRevert}`);
+  if (report.applied) {
+    lines.push(`Documents Reverted:       ${report.documentsReverted}`);
+    lines.push(`Batches Committed:        ${report.batchesCommitted}`);
+  }
+  lines.push('');
+
+  lines.push('--- Reverted Records by Collection ---');
+  for (const [col, count] of Object.entries(report.revertedCounts)) {
+    lines.push(`  - ${col.padEnd(20)}: ${count} documents`);
+  }
+  lines.push('');
+
+  if (report.errors.length > 0) {
+    lines.push('--- Errors / Warnings ---');
+    for (const err of report.errors) {
+      lines.push(`  ! ${err}`);
+    }
+    lines.push('');
+  }
+
+  lines.push('===============================================================');
+  if (report.dryRun) {
+    lines.push('DRY RUN COMPLETE: Zero database writes executed.');
+    lines.push('To apply this rollback, run:');
+    lines.push('  npx tsx scripts/migrate-identities.ts --rollback --apply');
+  } else {
+    lines.push(`APPLY COMPLETE: ${report.documentsReverted} documents reverted in ${report.batchesCommitted} batches.`);
+  }
+  lines.push('===============================================================');
+
+  return lines.join('\n');
+}
+
 // CLI entrypoint if executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
+  const rollback = args.includes('--rollback');
   const apply = args.includes('--apply');
   const dryRun = args.includes('--dry-run') || !apply;
   const verbose = args.includes('--verbose') || args.includes('-v');
 
-  console.log(`Starting Mist Identity Migration (${dryRun ? 'DRY RUN' : 'APPLY MODE'})...`);
+  if (rollback) {
+    console.log(`Starting Mist Identity Rollback (${dryRun ? 'DRY RUN' : 'APPLY MODE'})...`);
 
-  executeMigration({ dryRun, apply, verbose })
-    .then((report) => {
-      console.log(formatReport(report));
-      if (report.errors.length > 0) {
-        process.exitCode = 1;
-      }
-    })
-    .catch((err) => {
-      console.error('Migration failed fatal exception:', err);
-      process.exit(1);
-    });
+    executeRollback({ dryRun, apply, verbose })
+      .then((report) => {
+        console.log(formatRollbackReport(report));
+        if (report.errors.length > 0) {
+          process.exitCode = 1;
+        }
+      })
+      .catch((err) => {
+        console.error('Rollback failed fatal exception:', err);
+        process.exit(1);
+      });
+  } else {
+    console.log(`Starting Mist Identity Migration (${dryRun ? 'DRY RUN' : 'APPLY MODE'})...`);
+
+    executeMigration({ dryRun, apply, verbose })
+      .then((report) => {
+        console.log(formatReport(report));
+        if (report.errors.length > 0) {
+          process.exitCode = 1;
+        }
+      })
+      .catch((err) => {
+        console.error('Migration failed fatal exception:', err);
+        process.exit(1);
+      });
+  }
 }

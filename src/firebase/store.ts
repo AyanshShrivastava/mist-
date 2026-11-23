@@ -135,7 +135,19 @@ export async function saveProjectToFirestore(
   project: MistProject,
   options?: { isNew?: boolean },
   token?: string | null,
+  activeUid?: string | null,
 ): Promise<void> {
+  if (activeUid && project.ownerId && project.ownerId !== activeUid) {
+    const errorMsg = `Project ownership mismatch: project ${project.id} belongs to ${project.ownerId}, not ${activeUid}`;
+    console.warn(`[Mist Store] ${errorMsg}`);
+    setProjectSyncRecord({
+      projectId: project.id,
+      state: 'error',
+      error: 'Ownership mismatch: cannot update another user project',
+    });
+    throw new Error(errorMsg);
+  }
+
   const prev = projectSaveQueue.get(project.id) || Promise.resolve();
   const next = prev
     .catch(() => {})
@@ -215,14 +227,23 @@ export async function syncLocalProjectsToFirestore(
   projects: MistProject[],
   cloudIds?: Set<string>,
   token?: string | null,
+  activeUid?: string | null,
 ): Promise<number> {
   if (projects.length === 0) return 0;
   let syncedCount = 0;
   for (const project of projects) {
+    // If project is owned by someone else, never sync it to active user's account
+    if (activeUid && project.ownerId && project.ownerId !== activeUid) {
+      continue;
+    }
     const alreadyInCloud = cloudIds ? cloudIds.has(project.id) : knownCloudProjects.has(project.id);
     if (!alreadyInCloud) {
-      await saveProjectToFirestore(project, { isNew: true }, token);
-      syncedCount++;
+      try {
+        await saveProjectToFirestore(project, { isNew: true }, token, activeUid);
+        syncedCount++;
+      } catch (err) {
+        console.warn(`[Mist Store] Failed to sync local project ${project.id} to cloud:`, err);
+      }
     }
   }
   return syncedCount;

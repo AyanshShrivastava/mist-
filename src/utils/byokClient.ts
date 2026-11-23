@@ -5,6 +5,7 @@ import {
   assertSafeExternalUrl,
   safeFetchExternal,
   SecurityValidationError,
+  validateAiProviderConfig,
   type LookupFn,
 } from './serverSecurity';
 
@@ -46,7 +47,8 @@ export async function resolveByokRequestParams(
   endpoint: string;
   headers: Record<string, string>;
 }> {
-  const config = normalizeProviderConfigToStudio(rawConfig || DEFAULT_BYOK_CONFIG);
+  const validated = rawConfig ? validateAiProviderConfig(rawConfig) : DEFAULT_BYOK_CONFIG;
+  const config = normalizeProviderConfigToStudio(validated);
   const providerLabel = config.name?.trim() || 'Custom BYOK';
   const apiKey = config.apiKey?.trim();
   if (!apiKey) {
@@ -124,6 +126,11 @@ export async function callByokCompletionRaw(params: ByokCompletionOptions): Prom
     fetchImpl,
     skipDnsLookup,
   } = params;
+
+  if (signal?.aborted) {
+    throw new ProviderHttpError(499, 'Client disconnected before upstream request started.');
+  }
+
   const { config, providerLabel, endpoint, headers } = await resolveByokRequestParams(
     params.config,
     { skipDnsLookup },
