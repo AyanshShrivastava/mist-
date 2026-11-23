@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: mist-api
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/models
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: MIST_VAULT_SECRET
+        generateValue: true
+      - key: PUBLISHED_PROJECTS_DOMAIN
+        value: projects.mist.me
