@@ -19,7 +19,20 @@ export interface ServerCatalogResult {
 }
 
 const CATALOG_TTL_MS = 10 * 60 * 1000;
+const MAX_CATALOG_CACHE_ENTRIES = 100;
 const serverCatalogCache = new Map<string, { expiresAt: number; result: ServerCatalogResult }>();
+
+function setCatalogCache(key: string, result: ServerCatalogResult): void {
+  const now = Date.now();
+  if (serverCatalogCache.size >= MAX_CATALOG_CACHE_ENTRIES) {
+    for (const [k, v] of serverCatalogCache.entries()) {
+      if (v.expiresAt <= now || serverCatalogCache.size >= MAX_CATALOG_CACHE_ENTRIES) {
+        serverCatalogCache.delete(k);
+      }
+    }
+  }
+  serverCatalogCache.set(key, { expiresAt: now + CATALOG_TTL_MS, result });
+}
 
 export function clearServerCatalogCache(): void {
   serverCatalogCache.clear();
@@ -560,7 +573,7 @@ export async function fetchGatewayModelsCatalog(params: {
         fetchedAt,
         models: mapped,
       };
-      serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
+      setCatalogCache(cacheKey, result);
       return result;
     } catch (err) {
       if (err instanceof SecurityValidationError) throw err;
@@ -603,7 +616,7 @@ export async function fetchGatewayModelsCatalog(params: {
       models: mapped,
       note: mapped.length === 0 ? 'Groq returned 0 eligible chat models for this key.' : undefined,
     };
-    serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
+    setCatalogCache(cacheKey, result);
     return result;
   }
 
@@ -642,7 +655,7 @@ export async function fetchGatewayModelsCatalog(params: {
       models: mapped,
       note: mapped.length === 0 ? 'Gemini API returned 0 generateContent models for this key.' : undefined,
     };
-    serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
+    setCatalogCache(cacheKey, result);
     return result;
   }
 
@@ -703,6 +716,6 @@ export async function fetchGatewayModelsCatalog(params: {
         ? `${preset.name} /models returned an empty list. Enter a custom model ID below and test it.`
         : undefined,
   };
-  serverCatalogCache.set(cacheKey, { expiresAt: Date.now() + CATALOG_TTL_MS, result });
+  setCatalogCache(cacheKey, result);
   return result;
 }

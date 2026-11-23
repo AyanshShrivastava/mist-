@@ -1257,7 +1257,8 @@ Return JSON: { "content": "..." }`;
       res.setHeader('Cache-Control', 'public, max-age=3600');
       res.send(bundle);
     } catch (err) {
-      res.status(500).send(`console.error("Failed to build vendor runtime: ${String(err)}");`);
+      const safeMsg = sanitizeErrorMessage(err);
+      res.status(500).send(`console.error("Failed to build vendor runtime: ${safeMsg}");`);
     }
   });
 
