@@ -7,10 +7,15 @@ import { createMistApp, ensureVendorRuntime } from './src/utils/mistServerApp';
 dotenv.config();
 
 const PORT = Number(process.env.PORT || 3000);
-const app = createMistApp();
 
 async function startServer() {
   await ensureVendorRuntime();
+
+  if (process.env.NODE_ENV === 'production' && !process.env.MIST_EDGE_ORIGIN_SECRET) {
+    throw new Error('MIST_EDGE_ORIGIN_SECRET is required in production to enforce edge origin verification.');
+  }
+
+  const app = createMistApp();
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');

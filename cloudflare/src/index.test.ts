@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import { createMistApp } from '../../src/utils/mistServerApp';
+import { InMemoryAdminStore } from '../../src/server/firestoreAdmin';
+import { InMemoryR2ArtifactStore } from '../../src/utils/r2ArtifactStore';
 import worker, {
   isValidSlug,
   extractSubdomain,
@@ -315,4 +319,85 @@ test('Dedicated wildcard publishing domain and HEAD request routing', async () =
   const legacyRes = await worker.fetch(legacyReq, env);
   assert.equal(legacyRes.status, 301);
   assert.equal(legacyRes.headers.get('location'), 'https://portfolio-2026.mist-sites.com/');
+});
+
+test('Worker proxy forwards mutations to Express backend with edge origin verification and same-origin defense', async () => {
+  const edgeSecret = 'test-edge-origin-secret-xyz123';
+  const app = createMistApp({
+    edgeOriginSecret: edgeSecret,
+    adminStore: new InMemoryAdminStore(),
+    r2Store: new InMemoryR2ArtifactStore(),
+  });
+
+  // Mutating endpoint on Express
+  app.post('/api/test-mutation', (req, res) => {
+    res.json({ ok: true, received: req.body });
+  });
+
+  // Start real local HTTP server for the Express backend
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const address = server.address() as { port: number };
+  const backendOrigin = `http://127.0.0.1:${address.port}`;
+
+  const env: Env = {
+    APEX_DOMAIN: 'mist.me',
+    HEROKU_API_ORIGIN: backendOrigin,
+    MIST_EDGE_ORIGIN_SECRET: edgeSecret,
+  };
+
+  try {
+    // 1. Valid mutation routed via Worker proxy: Browser Origin is mist.me, Host forwarded
+    const clientReq = new Request('https://mist.me/api/test-mutation', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://mist.me',
+      },
+      body: JSON.stringify({ message: 'create-project' }),
+    });
+
+    const proxyRes = await proxyToHeroku(clientReq, new URL(clientReq.url), env);
+    assert.equal(proxyRes.status, 200);
+    const data = (await proxyRes.json()) as { ok: boolean; received: { message: string } };
+    assert.equal(data.ok, true);
+    assert.equal(data.received.message, 'create-project');
+
+    // 2. Direct mutation to backend WITHOUT edge secret -> 403 Forbidden
+    const directReqNoSecret = await fetch(`${backendOrigin}/api/test-mutation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://mist.me',
+      },
+      body: JSON.stringify({ message: 'bypass-attempt' }),
+    });
+    assert.equal(directReqNoSecret.status, 403);
+
+    // 3. Direct mutation to backend with invalid edge secret -> 403 Forbidden
+    const directReqBadSecret = await fetch(`${backendOrigin}/api/test-mutation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://mist.me',
+        'x-mist-edge-secret': 'wrong-secret',
+      },
+      body: JSON.stringify({ message: 'bypass-attempt-2' }),
+    });
+    assert.equal(directReqBadSecret.status, 403);
+
+    // 4. Cross-site mutation via Worker with untrusted origin -> 403 Forbidden
+    const crossSiteReq = new Request('https://mist.me/api/test-mutation', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://evil-attacker.com',
+      },
+      body: JSON.stringify({ message: 'csrf-attack' }),
+    });
+    const crossSiteRes = await proxyToHeroku(crossSiteReq, new URL(crossSiteReq.url), env);
+    assert.equal(crossSiteRes.status, 403);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

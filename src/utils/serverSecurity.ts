@@ -1680,34 +1680,68 @@ export function sendSecurityErrorResponse(
   });
 }
 
+function isValidEdgeSecret(header: unknown, expected: string): boolean {
+  if (typeof header !== 'string' || !header) return false;
+  const bufHeader = Buffer.from(header, 'utf8');
+  const bufExpected = Buffer.from(expected, 'utf8');
+  if (bufHeader.length !== bufExpected.length) return false;
+  return crypto.timingSafeEqual(bufHeader, bufExpected);
+}
+
 export function createEdgeOriginSecretMiddleware(options?: {
   expectedSecret?: string;
+  isProduction?: boolean;
 }) {
+  const isProd = options?.isProduction ?? process.env.NODE_ENV === 'production';
+  const expected = options?.expectedSecret ?? process.env.MIST_EDGE_ORIGIN_SECRET;
+  if (isProd && !expected) {
+    throw new Error('MIST_EDGE_ORIGIN_SECRET is mandatory in production to prevent direct origin bypass.');
+  }
+
   return (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
-    const expected = options?.expectedSecret ?? process.env.MIST_EDGE_ORIGIN_SECRET;
     if (!expected) {
       return next();
     }
 
-    const header = req.headers['x-mist-edge-secret'];
-    if (typeof header !== 'string' || !header) {
+    if (!isValidEdgeSecret(req.headers['x-mist-edge-secret'], expected)) {
       res.status(403).json({ error: 'Direct access to origin is prohibited. Requests must route via Cloudflare edge.' });
       return;
     }
 
-    const bufHeader = Buffer.from(header, 'utf8');
-    const bufExpected = Buffer.from(expected, 'utf8');
-    if (bufHeader.length !== bufExpected.length || !crypto.timingSafeEqual(bufHeader, bufExpected)) {
-      res.status(403).json({ error: 'Invalid edge origin secret.' });
-      return;
-    }
-
+    (req as any).isEdgeOriginVerified = true;
     next();
   };
 }
 
 
 // --- 6. Same-Origin / Cross-Site Mutation Defense ---
+
+export interface OriginCheckContext {
+  originHost: string;
+  hostHeader: string;
+  forwardedHost: string;
+  isEdgeVerified: boolean;
+}
+
+export function isOriginAuthorized(ctx: OriginCheckContext): boolean {
+  if (ctx.hostHeader && ctx.originHost === ctx.hostHeader) {
+    return true;
+  }
+  if (ctx.isEdgeVerified) {
+    if (ctx.forwardedHost && ctx.originHost === ctx.forwardedHost) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getForwardedHostHeader(req: ExpressRequest): string {
+  const forwarded = req.headers['x-forwarded-host'];
+  if (typeof forwarded === 'string' && forwarded) {
+    return forwarded.split(',')[0].trim().toLowerCase();
+  }
+  return '';
+}
 
 export function enforceSameOriginOnMutations(
   req: ExpressRequest,
@@ -1716,8 +1750,7 @@ export function enforceSameOriginOnMutations(
 ): void {
   const method = req.method.toUpperCase();
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
-    next();
-    return;
+    return next();
   }
 
   const secFetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
@@ -1727,18 +1760,32 @@ export function enforceSameOriginOnMutations(
   }
 
   const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+  if (!originHeader) {
+    return next();
+  }
+
+  let originHost = '';
+  try {
+    originHost = new URL(originHeader).host.toLowerCase();
+  } catch {
+    res.status(403).json({ error: 'Invalid request Origin header.' });
+    return;
+  }
+
   const hostHeader = typeof req.headers.host === 'string' ? req.headers.host.trim().toLowerCase() : '';
-  if (originHeader && hostHeader) {
-    try {
-      const parsedOrigin = new URL(originHeader);
-      if (parsedOrigin.host.toLowerCase() !== hostHeader) {
-        res.status(403).json({ error: 'Cross-origin mutating requests are blocked for security.' });
-        return;
-      }
-    } catch {
-      res.status(403).json({ error: 'Invalid request Origin header.' });
-      return;
-    }
+  const forwardedHost = getForwardedHostHeader(req);
+  const isEdgeVerified = Boolean((req as any).isEdgeOriginVerified);
+
+  const isAllowed = isOriginAuthorized({
+    originHost,
+    hostHeader,
+    forwardedHost,
+    isEdgeVerified,
+  });
+
+  if (!isAllowed) {
+    res.status(403).json({ error: 'Cross-origin mutating requests are blocked for security.' });
+    return;
   }
 
   next();

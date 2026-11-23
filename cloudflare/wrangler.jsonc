@@ -21,23 +21,23 @@
     }
   ],
 
-  // Workers Routes: handles apex mist.me and all wildcard subdomains (*.mist.me)
+  // Workers Routes: handles apex mist.me and all wildcard subdomains (*.mist-sites.com)
   "routes": [
     {
       "pattern": "mist.me/*",
       "zone_name": "mist.me"
     },
     {
-      "pattern": "*.mist.me/*",
-      "zone_name": "mist.me"
+      "pattern": "*.mist-sites.com/*",
+      "zone_name": "mist-sites.com"
     }
   ],
 
   // Environment variables
   "vars": {
     "APEX_DOMAIN": "mist.me",
-    // Configurable wildcard publishing domain (e.g. "mist.me" for *.mist.me, or dedicated "mist-sites.com" for *.mist-sites.com)
-    "PUBLISH_DOMAIN": "mist.me",
+    // Canonical wildcard publishing domain for published sites origin isolation
+    "PUBLISH_DOMAIN": "mist-sites.com",
     "HEROKU_API_ORIGIN": "https://mist-control-plane-api.herokuapp.com"
   }
 }

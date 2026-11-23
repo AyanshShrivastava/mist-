@@ -254,8 +254,7 @@ export async function proxyToHeroku(
     forwardHeaders.set('cf-connecting-ip', clientIp);
   }
 
-  const apexDomain = env.APEX_DOMAIN || 'mist.me';
-  forwardHeaders.set('x-forwarded-host', apexDomain);
+  forwardHeaders.set('x-forwarded-host', url.host || 'mist.me');
   forwardHeaders.set('x-forwarded-proto', 'https');
 
   // Override Host header to target Heroku domain

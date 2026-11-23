@@ -63,6 +63,21 @@ export interface DeploymentStore {
 
 export const MAX_DEPLOYMENT_BUNDLE_BYTES = 900_000;
 
+function resolveProductionStore<T>(name: string, initFn: () => T, fallback?: T): T | undefined {
+  try {
+    return initFn();
+  } catch (err) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        `Failed to initialize production ${name}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+    return fallback;
+  }
+}
+
 export function createFirestoreDeploymentStore(options?: {
   adminStore?: AdminDatabaseOperations;
   r2Store?: R2StorageOperations;
@@ -72,18 +87,14 @@ export function createFirestoreDeploymentStore(options?: {
 
   function getStores() {
     if (!adminDb) {
-      try {
-        adminDb = new FirestoreAdminStore();
-      } catch {
-        // Fall back to memory if credentials missing
-      }
+      adminDb = resolveProductionStore('FirestoreAdminStore', () => new FirestoreAdminStore());
     }
     if (!r2) {
-      try {
-        r2 = new CloudflareR2ArtifactStore();
-      } catch {
-        r2 = new InMemoryR2ArtifactStore();
-      }
+      r2 = resolveProductionStore<R2StorageOperations>(
+        'CloudflareR2ArtifactStore',
+        () => new CloudflareR2ArtifactStore(),
+        new InMemoryR2ArtifactStore(),
+      )!;
     }
     return { adminDb, r2 };
   }

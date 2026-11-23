@@ -1071,6 +1071,48 @@ export interface MistAppDeps {
   renderFetchImpl?: typeof fetch;
 }
 
+function resolveAdminStore(depsStore?: AdminDatabaseOperations): AdminDatabaseOperations {
+  if (depsStore) return depsStore;
+  const isProd = process.env.NODE_ENV === 'production';
+  const hasCreds = Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+  if (!isProd && !hasCreds) {
+    return new InMemoryAdminStore();
+  }
+  try {
+    return new FirestoreAdminStore();
+  } catch (err) {
+    if (isProd) {
+      throw new Error(
+        `Failed to initialize production FirestoreAdminStore: ${
+          err instanceof Error ? err.message : String(err)
+        }. In-memory fallback is disabled in production to prevent data loss upon server restart.`
+      );
+    }
+    return new InMemoryAdminStore();
+  }
+}
+
+function resolveR2Store(depsStore?: R2StorageOperations): R2StorageOperations {
+  if (depsStore) return depsStore;
+  const isProd = process.env.NODE_ENV === 'production';
+  const hasKey = Boolean(process.env.R2_SECRET_ACCESS_KEY);
+  if (!isProd && !hasKey) {
+    return new InMemoryR2ArtifactStore();
+  }
+  try {
+    return new CloudflareR2ArtifactStore();
+  } catch (err) {
+    if (isProd) {
+      throw new Error(
+        `Failed to initialize production CloudflareR2ArtifactStore: ${
+          err instanceof Error ? err.message : String(err)
+        }. In-memory fallback is disabled in production to prevent data loss upon server restart.`
+      );
+    }
+    return new InMemoryR2ArtifactStore();
+  }
+}
+
 export function createMistApp(deps: MistAppDeps = {}): Express {
   const app = express();
 
@@ -1079,31 +1121,8 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
   // Host-only cookie protection: prevents any parent-domain cookie leakage to published subdomains
   app.use(enforceHostOnlyCookies(publishBaseUrl));
 
-  let adminStore = deps.adminStore;
-  if (!adminStore) {
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.NODE_ENV === 'production') {
-      try {
-        adminStore = new FirestoreAdminStore();
-      } catch {
-        adminStore = new InMemoryAdminStore();
-      }
-    } else {
-      adminStore = new InMemoryAdminStore();
-    }
-  }
-
-  let r2Store = deps.r2Store;
-  if (!r2Store) {
-    if (process.env.R2_SECRET_ACCESS_KEY || process.env.NODE_ENV === 'production') {
-      try {
-        r2Store = new CloudflareR2ArtifactStore();
-      } catch {
-        r2Store = new InMemoryR2ArtifactStore();
-      }
-    } else {
-      r2Store = new InMemoryR2ArtifactStore();
-    }
-  }
+  const adminStore = resolveAdminStore(deps.adminStore);
+  const r2Store = resolveR2Store(deps.r2Store);
 
   const deploymentStore =
     deps.deploymentStore ||
