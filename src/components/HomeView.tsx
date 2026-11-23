@@ -961,12 +961,12 @@ export default function HomeView({
 
   const thumbGradient = (seed: string) => {
     const palettes = [
-      'from-blue-500 via-violet-500 to-pink-500',
-      'from-orange-400 via-pink-500 to-violet-600',
-      'from-sky-400 via-blue-500 to-indigo-600',
-      'from-emerald-400 via-teal-500 to-sky-600',
-      'from-rose-400 via-fuchsia-500 to-violet-600',
-      'from-amber-400 via-orange-500 to-rose-500',
+      'from-(--mist-c1) via-(--mist-c2) to-(--mist-c3)',
+      'from-(--mist-c5) via-(--mist-c4) to-(--mist-c3)',
+      'from-(--mist-c2) via-(--mist-c3) to-(--mist-c4)',
+      'from-(--mist-c1) via-(--mist-c5) to-(--mist-c4)',
+      'from-(--mist-c3) via-(--mist-c2) to-(--mist-c1)',
+      'from-(--mist-c4) via-(--mist-c5) to-(--mist-c1)',
     ];
     let h = 0;
     for (let i = 0; i < seed.length; i++) h = (Math.imul(h, 31) + seed.charCodeAt(i) * (i + 7)) >>> 0;
@@ -989,70 +989,105 @@ export default function HomeView({
       { img: templateArchitectImg, title: 'Architecture studio', tag: 'Portfolio', prompt: 'Architecture studio portfolio with a project grid, case study pages, and contact form.' },
       { img: templateSkincareImg, title: 'Botanical skincare', tag: 'Store', prompt: 'Botanical skincare brand store with product cards, ingredient glossary, and cart.' },
     ];
+    const buildSteps = [
+      { label: 'Reading your idea', done: true },
+      { label: 'Planning 4 sections', done: true },
+      { label: 'Writing 12 files', done: false },
+    ];
     return (
-      <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] flex flex-col">
-        <header className="mist-header sticky top-0 z-30">
-          <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-6 px-4 sm:px-6">
+      <div className="mist-ambient-canvas min-h-screen text-[#121214] dark:text-[#F4F4F5] flex flex-col overflow-x-hidden">
+        <header className="sticky top-0 z-30 border-b border-zinc-900/[0.06] bg-[var(--mist-canvas)]/80 backdrop-blur-xl dark:border-white/[0.06]">
+          <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-6 px-4 sm:px-6">
             <a href="#top" className="shrink-0 focus:outline-none"><MistLogo size="md" /></a>
-            <nav aria-label="Primary" className="hidden md:flex items-center gap-1 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+            <nav aria-label="Primary" className="hidden md:flex items-center gap-6 text-sm text-zinc-600 dark:text-zinc-400">
               {[['#ideas', 'Ideas'], ['#features', 'Features'], ['#how', 'How it works']].map(([href, label]) => (
-                <a key={href} href={href} className="rounded-full px-3.5 py-2 hover:bg-zinc-900/5 hover:text-zinc-950 dark:hover:bg-white/10 dark:hover:text-white transition-colors">{label}</a>
+                <a key={href} href={href} className="hover:text-zinc-950 dark:hover:text-white transition-colors">{label}</a>
               ))}
             </nav>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               {themeButton}
-              <button type="button" onClick={onOpenAccount} className="hidden sm:inline-flex h-9 items-center rounded-full border border-zinc-300 px-4 text-sm font-medium text-zinc-800 hover:bg-white dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900 transition-colors cursor-pointer">Log in</button>
-              <button type="button" onClick={onOpenAccount} className="inline-flex h-9 items-center rounded-full bg-zinc-950 px-4 text-sm font-medium text-white hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200 transition-colors cursor-pointer">Get started</button>
+              <button type="button" onClick={onOpenAccount} className="hidden sm:inline-flex h-9 items-center rounded-lg px-3 text-sm font-medium text-zinc-700 hover:bg-zinc-900/5 dark:text-zinc-300 dark:hover:bg-white/10 transition-colors cursor-pointer">Sign in</button>
+              <button type="button" onClick={onOpenAccount} className="inline-flex h-9 items-center gap-1.5 rounded-lg mist-primary-gradient px-3.5 text-sm font-semibold cursor-pointer">Create account</button>
             </div>
           </div>
         </header>
 
         <main id="top" className="flex-1">
-          <section className="mist-hero-aurora mx-auto max-w-5xl px-4 sm:px-6 pt-14 pb-20 sm:pt-24 sm:pb-28 text-center">
-            <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}>
-              <button type="button" onClick={onOpenVoiceChat} className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/80 py-1 pl-1 pr-3 text-xs font-medium text-zinc-700 shadow-sm backdrop-blur hover:bg-white dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-300 transition-colors cursor-pointer">
-                <Mic className="ml-1 h-3.5 w-3.5 text-violet-600 dark:text-violet-400" aria-hidden="true" />
-                Start with your voice
-                <ArrowRight className="h-3 w-3" aria-hidden="true" />
-              </button>
-              <h1 className="mt-6 font-display text-[44px] sm:text-6xl lg:text-7xl font-semibold leading-[0.98] text-zinc-950 dark:text-white [text-wrap:balance]">
-                Build the web from one thought.
-              </h1>
-              <p className="mx-auto mt-5 max-w-2xl text-base sm:text-lg text-zinc-600 dark:text-zinc-400">
-                Describe a product, launch a page, or ship a playable experience. Mist writes the code while you stay in control.
+          <section className="mist-hero-aurora mx-auto grid max-w-6xl items-start gap-12 px-4 sm:px-6 pt-14 pb-20 sm:pt-20 lg:grid-cols-[1.15fr_0.85fr] lg:gap-14 lg:pt-24">
+            <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }} className="min-w-0">
+              <p className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
+                <span className="h-1.5 w-1.5 rounded-full mist-primary-gradient" /> prompt · preview · publish
               </p>
+              <h1 className="mt-5 font-display text-[42px] sm:text-6xl font-semibold leading-[1.0] text-zinc-950 dark:text-white [text-wrap:balance]">
+                Say the idea.<br /><span className="mist-gradient-text">Watch it take shape.</span>
+              </h1>
+              <p className="mt-5 max-w-lg text-base sm:text-lg text-zinc-600 dark:text-zinc-400">
+                Mist writes a real React site from one sentence, lets you click anything to change it, and hands you the code.
+              </p>
+              <div className="mt-8">{composerBlock}</div>
             </motion.div>
-            <div className="mt-10 text-left">{composerBlock}</div>
+
+            <motion.div aria-hidden="true" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.15, ease: [0.16, 1, 0.3, 1] }} className="hidden lg:block sticky top-24">
+              <div className="mist-mesh mist-grain relative overflow-hidden rounded-[22px] p-5 shadow-2xl shadow-zinc-900/10">
+                <div className="relative z-10 overflow-hidden rounded-xl bg-white/90 shadow-lg backdrop-blur dark:bg-zinc-950/85">
+                  <div className="flex items-center gap-1.5 border-b border-zinc-900/5 px-3 py-2 dark:border-white/5">
+                    <span className="h-2.5 w-2.5 rounded-full bg-zinc-300 dark:bg-zinc-700" /><span className="h-2.5 w-2.5 rounded-full bg-zinc-300 dark:bg-zinc-700" /><span className="h-2.5 w-2.5 rounded-full bg-zinc-300 dark:bg-zinc-700" />
+                    <span className="ml-3 rounded-md bg-zinc-100 px-2 py-0.5 font-mono text-[10px] text-zinc-500 dark:bg-zinc-900">kyoto-roastery.mist.app</span>
+                  </div>
+                  <div className="space-y-3 p-4">
+                    <div className="h-24 rounded-lg mist-mesh opacity-80" />
+                    <div className="h-3 w-2/3 rounded bg-zinc-200 dark:bg-zinc-800" />
+                    <div className="h-3 w-1/2 rounded bg-zinc-200 dark:bg-zinc-800" />
+                    <div className="grid grid-cols-3 gap-2 pt-1">
+                      {[0, 1, 2].map((i) => <div key={i} className="h-14 rounded-md bg-zinc-100 dark:bg-zinc-900" />)}
+                    </div>
+                  </div>
+                </div>
+                <div className="relative z-10 mt-4 rounded-xl bg-zinc-950/85 p-3.5 font-mono text-[11px] text-zinc-300 backdrop-blur">
+                  {buildSteps.map((step) => (
+                    <p key={step.label} className="flex items-center gap-2 py-0.5">
+                      {step.done ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" />}
+                      {step.label}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            </motion.div>
           </section>
 
-          <section id="ideas" className="mx-auto max-w-7xl px-4 sm:px-6 py-20">
-            <div className="flex items-end justify-between gap-4">
+          <section id="ideas" className="mx-auto max-w-6xl px-4 sm:px-6 py-16">
+            <div className="flex items-end justify-between gap-4 border-t border-zinc-900/[0.07] pt-10 dark:border-white/[0.07]">
               <div>
-                <h2 className="font-display text-3xl sm:text-4xl font-semibold text-zinc-950 dark:text-white">Start from an idea</h2>
-                <p className="mt-2 text-zinc-600 dark:text-zinc-400">Tap one to drop its prompt into the box above.</p>
+                <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">01 — Ideas</p>
+                <h2 className="mt-2 font-display text-3xl sm:text-4xl font-semibold text-zinc-950 dark:text-white">Borrow a starting point</h2>
               </div>
+              <p className="hidden sm:block max-w-xs text-sm text-zinc-500">Tap one and its prompt lands in the box above, ready to tweak.</p>
             </div>
             <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {ideas.map((idea) => (
-                <button key={idea.title} type="button" onClick={() => focusComposer(idea.prompt)} className="group overflow-hidden rounded-3xl border border-zinc-200/80 bg-white text-left shadow-sm hover:-translate-y-1 hover:shadow-xl dark:border-zinc-800 dark:bg-zinc-900 transition-all duration-300 cursor-pointer">
-                  <div className="aspect-[4/3] overflow-hidden"><img src={idea.img} alt="" loading="lazy" className="h-full w-full object-cover group-hover:scale-105 transition-transform duration-500" /></div>
-                  <div className="p-4">
-                    <p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">{idea.tag}</p>
-                    <p className="mt-1 font-semibold text-zinc-950 dark:text-white">{idea.title}</p>
+                <button key={idea.title} type="button" onClick={() => focusComposer(idea.prompt)} className="group relative aspect-[4/5] overflow-hidden rounded-2xl text-left cursor-pointer">
+                  <img src={idea.img} alt="" loading="lazy" className="absolute inset-0 h-full w-full object-cover transition-transform duration-700 group-hover:scale-105" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/10 to-transparent" />
+                  <div className="absolute inset-x-0 bottom-0 p-4 text-white">
+                    <p className="text-[11px] font-medium uppercase tracking-wider text-white/70">{idea.tag}</p>
+                    <p className="mt-0.5 flex items-center justify-between font-semibold">{idea.title}<ArrowRight className="h-4 w-4 -translate-x-1 opacity-0 transition-all group-hover:translate-x-0 group-hover:opacity-100" aria-hidden="true" /></p>
                   </div>
                 </button>
               ))}
             </div>
           </section>
 
-          <section id="features" className="mx-auto max-w-7xl px-4 sm:px-6 py-20">
-            <h2 className="max-w-2xl font-display text-3xl sm:text-5xl font-semibold text-zinc-950 dark:text-white">One prompt box. A whole studio behind it.</h2>
-            <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {features.map(({ icon: Icon, title, body }) => (
-                <div key={title} className="mist-surface-card rounded-3xl p-6">
-                  <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl mist-primary-gradient text-white"><Icon className="h-5 w-5" aria-hidden="true" /></span>
-                  <h3 className="mt-5 text-lg font-semibold text-zinc-950 dark:text-white">{title}</h3>
-                  <p className="mt-1.5 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">{body}</p>
+          <section id="features" className="mx-auto max-w-6xl px-4 sm:px-6 py-16">
+            <div className="border-t border-zinc-900/[0.07] pt-10 dark:border-white/[0.07]">
+              <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">02 — Studio</p>
+              <h2 className="mt-2 max-w-2xl font-display text-3xl sm:text-4xl font-semibold text-zinc-950 dark:text-white">Everything after the first prompt</h2>
+            </div>
+            <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {features.map(({ icon: Icon, title, body }, i) => (
+                <div key={title} className={`relative overflow-hidden rounded-2xl p-6 ${i === 0 ? 'mist-mesh mist-grain text-zinc-950 sm:col-span-2 lg:col-span-1 lg:row-span-2 flex flex-col justify-end min-h-[220px]' : 'mist-surface-card'}`}>
+                  <span className={`relative z-10 inline-flex h-9 w-9 items-center justify-center rounded-xl ${i === 0 ? 'bg-white/80 text-zinc-950' : 'bg-zinc-900/5 text-zinc-900 dark:bg-white/10 dark:text-white'}`}><Icon className="h-4.5 w-4.5" aria-hidden="true" /></span>
+                  <h3 className={`relative z-10 mt-4 font-semibold ${i === 0 ? 'text-2xl' : 'text-base text-zinc-950 dark:text-white'}`}>{title}</h3>
+                  <p className={`relative z-10 mt-1.5 text-sm leading-relaxed ${i === 0 ? 'text-zinc-900/80' : 'text-zinc-600 dark:text-zinc-400'}`}>{body}</p>
                 </div>
               ))}
             </div>
@@ -1060,24 +1095,26 @@ export default function HomeView({
 
           <div id="how">{renderShowcaseWalkthrough()}</div>
 
-          <section className="mx-auto max-w-7xl px-4 sm:px-6 py-20">
-            <div className="relative overflow-hidden rounded-[2rem] bg-zinc-950 px-6 py-16 text-center sm:py-20">
-              <div aria-hidden="true" className="absolute inset-0 opacity-80 bg-[radial-gradient(60%_80%_at_50%_120%,#ec4899_0%,transparent_60%),radial-gradient(50%_60%_at_15%_100%,#f97316_0%,transparent_60%),radial-gradient(50%_60%_at_85%_100%,#3b82f6_0%,transparent_60%)]" />
-              <div className="relative">
-                <h2 className="font-display text-3xl sm:text-5xl font-semibold text-white">Ready to build?</h2>
-                <p className="mx-auto mt-3 max-w-md text-zinc-300">Free to start. Bring your own model key.</p>
-                <button type="button" onClick={() => focusComposer()} className="mt-8 inline-flex h-11 items-center gap-2 rounded-full bg-white px-6 text-sm font-semibold text-zinc-950 hover:bg-zinc-100 transition-colors cursor-pointer">
-                  Start building <ArrowRight className="h-4 w-4" aria-hidden="true" />
-                </button>
+          <section className="mx-auto max-w-6xl px-4 sm:px-6 py-16">
+            <div className="mist-mesh mist-grain relative overflow-hidden rounded-[24px] px-6 py-14 sm:px-12 sm:py-16">
+              <div className="relative z-10 flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h2 className="font-display text-3xl sm:text-5xl font-semibold text-zinc-950">Your next site is one sentence away.</h2>
+                  <p className="mt-3 max-w-md text-zinc-900/75">Free to start. Bring your own model key. Keep the code.</p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <button type="button" onClick={onOpenAccount} className="inline-flex h-11 items-center gap-2 rounded-lg bg-zinc-950 px-5 text-sm font-semibold text-white hover:bg-zinc-800 transition-colors cursor-pointer">Create free account <ArrowRight className="h-4 w-4" aria-hidden="true" /></button>
+                  <button type="button" onClick={() => focusComposer()} className="inline-flex h-11 items-center rounded-lg bg-white/70 px-5 text-sm font-semibold text-zinc-950 hover:bg-white transition-colors cursor-pointer">Try the prompt</button>
+                </div>
               </div>
             </div>
           </section>
         </main>
 
-        <footer className="border-t border-zinc-200/70 py-8 dark:border-zinc-800/70">
-          <div className="mx-auto flex max-w-7xl flex-col sm:flex-row items-center justify-between gap-3 px-4 sm:px-6 text-sm text-zinc-500">
+        <footer className="border-t border-zinc-900/[0.07] py-8 dark:border-white/[0.07]">
+          <div className="mx-auto flex max-w-6xl flex-col sm:flex-row items-center justify-between gap-3 px-4 sm:px-6 text-sm text-zinc-500">
             <MistLogo size="sm" />
-            <span>Ideas into websites.</span>
+            <span className="font-mono text-xs">ideas → websites</span>
           </div>
         </footer>
       </div>
@@ -1094,61 +1131,41 @@ export default function HomeView({
     { icon: Settings, label: 'Settings', onClick: onOpenSettings },
   ];
   const recent = [...projects].slice(0, 6);
+  const hour = new Date().getHours();
+  const greeting = hour < 5 ? 'Up late' : hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const todayLabel = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+  const publishedCount = projects.filter((p) => p.isPublished).length;
 
   return (
-    <div className="mist-ambient-canvas min-h-screen text-[#09090B] dark:text-[#FAFAFA] lg:flex">
-      {/* Sidebar */}
-      <aside className="hidden lg:flex sticky top-0 h-screen w-64 shrink-0 flex-col gap-1 border-r border-zinc-200/70 px-3 py-4 dark:border-zinc-800/70">
-        <div className="px-2 pb-5"><MistLogo size="md" /></div>
-        {navItems.map(({ icon: Icon, label, onClick }) => (
-          <button key={label} type="button" onClick={onClick} className="flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-900/5 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/10 dark:hover:text-white transition-colors cursor-pointer">
-            <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-            {label}
-          </button>
-        ))}
-        <p className="mt-6 px-3 pb-1 text-xs font-medium text-zinc-500">Recent</p>
-        <div className="flex-1 overflow-y-auto mist-scrollbar">
-          {recent.length === 0 ? (
-            <p className="px-3 text-xs text-zinc-500">Your projects will show up here.</p>
-          ) : (
-            recent.map((p) => (
-              <button key={p.id} type="button" onClick={() => onOpenProject(p)} className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-900/5 dark:text-zinc-300 dark:hover:bg-white/10 transition-colors cursor-pointer">
-                <span className={`h-5 w-5 shrink-0 rounded-md bg-gradient-to-br ${thumbGradient(p.id)}`} />
-                <span className="truncate">{p.name}</span>
-              </button>
-            ))
-          )}
-        </div>
-        <div className="flex items-center gap-1 border-t border-zinc-200/70 pt-3 dark:border-zinc-800/70">
-          <button type="button" onClick={onOpenAccount} className="flex flex-1 min-w-0 items-center gap-2.5 rounded-xl px-2 py-2 text-left hover:bg-zinc-900/5 dark:hover:bg-white/10 transition-colors cursor-pointer">
-            {user.photoURL ? (
-              <img src={user.photoURL} alt="" className="h-7 w-7 rounded-full" referrerPolicy="no-referrer" />
-            ) : (
-              <span className="flex h-7 w-7 items-center justify-center rounded-full mist-primary-gradient text-xs font-semibold text-white">{firstName.charAt(0).toUpperCase()}</span>
-            )}
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium">{user.displayName || firstName}</span>
-              <span className="block truncate text-[11px] text-zinc-500">{user.email}</span>
-            </span>
-          </button>
-          {themeButton}
-        </div>
-      </aside>
-
-      {/* Mobile top bar */}
-      <header className="mist-header lg:hidden sticky top-0 z-30">
-        <div className="flex h-14 items-center justify-between px-4">
+    <div className="mist-ambient-canvas min-h-screen text-[#121214] dark:text-[#F4F4F5] overflow-x-hidden">
+      {/* Top bar */}
+      <header className="sticky top-0 z-30 border-b border-zinc-900/[0.06] bg-[var(--mist-canvas)]/80 backdrop-blur-xl dark:border-white/[0.06]">
+        <div className="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4 sm:px-6">
           <MistLogo size="md" />
-          <div className="flex items-center gap-1">
+          <nav aria-label="Studio" className="mx-auto hidden md:flex items-center gap-0.5 rounded-xl bg-zinc-900/[0.04] p-1 dark:bg-white/[0.05]">
+            {navItems.map(({ icon: Icon, label, onClick }) => (
+              <button key={label} type="button" onClick={onClick} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium text-zinc-600 hover:bg-white hover:text-zinc-950 hover:shadow-sm dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white transition-all cursor-pointer">
+                <Icon className="h-3.5 w-3.5" aria-hidden="true" />{label}
+              </button>
+            ))}
+          </nav>
+          <div className="ml-auto md:ml-0 flex items-center gap-1">
             {themeButton}
-            <button type="button" aria-expanded={mobileMenuOpen} aria-label="Toggle menu" onClick={() => setMobileMenuOpen((v) => !v)} className="inline-flex h-9 w-9 items-center justify-center rounded-full hover:bg-zinc-900/5 dark:hover:bg-white/10 cursor-pointer">
+            <button type="button" aria-expanded={mobileMenuOpen} aria-label="Toggle menu" onClick={() => setMobileMenuOpen((v) => !v)} className="md:hidden inline-flex h-9 w-9 items-center justify-center rounded-full hover:bg-zinc-900/5 dark:hover:bg-white/10 cursor-pointer">
               {mobileMenuOpen ? <X className="h-4 w-4" aria-hidden="true" /> : <Menu className="h-4 w-4" aria-hidden="true" />}
+            </button>
+            <button type="button" onClick={onOpenAccount} aria-label="Account" title={user.email || 'Account'} className="rounded-full p-0.5 ring-1 ring-zinc-900/10 hover:ring-zinc-900/30 dark:ring-white/15 dark:hover:ring-white/40 transition cursor-pointer">
+              {user.photoURL ? (
+                <img src={user.photoURL} alt="" className="h-7 w-7 rounded-full" referrerPolicy="no-referrer" />
+              ) : (
+                <span className="flex h-7 w-7 items-center justify-center rounded-full mist-primary-gradient text-xs font-semibold text-white">{firstName.charAt(0).toUpperCase()}</span>
+              )}
             </button>
           </div>
         </div>
         <AnimatePresence initial={false}>
           {mobileMenuOpen && (
-            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="md:hidden overflow-hidden">
               <div className="grid grid-cols-2 gap-2 p-3">
                 {[...navItems, { icon: UserIcon, label: 'Account', onClick: onOpenAccount }].map(({ icon: Icon, label, onClick }) => (
                   <button key={label} type="button" onClick={() => { setMobileMenuOpen(false); onClick(); }} className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-white/80 px-3 text-sm font-medium dark:border-zinc-800 dark:bg-zinc-900 cursor-pointer">
@@ -1161,18 +1178,43 @@ export default function HomeView({
         </AnimatePresence>
       </header>
 
-      <main id="top" className="flex-1 min-w-0 lg:p-2">
-        <div className="min-h-full overflow-hidden lg:rounded-[1.75rem] lg:border lg:border-zinc-200/70 bg-[#fcfbf8] dark:bg-[#0f0f11] lg:dark:border-zinc-800/70">
-          <section className="mist-hero-aurora mx-auto max-w-4xl px-4 sm:px-6 pt-12 pb-16 sm:pt-20 sm:pb-24">
-            <motion.h1 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="text-center font-display text-[34px] sm:text-5xl font-semibold leading-[1.05] text-zinc-950 dark:text-white [text-wrap:balance]">
-              What will you build, {firstName}?
-            </motion.h1>
-            <div className="mt-8">{composerBlock}</div>
-            <div className="mt-4 text-center">
-              <button type="button" onClick={() => setShowLoggedInTour((v) => !v)} className="text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-white underline-offset-4 hover:underline cursor-pointer">
+      <main id="top">
+        <div>
+          <section className="mist-hero-aurora mx-auto grid max-w-6xl gap-8 px-4 sm:px-6 pt-10 pb-14 sm:pt-14 lg:grid-cols-[1fr_280px]">
+            <div className="min-w-0">
+              <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">{todayLabel}</p>
+              <motion.h1 initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-2 font-display text-3xl sm:text-[44px] font-semibold leading-tight text-zinc-950 dark:text-white">
+                {greeting}, <span className="mist-gradient-text">{firstName}</span>.
+              </motion.h1>
+              <p className="mt-1 text-zinc-500">What are we making today?</p>
+              <div className="mt-6">{composerBlock}</div>
+              <button type="button" onClick={() => setShowLoggedInTour((v) => !v)} className="mt-3 text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-white underline-offset-4 hover:underline cursor-pointer">
                 {showLoggedInTour ? 'Hide walkthrough' : 'How Mist works'}
               </button>
             </div>
+            <aside className="hidden lg:flex flex-col gap-3 pt-14">
+              <div className="mist-surface-card rounded-2xl p-4">
+                <p className="text-xs font-medium text-zinc-500">Your studio</p>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <div className="rounded-xl bg-zinc-900/[0.03] p-3 dark:bg-white/[0.04]"><p className="font-display text-2xl font-semibold">{projects.length}</p><p className="text-[11px] text-zinc-500">projects</p></div>
+                  <div className="rounded-xl bg-zinc-900/[0.03] p-3 dark:bg-white/[0.04]"><p className="font-display text-2xl font-semibold">{publishedCount}</p><p className="text-[11px] text-zinc-500">published</p></div>
+                </div>
+              </div>
+              <div className="mist-surface-card rounded-2xl p-2">
+                <p className="px-2 pt-2 pb-1 text-xs font-medium text-zinc-500">Jump back in</p>
+                {recent.length === 0 ? (
+                  <p className="px-2 pb-2 text-xs text-zinc-500">Your projects will show up here.</p>
+                ) : (
+                  recent.slice(0, 4).map((p) => (
+                    <button key={p.id} type="button" onClick={() => onOpenProject(p)} className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm hover:bg-zinc-900/5 dark:hover:bg-white/10 transition-colors cursor-pointer">
+                      <span className={`h-6 w-6 shrink-0 rounded-md bg-gradient-to-br ${thumbGradient(p.id)}`} />
+                      <span className="truncate">{p.name}</span>
+                      <ArrowRight className="ml-auto h-3.5 w-3.5 shrink-0 text-zinc-400" aria-hidden="true" />
+                    </button>
+                  ))
+                )}
+              </div>
+            </aside>
           </section>
 
           {showLoggedInTour && renderShowcaseWalkthrough()}

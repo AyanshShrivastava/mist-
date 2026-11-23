@@ -146,6 +146,34 @@ export function validateRenderServiceName(rawName: unknown): string {
   return cleaned;
 }
 
+const REPO_ACCESS_ERROR_RE = /repository not found|access denied|not have permission|unable to access|repo/i;
+const CONFLICT_ERROR_RE = /already exists|taken/i;
+
+function validateServiceId(serviceId: unknown): string {
+  if (typeof serviceId !== 'string' || !serviceId.trim()) {
+    throw new SecurityValidationError(400, 'Service ID is required.');
+  }
+  return serviceId.trim();
+}
+
+/**
+ * Helper to normalize a single owner entry from Render API responses.
+ */
+function normalizeOwnerItem(item: unknown): RenderOwner | null {
+  if (!item || typeof item !== 'object') return null;
+  const o = (item as any).owner || item;
+  if (!o || typeof o !== 'object') return null;
+  const id = typeof o.id === 'string' ? o.id.trim() : '';
+  const name = typeof o.name === 'string' ? o.name.trim() : '';
+  if (!id || !name) return null;
+  return {
+    id,
+    name,
+    email: typeof o.email === 'string' ? o.email.trim() : undefined,
+    type: o.type === 'team' ? 'team' : 'user',
+  };
+}
+
 /**
  * Helper to normalize owners from Render API responses.
  * Render /v1/owners returns an array of items where each item is either
@@ -154,21 +182,154 @@ export function validateRenderServiceName(rawName: unknown): string {
 function parseOwnersResponse(raw: unknown): RenderOwner[] {
   if (!Array.isArray(raw)) return [];
   const list: RenderOwner[] = [];
-
   for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const o = (item as any).owner || item;
-    if (o && typeof o.id === 'string' && typeof o.name === 'string') {
-      list.push({
-        id: String(o.id).trim(),
-        name: String(o.name).trim(),
-        email: typeof o.email === 'string' ? o.email.trim() : undefined,
-        type: o.type === 'team' ? 'team' : 'user',
-      });
-    }
+    const owner = normalizeOwnerItem(item);
+    if (owner) list.push(owner);
+  }
+  return list;
+}
+
+/**
+ * Handles fetch network or abort errors for Render API calls.
+ */
+function handleRenderFetchError(err: any, actionLabel: string): never {
+  if (err?.name === 'AbortError') {
+    throw new SecurityValidationError(499, `Render ${actionLabel} request was canceled.`, 'REQUEST_CANCELED');
+  }
+  throw new SecurityValidationError(
+    502,
+    `Unable to reach Render API: ${sanitizeErrorMessage(err)}`,
+    'RENDER_NETWORK_ERROR',
+  );
+}
+
+/**
+ * Extracts error text from a Render API response safely.
+ */
+async function extractRenderErrorMessage(response: Response): Promise<string> {
+  try {
+    const errJson = await response.json();
+    return (errJson as any)?.message || JSON.stringify(errJson);
+  } catch {
+    return response.statusText;
+  }
+}
+
+/**
+ * Checks for known Render error patterns like repo access or service name collisions.
+ */
+function checkSpecificRenderErrors(
+  errorDetail: string,
+  context?: { repoUrl?: string; serviceName?: string },
+): void {
+  if (context?.repoUrl && REPO_ACCESS_ERROR_RE.test(errorDetail)) {
+    throw new SecurityValidationError(
+      400,
+      `Render could not access the GitHub repository "${context.repoUrl}". If the repository is private, please ensure the Render GitHub App (https://github.com/apps/render/installations/new) is installed and granted access to this repository in your Render account.`,
+      'GITHUB_REPO_UNAVAILABLE',
+    );
   }
 
-  return list;
+  if (context?.serviceName && CONFLICT_ERROR_RE.test(errorDetail)) {
+    throw new SecurityValidationError(
+      400,
+      `A Render service named "${context.serviceName}" already exists in your workspace. Please choose a different service name.`,
+      'SERVICE_NAME_CONFLICT',
+    );
+  }
+}
+
+/**
+ * Handles non-OK HTTP responses from the Render API.
+ */
+async function handleRenderHttpError(
+  response: Response,
+  actionLabel: string,
+  context?: { repoUrl?: string; serviceName?: string },
+): Promise<never> {
+  const status = response.status;
+  if (status === 401 || status === 403) {
+    throw new SecurityValidationError(
+      401,
+      'Invalid, expired, or unauthorized Render API key. Please generate a new API key from your Render account settings.',
+      'RENDER_AUTH_FAILED',
+    );
+  }
+
+  if (status === 429) {
+    const retryAfter = response.headers.get('retry-after') || '60';
+    throw new SecurityValidationError(
+      429,
+      `Render API rate limit exceeded. Please wait ${retryAfter}s and try again.`,
+      'RENDER_RATE_LIMITED',
+    );
+  }
+
+  const errorDetail = await extractRenderErrorMessage(response);
+  checkSpecificRenderErrors(errorDetail, context);
+
+  const code = actionLabel === 'service creation' ? 'RENDER_SERVICE_CREATION_FAILED' : 'RENDER_API_ERROR';
+  throw new SecurityValidationError(
+    status,
+    `Render API ${actionLabel} error (${status}): ${errorDetail}`,
+    code,
+  );
+}
+
+function resolveServiceUrl(service: any, defaultName: string): string {
+  const detailsUrl = service.serviceDetails && service.serviceDetails.url;
+  if (detailsUrl) return detailsUrl;
+  if (service.url) return service.url;
+  return `https://${defaultName}.onrender.com`;
+}
+
+/**
+ * Maps raw Render API service payload to RenderServiceSummary.
+ */
+function parseRenderServiceSummary(
+  data: any,
+  fallback: { name: string; ownerId: string; repo: string; branch?: string },
+): RenderServiceSummary {
+  const service = data?.service || data || {};
+  const serviceId = service.id || 'unknown';
+  const name = service.name || fallback.name;
+  const serviceUrl = resolveServiceUrl(service, name);
+
+  return {
+    id: serviceId,
+    name,
+    ownerId: service.ownerId || fallback.ownerId,
+    repo: service.repo || fallback.repo,
+    branch: service.branch || fallback.branch || 'main',
+    url: serviceUrl,
+    dashboardUrl: `https://dashboard.render.com/static/${serviceId}`,
+    status: service.status || 'created',
+    createdAt: service.createdAt || new Date().toISOString(),
+    updatedAt: service.updatedAt || new Date().toISOString(),
+    serviceDetails: service.serviceDetails,
+  };
+}
+
+/**
+ * Builds static site service creation payload.
+ */
+function buildRenderStaticSitePayload(
+  params: RenderCreateStaticSiteParams,
+  validatedName: string,
+  repoUrl: string,
+) {
+  return {
+    type: 'static_site',
+    name: validatedName,
+    ownerId: params.ownerId.trim(),
+    repo: repoUrl,
+    branch: (params.branch || 'main').trim(),
+    autoDeployTrigger: params.autoDeploy || 'commit',
+    serviceDetails: {
+      buildCommand: (params.buildCommand || 'npm run build').trim(),
+      publishPath: (params.publishPath || 'dist').trim(),
+    },
+  };
 }
 
 /**
@@ -192,46 +353,11 @@ export async function verifyRenderApiKey(
       signal: options?.signal,
     });
   } catch (err: any) {
-    if (err.name === 'AbortError') {
-      throw new SecurityValidationError(499, 'Render verification request was canceled.', 'REQUEST_CANCELED');
-    }
-    throw new SecurityValidationError(
-      502,
-      `Unable to reach Render API: ${sanitizeErrorMessage(err)}`,
-      'RENDER_NETWORK_ERROR',
-    );
-  }
-
-  if (response.status === 401 || response.status === 403) {
-    throw new SecurityValidationError(
-      401,
-      'Invalid, expired, or unauthorized Render API key. Please generate a new API key from your Render account settings.',
-      'RENDER_AUTH_FAILED',
-    );
-  }
-
-  if (response.status === 429) {
-    const retryAfter = response.headers.get('retry-after') || '60';
-    throw new SecurityValidationError(
-      429,
-      `Render API rate limit exceeded. Please wait ${retryAfter}s and try again.`,
-      'RENDER_RATE_LIMITED',
-    );
+    handleRenderFetchError(err, 'verification');
   }
 
   if (!response.ok) {
-    let errorDetail = '';
-    try {
-      const errJson = await response.json();
-      errorDetail = (errJson as any)?.message || JSON.stringify(errJson);
-    } catch {
-      errorDetail = response.statusText;
-    }
-    throw new SecurityValidationError(
-      response.status,
-      `Render API verification error (${response.status}): ${errorDetail}`,
-      'RENDER_API_ERROR',
-    );
+    await handleRenderHttpError(response, 'verification');
   }
 
   const rawJson = await response.json();
@@ -268,18 +394,7 @@ export async function createRenderStaticSite(
     throw new SecurityValidationError(400, 'Render ownerId / workspace ID is required.', 'INVALID_OWNER_ID');
   }
 
-  const requestBody = {
-    type: 'static_site',
-    name: validatedName,
-    ownerId: params.ownerId.trim(),
-    repo: validatedRepo.url,
-    branch: (params.branch || 'main').trim(),
-    autoDeployTrigger: params.autoDeploy || 'commit',
-    serviceDetails: {
-      buildCommand: (params.buildCommand || 'npm run build').trim(),
-      publishPath: (params.publishPath || 'dist').trim(),
-    },
-  };
+  const requestBody = buildRenderStaticSitePayload(params, validatedName, validatedRepo.url);
 
   let response: Response;
   try {
@@ -294,93 +409,23 @@ export async function createRenderStaticSite(
       signal: options?.signal,
     });
   } catch (err: any) {
-    if (err.name === 'AbortError') {
-      throw new SecurityValidationError(499, 'Render deploy request was canceled.', 'REQUEST_CANCELED');
-    }
-    throw new SecurityValidationError(
-      502,
-      `Unable to reach Render API: ${sanitizeErrorMessage(err)}`,
-      'RENDER_NETWORK_ERROR',
-    );
-  }
-
-  if (response.status === 401 || response.status === 403) {
-    throw new SecurityValidationError(
-      401,
-      'Render API key is invalid or revoked.',
-      'RENDER_AUTH_FAILED',
-    );
-  }
-
-  if (response.status === 429) {
-    throw new SecurityValidationError(
-      429,
-      'Render API rate limit exceeded. Please try again shortly.',
-      'RENDER_RATE_LIMITED',
-    );
+    handleRenderFetchError(err, 'deploy');
   }
 
   if (!response.ok) {
-    let errorMsg = '';
-    try {
-      const errJson = await response.json();
-      errorMsg = (errJson as any)?.message || JSON.stringify(errJson);
-    } catch {
-      errorMsg = response.statusText;
-    }
-
-    // Identify GitHub permission / access issues
-    const lower = errorMsg.toLowerCase();
-    if (
-      lower.includes('repository not found') ||
-      lower.includes('access denied') ||
-      lower.includes('not have permission') ||
-      lower.includes('unable to access') ||
-      lower.includes('repo')
-    ) {
-      throw new SecurityValidationError(
-        400,
-        `Render could not access the GitHub repository "${validatedRepo.url}". If the repository is private, please ensure the Render GitHub App (https://github.com/apps/render/installations/new) is installed and granted access to this repository in your Render account.`,
-        'GITHUB_REPO_UNAVAILABLE',
-      );
-    }
-
-    if (lower.includes('already exists') || lower.includes('taken')) {
-      throw new SecurityValidationError(
-        400,
-        `A Render service named "${validatedName}" already exists in your workspace. Please choose a different service name.`,
-        'SERVICE_NAME_CONFLICT',
-      );
-    }
-
-    throw new SecurityValidationError(
-      response.status,
-      `Failed to create Render static site: ${errorMsg}`,
-      'RENDER_SERVICE_CREATION_FAILED',
-    );
+    await handleRenderHttpError(response, 'service creation', {
+      repoUrl: validatedRepo.url,
+      serviceName: validatedName,
+    });
   }
 
-  const s = (await response.json()) as any;
-  const service = s.service || s;
-  const serviceId = service.id || 'unknown';
-  const serviceUrl =
-    service.serviceDetails?.url ||
-    service.url ||
-    `https://${validatedName}.onrender.com`;
-
-  return {
-    id: serviceId,
-    name: service.name || validatedName,
-    ownerId: service.ownerId || params.ownerId,
-    repo: service.repo || validatedRepo.url,
-    branch: service.branch || params.branch || 'main',
-    url: serviceUrl,
-    dashboardUrl: `https://dashboard.render.com/static/${serviceId}`,
-    status: service.status || 'created',
-    createdAt: service.createdAt || new Date().toISOString(),
-    updatedAt: service.updatedAt || new Date().toISOString(),
-    serviceDetails: service.serviceDetails,
-  };
+  const rawData = await response.json();
+  return parseRenderServiceSummary(rawData, {
+    name: validatedName,
+    ownerId: params.ownerId,
+    repo: validatedRepo.url,
+    branch: params.branch,
+  });
 }
 
 /**
@@ -393,10 +438,7 @@ export async function getRenderService(
 ): Promise<RenderServiceSummary> {
   const fetchFn = options?.fetchImpl || globalThis.fetch;
   const validatedKey = validateRenderApiKey(apiKey);
-  const cleanId = (serviceId || '').trim();
-  if (!cleanId) {
-    throw new SecurityValidationError(400, 'Service ID is required.');
-  }
+  const cleanId = validateServiceId(serviceId);
 
   const response = await fetchFn(`${RENDER_API_BASE}/services/${cleanId}`, {
     method: 'GET',
@@ -416,20 +458,11 @@ export async function getRenderService(
   }
 
   const s = (await response.json()) as any;
-  const service = s.service || s;
-  return {
-    id: service.id,
-    name: service.name,
-    ownerId: service.ownerId,
-    repo: service.repo,
-    branch: service.branch,
-    url: service.serviceDetails?.url || service.url || `https://${service.name}.onrender.com`,
-    dashboardUrl: `https://dashboard.render.com/static/${service.id}`,
-    status: service.status,
-    createdAt: service.createdAt,
-    updatedAt: service.updatedAt,
-    serviceDetails: service.serviceDetails,
-  };
+  return parseRenderServiceSummary(s, {
+    name: 'unknown',
+    ownerId: '',
+    repo: '',
+  });
 }
 
 /**
@@ -442,10 +475,7 @@ export async function getRenderLatestDeploy(
 ): Promise<RenderDeploySummary | null> {
   const fetchFn = options?.fetchImpl || globalThis.fetch;
   const validatedKey = validateRenderApiKey(apiKey);
-  const cleanId = (serviceId || '').trim();
-  if (!cleanId) {
-    throw new SecurityValidationError(400, 'Service ID is required.');
-  }
+  const cleanId = validateServiceId(serviceId);
 
   const response = await fetchFn(`${RENDER_API_BASE}/services/${cleanId}/deploys?limit=1`, {
     method: 'GET',
@@ -482,10 +512,7 @@ export async function triggerRenderDeploy(
 ): Promise<{ id: string; status: string }> {
   const fetchFn = options?.fetchImpl || globalThis.fetch;
   const validatedKey = validateRenderApiKey(apiKey);
-  const cleanId = (serviceId || '').trim();
-  if (!cleanId) {
-    throw new SecurityValidationError(400, 'Service ID is required.');
-  }
+  const cleanId = validateServiceId(serviceId);
 
   const response = await fetchFn(`${RENDER_API_BASE}/services/${cleanId}/deploys`, {
     method: 'POST',
@@ -510,6 +537,15 @@ export async function triggerRenderDeploy(
     id: dep.id,
     status: dep.status || 'created',
   };
+}
+
+function parseRenderServiceItem(item: any): RenderServiceSummary {
+  return parseRenderServiceSummary(item, {
+    name: 'unknown',
+    ownerId: '',
+    repo: '',
+    branch: 'main',
+  });
 }
 
 /**
@@ -543,21 +579,5 @@ export async function listRenderStaticSites(
 
   const data = (await response.json()) as any;
   const services = Array.isArray(data) ? data : data.services || [];
-
-  return services.map((s: any) => {
-    const item = s.service || s;
-    return {
-      id: item.id,
-      name: item.name,
-      ownerId: item.ownerId,
-      repo: item.repo,
-      branch: item.branch,
-      url: item.serviceDetails?.url || item.url || `https://${item.name}.onrender.com`,
-      dashboardUrl: `https://dashboard.render.com/static/${item.id}`,
-      status: item.status,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-      serviceDetails: item.serviceDetails,
-    };
-  });
+  return services.map(parseRenderServiceItem);
 }

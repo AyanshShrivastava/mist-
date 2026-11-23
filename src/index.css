@@ -23,132 +23,153 @@
   }
 }
 
-/* ---------- Mist design system: calm surfaces + vivid aurora gradients ---------- */
-:root {
-  --mist-aurora-1: #3b82f6; /* blue */
-  --mist-aurora-2: #8b5cf6; /* violet */
-  --mist-aurora-3: #ec4899; /* pink */
-  --mist-aurora-4: #fb7185; /* rose */
-  --mist-aurora-5: #f97316; /* orange */
+/* ---------- Mist design system: calm surfaces + slowly shifting "mist" gradients ----------
+   Every gradient reads from --mist-c1..c5. Those colours are built from one animated hue
+   (--mist-hue), so all gradients across the app drift through the colour wheel together,
+   very slowly (one full cycle every 90s). */
+@property --mist-hue {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
 }
 
-h1, h2 { letter-spacing: -0.035em; }
+:root {
+  --mist-hue: 0;
+  --mist-c1: oklch(0.72 0.15 calc(var(--mist-hue) + 195)); /* teal */
+  --mist-c2: oklch(0.68 0.17 calc(var(--mist-hue) + 250)); /* periwinkle */
+  --mist-c3: oklch(0.70 0.18 calc(var(--mist-hue) + 310)); /* orchid */
+  --mist-c4: oklch(0.76 0.15 calc(var(--mist-hue) + 20));  /* coral */
+  --mist-c5: oklch(0.84 0.14 calc(var(--mist-hue) + 75));  /* amber */
+  /* legacy names still used by components */
+  --mist-aurora-1: var(--mist-c1);
+  --mist-aurora-2: var(--mist-c2);
+  --mist-aurora-3: var(--mist-c3);
+  --mist-aurora-4: var(--mist-c4);
+  --mist-aurora-5: var(--mist-c5);
+  --mist-canvas: #f7f6f2;
+  --mist-ink: #121214;
+  animation: mistHueCycle 90s linear infinite;
+}
+.dark {
+  --mist-canvas: #09090b;
+  --mist-ink: #f4f4f5;
+}
+
+@keyframes mistHueCycle {
+  from { --mist-hue: 0; }
+  to { --mist-hue: 360; }
+}
+
+h1, h2 { letter-spacing: -0.04em; }
 
 .mist-ambient-canvas {
-  background-color: #fcfbf8;
+  background-color: var(--mist-canvas);
   transition: background-color 0.3s ease, color 0.25s ease;
 }
-.dark .mist-ambient-canvas { background-color: #0b0b0d; }
 
-/* Lovable-style aurora that sits behind the hero + composer */
-.mist-hero-aurora {
-  position: relative;
-  isolation: isolate;
+/* Fine film grain so large gradients never band */
+.mist-grain { position: relative; }
+.mist-grain::after {
+  content: "";
+  position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  opacity: 0.18; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.6'/%3E%3C/svg%3E");
 }
-.mist-hero-aurora::before {
+
+/* Drifting fog blobs: three soft orbs that slowly orbit behind a section */
+.mist-hero-aurora { position: relative; isolation: isolate; }
+.mist-hero-aurora::before,
+.mist-hero-aurora::after {
   content: "";
   position: absolute;
-  inset: -40px -10vw 0 -10vw;
   z-index: -1;
   pointer-events: none;
-  background:
-    radial-gradient(60% 50% at 50% 100%, rgba(236, 72, 153, 0.55), transparent 70%),
-    radial-gradient(45% 45% at 15% 85%, rgba(249, 115, 22, 0.35), transparent 70%),
-    radial-gradient(45% 45% at 85% 85%, rgba(244, 63, 94, 0.40), transparent 70%),
-    radial-gradient(70% 40% at 50% 62%, rgba(59, 130, 246, 0.55), transparent 72%),
-    radial-gradient(50% 35% at 50% 45%, rgba(139, 92, 246, 0.30), transparent 70%);
-  filter: blur(30px) saturate(130%);
-  mask-image: radial-gradient(70% 75% at 50% 60%, #000 40%, transparent 100%);
-  animation: mistAuroraDrift 18s ease-in-out infinite alternate;
+  border-radius: 9999px;
+  filter: blur(70px);
+  opacity: 0.55;
 }
-.dark .mist-hero-aurora::before {
-  background:
-    radial-gradient(60% 50% at 50% 100%, rgba(236, 72, 153, 0.65), transparent 70%),
-    radial-gradient(45% 45% at 12% 85%, rgba(249, 115, 22, 0.40), transparent 70%),
-    radial-gradient(45% 45% at 88% 85%, rgba(244, 63, 94, 0.50), transparent 70%),
-    radial-gradient(70% 40% at 50% 58%, rgba(59, 130, 246, 0.60), transparent 72%),
-    radial-gradient(50% 35% at 50% 40%, rgba(139, 92, 246, 0.40), transparent 70%);
+.mist-hero-aurora::before {
+  width: 520px; height: 520px; top: -120px; right: -80px;
+  background: radial-gradient(circle at 30% 30%, var(--mist-c3), transparent 65%),
+              radial-gradient(circle at 70% 70%, var(--mist-c1), transparent 60%);
+  animation: mistOrbA 26s ease-in-out infinite alternate;
 }
-@keyframes mistAuroraDrift {
-  0% { transform: translate3d(0, 0, 0) scale(1); }
-  100% { transform: translate3d(0, -12px, 0) scale(1.04); }
+.mist-hero-aurora::after {
+  width: 440px; height: 440px; bottom: -140px; left: -100px;
+  background: radial-gradient(circle at 60% 40%, var(--mist-c4), transparent 62%),
+              radial-gradient(circle at 30% 70%, var(--mist-c5), transparent 60%);
+  animation: mistOrbB 32s ease-in-out infinite alternate;
+}
+.dark .mist-hero-aurora::before, .dark .mist-hero-aurora::after { opacity: 0.4; }
+@keyframes mistOrbA { to { transform: translate3d(-90px, 60px, 0) scale(1.15); } }
+@keyframes mistOrbB { to { transform: translate3d(110px, -50px, 0) scale(0.9); } }
+
+/* Animated mesh used for preview frames, CTA band and project thumbnails */
+.mist-mesh {
+  background:
+    radial-gradient(60% 80% at 0% 0%, var(--mist-c1), transparent 60%),
+    radial-gradient(60% 80% at 100% 0%, var(--mist-c3), transparent 60%),
+    radial-gradient(70% 90% at 100% 100%, var(--mist-c4), transparent 60%),
+    radial-gradient(70% 90% at 0% 100%, var(--mist-c2), transparent 60%),
+    var(--mist-c5);
+}
+
+.mist-gradient-text {
+  background-image: linear-gradient(100deg, var(--mist-c1), var(--mist-c2) 30%, var(--mist-c3) 60%, var(--mist-c4) 85%, var(--mist-c5));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .mist-composer-shell {
   background: #ffffff;
-  border-radius: 28px !important;
+  border-radius: 20px !important;
   box-shadow:
-    0 30px 60px -30px rgba(76, 29, 149, 0.35),
-    0 8px 24px -12px rgba(15, 23, 42, 0.12),
-    0 0 0 1px rgba(15, 23, 42, 0.04);
+    0 1px 0 rgba(255,255,255,0.8) inset,
+    0 24px 48px -28px color-mix(in oklab, var(--mist-c2) 70%, transparent),
+    0 0 0 1px rgba(18, 18, 20, 0.07);
 }
 .dark .mist-composer-shell {
-  background: #141416;
+  background: #121215;
   box-shadow:
-    0 30px 70px -25px rgba(0, 0, 0, 0.9),
-    0 0 0 1px rgba(255, 255, 255, 0.06);
-}
-
-.mist-header {
-  border-bottom: 1px solid rgba(24, 24, 27, 0.06);
-  background: rgba(252, 251, 248, 0.86);
-  backdrop-filter: blur(18px) saturate(145%);
-}
-.dark .mist-header {
-  border-bottom-color: rgba(255, 255, 255, 0.06);
-  background: rgba(11, 11, 13, 0.82);
-}
-
-.mist-mode-card {
-  min-height: 82px;
-  background: rgba(255, 255, 255, 0.74);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 1px 1px rgba(24, 24, 27, 0.02);
-}
-.dark .mist-mode-card {
-  background: rgba(24, 24, 27, 0.72);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-}
-
-.mist-project-card {
-  background: rgba(255, 255, 255, 0.82);
-  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.04), 0 18px 50px -32px rgba(24, 24, 27, 0.34);
-}
-.dark .mist-project-card {
-  background: rgba(24, 24, 27, 0.78);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 24px 60px -38px rgba(0, 0, 0, 0.9);
+    0 24px 60px -30px color-mix(in oklab, var(--mist-c3) 55%, transparent),
+    0 0 0 1px rgba(255, 255, 255, 0.07);
 }
 
 .mist-surface-card {
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 12px 32px -18px rgba(15, 23, 42, 0.18);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 0 1px rgba(18, 18, 20, 0.06), 0 10px 28px -20px rgba(18, 18, 20, 0.25);
 }
 .dark .mist-surface-card {
-  background: #131315;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 16px 40px -20px rgba(0, 0, 0, 0.8);
+  background: #111113;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 16px 40px -24px rgba(0, 0, 0, 0.9);
 }
 
-/* Primary action: Lovable-like warm-to-cool gradient */
+/* Primary action: gradient that also follows the slow hue cycle */
 .mist-primary-gradient {
-  background-image: linear-gradient(120deg, var(--mist-aurora-1) 0%, var(--mist-aurora-2) 35%, var(--mist-aurora-3) 70%, var(--mist-aurora-5) 100%);
-  background-size: 160% 100%;
+  background-image: linear-gradient(110deg, var(--mist-c2) 0%, var(--mist-c3) 45%, var(--mist-c4) 100%);
+  background-size: 180% 100%;
   background-position: 0% 50%;
-  box-shadow: 0 10px 24px -12px rgba(236, 72, 153, 0.6);
-  transition: background-position 0.5s ease, box-shadow 0.3s ease, transform 0.15s ease;
+  color: #fff;
+  box-shadow: 0 8px 22px -12px color-mix(in oklab, var(--mist-c3) 80%, transparent);
+  transition: background-position 0.6s ease, box-shadow 0.3s ease, transform 0.15s ease;
 }
-.mist-primary-gradient:hover {
-  background-position: 100% 50%;
-  box-shadow: 0 14px 30px -12px rgba(139, 92, 246, 0.7);
-}
+.mist-primary-gradient:hover { background-position: 100% 50%; }
+.mist-primary-gradient:active { transform: scale(0.98); }
 
 /* Gradient hairline border for highlighted cards */
 .mist-gradient-border {
   border: 1px solid transparent !important;
   background:
     linear-gradient(var(--mist-card-bg, #fff), var(--mist-card-bg, #fff)) padding-box,
-    linear-gradient(120deg, var(--mist-aurora-1), var(--mist-aurora-3), var(--mist-aurora-5)) border-box;
+    linear-gradient(120deg, var(--mist-c1), var(--mist-c3), var(--mist-c5)) border-box;
 }
-.dark .mist-gradient-border { --mist-card-bg: #141416; }
+.dark .mist-gradient-border { --mist-card-bg: #131316; }
+
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--mist-c2) 85%, transparent);
+  outline-offset: 2px;
+}
 
 @keyframes mistProgressShimmer {
   0% {

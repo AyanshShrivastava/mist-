@@ -17,24 +17,33 @@ export class ProviderHttpError extends Error {
   }
 }
 
-export function getHttpStatusFromError(err: unknown): number {
-  if (err instanceof SecurityValidationError) return err.status;
-  if (err instanceof ProviderHttpError) return err.status;
-  if (
-    err &&
-    typeof err === 'object' &&
-    'status' in err &&
-    typeof (err as { status: unknown }).status === 'number'
-  ) {
-    return (err as { status: number }).status;
+function extractNumericStatus(err: unknown): number | null {
+  if (err instanceof SecurityValidationError || err instanceof ProviderHttpError) {
+    return err.status;
   }
+  if (err && typeof err === 'object' && 'status' in err) {
+    const status = (err as { status: unknown }).status;
+    if (typeof status === 'number') return status;
+  }
+  return null;
+}
+
+const STATUS_PATTERNS: Array<[RegExp, number]> = [
+  [/429|resource_exhausted/i, 429],
+  [/503|unavailable/i, 503],
+  [/502/i, 502],
+  [/504|timed out/i, 504],
+  [/401|403|api_key_invalid/i, 401],
+  [/404|not_found/i, 404],
+];
+
+export function getHttpStatusFromError(err: unknown): number {
+  const explicit = extractNumericStatus(err);
+  if (explicit !== null) return explicit;
   const msg = err instanceof Error ? err.message : String(err);
-  if (msg.includes('429') || msg.toLowerCase().includes('resource_exhausted')) return 429;
-  if (msg.includes('503') || msg.toLowerCase().includes('unavailable')) return 503;
-  if (msg.includes('502')) return 502;
-  if (msg.includes('504') || msg.toLowerCase().includes('timed out')) return 504;
-  if (msg.includes('401') || msg.includes('403') || msg.toLowerCase().includes('api_key_invalid')) return 401;
-  if (msg.includes('404') || msg.toLowerCase().includes('not_found')) return 404;
+  for (const [pattern, status] of STATUS_PATTERNS) {
+    if (pattern.test(msg)) return status;
+  }
   return 500;
 }
 
@@ -97,22 +106,63 @@ export interface ByokCompletionOptions {
   skipDnsLookup?: boolean;
 }
 
+function extractPartText(part: unknown): string {
+  if (typeof part === 'string') return part;
+  if (!part || typeof part !== 'object') return '';
+  const obj = part as { text?: unknown; content?: unknown };
+  if (typeof obj.text === 'string') return obj.text;
+  if (typeof obj.content === 'string') return obj.content;
+  return '';
+}
+
 export function extractChoiceText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part;
-        if (part && typeof part === 'object') {
-          const obj = part as { text?: unknown; content?: unknown };
-          if (typeof obj.text === 'string') return obj.text;
-          if (typeof obj.content === 'string') return obj.content;
-        }
-        return '';
-      })
-      .join('');
+    return content.map(extractPartText).join('');
   }
   return '';
+}
+
+async function retryOnFormatError(
+  resp: Response,
+  runRequest: (tokens: number, json: boolean) => Promise<Response>,
+  maxTokens: number,
+  providerLabel: string,
+): Promise<Response> {
+  const errPreview = redactSecrets(await resp.text());
+  if (/response_format|json_object/i.test(errPreview)) {
+    return runRequest(maxTokens, false);
+  }
+  throw new ProviderHttpError(400, `${providerLabel} error (400): ${errPreview.slice(0, 350)}`);
+}
+
+async function retryOnAffordabilityError(
+  resp: Response,
+  runRequest: (tokens: number, json: boolean) => Promise<Response>,
+  params: { maxTokens: number; jsonMode: boolean; providerLabel: string },
+): Promise<Response> {
+  const errText = redactSecrets(await resp.text());
+  const affordMatch = errText.match(/can only afford\s+(\d+)/i);
+  const affordable = affordMatch ? Number(affordMatch[1]) : 0;
+  if (affordable >= 1024 && params.maxTokens > affordable - 128) {
+    return runRequest(Math.max(1024, affordable - 128), params.jsonMode);
+  }
+  throw new ProviderHttpError(402, `${params.providerLabel} error (402): ${errText.slice(0, 350)}`);
+}
+
+async function handleFormatOrAffordabilityRetry(
+  initialResp: Response,
+  runRequest: (tokens: number, json: boolean) => Promise<Response>,
+  params: { maxTokens: number; jsonMode: boolean; providerLabel: string },
+): Promise<Response> {
+  if (initialResp.ok) return initialResp;
+  if (initialResp.status === 400 && params.jsonMode) {
+    return retryOnFormatError(initialResp, runRequest, params.maxTokens, params.providerLabel);
+  }
+  if (initialResp.status === 402) {
+    return retryOnAffordabilityError(initialResp, runRequest, params);
+  }
+  return initialResp;
 }
 
 export async function callByokCompletionRaw(params: ByokCompletionOptions): Promise<string> {
@@ -158,28 +208,7 @@ export async function callByokCompletionRaw(params: ByokCompletionOptions): Prom
   };
 
   let resp = await runRequest(maxTokens, jsonMode);
-  if (!resp.ok && resp.status === 400 && jsonMode) {
-    const errPreview = redactSecrets(await resp.text());
-    if (
-      errPreview.toLowerCase().includes('response_format') ||
-      errPreview.toLowerCase().includes('json_object')
-    ) {
-      resp = await runRequest(maxTokens, false);
-    } else {
-      throw new ProviderHttpError(400, `${providerLabel} error (400): ${errPreview.slice(0, 350)}`);
-    }
-  }
-
-  if (!resp.ok && resp.status === 402) {
-    const errText = redactSecrets(await resp.text());
-    const affordMatch = errText.match(/can only afford\s+(\d+)/i);
-    const affordable = affordMatch ? Number(affordMatch[1]) : 0;
-    if (affordable >= 1024 && maxTokens > affordable - 128) {
-      resp = await runRequest(Math.max(1024, affordable - 128), jsonMode);
-    } else {
-      throw new ProviderHttpError(402, `${providerLabel} error (402): ${errText.slice(0, 350)}`);
-    }
-  }
+  resp = await handleFormatOrAffordabilityRetry(resp, runRequest, { maxTokens, jsonMode, providerLabel });
 
   if (!resp.ok) {
     const errText = redactSecrets(await resp.text());
@@ -445,6 +474,65 @@ export async function streamByokCompletion(params: StreamByokOptions): Promise<s
   }
 }
 
+async function handleProbeFailure(
+  resp: Response,
+  norm: AiProviderConfig,
+  options?: { fetchImpl?: typeof fetch; skipDnsLookup?: boolean; signal?: AbortSignal },
+): Promise<boolean> {
+  const errText = redactSecrets(await resp.text());
+  if (resp.status === 400 && /response_format|json_object/i.test(errText)) {
+    await callByokCompletionRaw({
+      config: norm,
+      messages: [{ role: 'user', content: 'Reply with OK' }],
+      jsonMode: false,
+      maxTokens: 24,
+      timeoutMs: 25_000,
+      signal: options?.signal,
+      fetchImpl: options?.fetchImpl,
+      skipDnsLookup: options?.skipDnsLookup,
+    });
+    return false;
+  }
+  throw new ProviderHttpError(resp.status, `${norm.name || 'Provider'} error (${resp.status}): ${errText.slice(0, 300)}`);
+}
+
+async function probeJsonOrTextGeneration(
+  norm: AiProviderConfig,
+  endpoint: string,
+  headers: Record<string, string>,
+  options?: { fetchImpl?: typeof fetch; skipDnsLookup?: boolean; signal?: AbortSignal },
+): Promise<boolean | 'unknown'> {
+  const resp = await safeFetchExternal(endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model: norm.model,
+      messages: [
+        { role: 'system', content: 'Respond strictly with valid JSON.' },
+        { role: 'user', content: 'Return {"ok":true}' },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 48,
+      temperature: 0,
+    }),
+    timeoutMs: 25_000,
+    parentSignal: options?.signal,
+    fetchImpl: options?.fetchImpl,
+    skipDnsLookup: options?.skipDnsLookup,
+  });
+
+  if (resp.ok) {
+    const data = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const text = data.choices?.[0]?.message?.content || '';
+    if (!text.trim()) {
+      throw new ProviderHttpError(502, `${norm.name || 'Provider'} returned an empty test response.`);
+    }
+    return true;
+  }
+
+  return handleProbeFailure(resp, norm, options);
+}
+
 export async function probeProviderCapabilities(
   config: AiProviderConfig,
   options?: { fetchImpl?: typeof fetch; skipDnsLookup?: boolean; signal?: AbortSignal },
@@ -453,56 +541,9 @@ export async function probeProviderCapabilities(
     skipDnsLookup: options?.skipDnsLookup,
   });
 
-  // 1. Minimal text generation check (also tests jsonOutput if accepted)
   let jsonSupported: boolean | 'unknown' = 'unknown';
   try {
-    const resp = await safeFetchExternal(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: norm.model,
-        messages: [
-          { role: 'system', content: 'Respond strictly with valid JSON.' },
-          { role: 'user', content: 'Return {"ok":true}' },
-        ],
-        response_format: { type: 'json_object' },
-        max_tokens: 48,
-        temperature: 0,
-      }),
-      timeoutMs: 25_000,
-      parentSignal: options?.signal,
-      fetchImpl: options?.fetchImpl,
-      skipDnsLookup: options?.skipDnsLookup,
-    });
-    if (resp.ok) {
-      const data = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      const text = data.choices?.[0]?.message?.content || '';
-      if (!text.trim()) {
-        throw new ProviderHttpError(502, `${norm.name || 'Provider'} returned an empty test response.`);
-      }
-      jsonSupported = true;
-    } else if (resp.status === 400) {
-      const errText = redactSecrets(await resp.text());
-      if (errText.toLowerCase().includes('response_format') || errText.toLowerCase().includes('json_object')) {
-        // Fallback to plain text completion check
-        await callByokCompletionRaw({
-          config: norm,
-          messages: [{ role: 'user', content: 'Reply with OK' }],
-          jsonMode: false,
-          maxTokens: 24,
-          timeoutMs: 25_000,
-          signal: options?.signal,
-          fetchImpl: options?.fetchImpl,
-          skipDnsLookup: options?.skipDnsLookup,
-        });
-        jsonSupported = false;
-      } else {
-        throw new ProviderHttpError(400, `${norm.name || 'Provider'} error (400): ${errText.slice(0, 300)}`);
-      }
-    } else {
-      const errText = redactSecrets(await resp.text());
-      throw new ProviderHttpError(resp.status, `${norm.name || 'Provider'} error (${resp.status}): ${errText.slice(0, 300)}`);
-    }
+    jsonSupported = await probeJsonOrTextGeneration(norm, endpoint, headers, options);
   } catch (err) {
     if (err instanceof ProviderHttpError || err instanceof SecurityValidationError) throw err;
     throw new ProviderHttpError(502, err instanceof Error ? err.message : String(err));
