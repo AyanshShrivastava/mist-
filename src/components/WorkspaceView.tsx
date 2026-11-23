@@ -1,32 +1,19 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  AlertTriangle,
   ArrowLeft,
   Check,
-  CheckCircle2,
   Code2,
-  Columns2,
   Copy,
   Cpu,
   Download,
   Eye,
-  FileCode2,
-  FolderTree,
-  Globe,
   Loader2,
   MessageSquare,
   Mic,
-  Monitor,
-  MoreHorizontal,
   MousePointerClick,
-  Plus,
   RefreshCw,
-  Send,
   Settings,
   SlidersHorizontal,
-  Smartphone,
-  Tablet,
-  Trash2,
   User as UserIcon,
   X,
 } from 'lucide-react';
@@ -43,12 +30,14 @@ import type {
   WorkspaceViewMode,
 } from '../types/mist';
 import type { ModelHealthIncident } from '../utils/aiErrors';
-import { detectGatewayFromBaseUrl, findModelEntry } from '../data/models';
+import { detectGatewayFromBaseUrl } from '../data/models';
 import { maskApiKey } from '../utils/projectOps';
 import CodeEditor from './CodeEditor';
 import VisualInspector from './VisualInspector';
-import SearchSourcesCard from './SearchSourcesCard';
-import MistLogo, { MistMark } from './MistLogo';
+import WorkspaceHeader from './workspace/WorkspaceHeader';
+import WorkspaceChatDrawer from './workspace/WorkspaceChatDrawer';
+import WorkspaceFileDrawer from './workspace/WorkspaceFileDrawer';
+import { useAppAiBridge } from './workspace/useAppAiBridge';
 
 interface WorkspaceViewProps {
   user: User | null;
@@ -127,11 +116,6 @@ export default function WorkspaceView({
   const [viewport, setViewport] = useState<ViewportSize>(defaultViewport);
   const [leftTab, setLeftTab] = useState<'ai' | 'files'>('ai');
 
-  const currentModelMeta = findModelEntry(
-    providerConfig.provider,
-    providerConfig.model,
-    providerConfig.baseUrl,
-  );
   const detectedGw = detectGatewayFromBaseUrl(providerConfig.baseUrl);
   const shortProviderLabel =
     providerConfig.name?.trim() ||
@@ -153,10 +137,6 @@ export default function WorkspaceView({
   const [refineInput, setRefineInput] = useState('');
   const [refineValidationError, setRefineValidationError] = useState<string | null>(null);
   const [selectedElement, setSelectedElement] = useState<SelectedVisualElement | null>(null);
-  const [newFilePath, setNewFilePath] = useState('');
-  const [showNewFileInput, setShowNewFileInput] = useState(false);
-  const [newFileError, setNewFileError] = useState<string | null>(null);
-  const [titleSavedToast, setTitleSavedToast] = useState(false);
   const [activePane, setActivePane] = useState<'chat' | 'preview'>(() =>
     typeof window !== 'undefined' && window.innerWidth < 1024 ? 'preview' : 'chat',
   );
@@ -164,79 +144,23 @@ export default function WorkspaceView({
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [refineElapsed, setRefineElapsed] = useState(0);
 
-  const [sessionToken, setSessionToken] = useState<string | null>(null);
-  const sessionTokenRef = useRef<string | null>(null);
-  sessionTokenRef.current = sessionToken;
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
-
   const hasAppAi = Boolean(
     project.appAiEnabled ||
       project.files.some((f) => /\/api\/app-ai|window\.mistAI/.test(f.content)),
   );
 
-  // Mint an authenticated ephemeral session token ONLY in the trusted parent frame
-  // when App AI is used and a BYOK key + signed-in user exist.
-  // Never pass sessionToken or raw BYOK keys into the opaque sandbox iframe.
-  useEffect(() => {
-    const cleanKey = (providerConfig.apiKey || '').trim();
-    if (!hasAppAi || !cleanKey || !user) {
-      setSessionToken(null);
-      return;
-    }
-
-    let cancelled = false;
-    let mintedToken: string | null = null;
-    let bearerHeader = '';
-
-    void user
-      .getIdToken()
-      .then((idToken) => {
-        if (cancelled) return null;
-        bearerHeader = `Bearer ${idToken}`;
-        return fetch('/api/ai/session', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: bearerHeader,
-          },
-          body: JSON.stringify({ providerConfig }),
-        });
-      })
-      .then(async (resp) => {
-        if (!resp || !resp.ok) return null;
-        return (await resp.json()) as { token?: string };
-      })
-      .then((data) => {
-        if (cancelled) {
-          if (data?.token && bearerHeader) {
-            void fetch(`/api/ai/session/${encodeURIComponent(data.token)}`, {
-              method: 'DELETE',
-              headers: { Authorization: bearerHeader },
-              keepalive: true,
-            }).catch(() => {});
-          }
-          return;
-        }
-        if (data?.token) {
-          mintedToken = data.token;
-          setSessionToken(data.token);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setSessionToken(null);
-      });
-
-    return () => {
-      cancelled = true;
-      if (mintedToken && bearerHeader) {
-        void fetch(`/api/ai/session/${encodeURIComponent(mintedToken)}`, {
-          method: 'DELETE',
-          headers: { Authorization: bearerHeader },
-          keepalive: true,
-        }).catch(() => {});
+  const { iframeRef, syncBridgeToIframe, handleLivePreviewPatch } = useAppAiBridge({
+    hasAppAi,
+    providerConfig,
+    user,
+    viewMode,
+    onSelectElement: (el) => {
+      setSelectedElement(el);
+      if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+        setMobileInspectorOpen(true);
       }
-    };
-  }, [hasAppAi, providerConfig, user]);
+    },
+  });
 
   useEffect(() => {
     if (!isRefining || !streamProgress) {
@@ -257,159 +181,6 @@ export default function WorkspaceView({
     }
   }, [project.files, activeFilePath]);
 
-  useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      const iframeWindow = iframeRef.current?.contentWindow;
-      if (!iframeWindow || event.source !== iframeWindow) return;
-      if (!event.data || typeof event.data !== 'object') return;
-
-      const msg = event.data as {
-        type?: unknown;
-        requestId?: unknown;
-        payload?: unknown;
-      };
-
-      if (msg.type === 'MIST_SELECT_ELEMENT') {
-        const p = msg.payload as Partial<SelectedVisualElement> | undefined;
-        if (
-          p &&
-          typeof p.mistId === 'string' &&
-          typeof p.tagName === 'string' &&
-          typeof p.textContent === 'string' &&
-          typeof p.className === 'string' &&
-          p.styles &&
-          typeof p.styles === 'object'
-        ) {
-          setSelectedElement(p as SelectedVisualElement);
-          if (window.innerWidth < 1024) {
-            setMobileInspectorOpen(true);
-          }
-        }
-        return;
-      }
-
-      if (msg.type === 'MIST_APP_AI_REQUEST' && typeof msg.requestId === 'string') {
-        const reqId = msg.requestId;
-        const bodyObj =
-          msg.payload && typeof msg.payload === 'object'
-            ? (msg.payload as Record<string, unknown>)
-            : {};
-
-        void (async () => {
-          try {
-            if (!hasAppAi) {
-              throw new Error('Live App AI is disabled for this project.');
-            }
-            if (!user) {
-              throw new Error('Sign in with Google in Mist before using App AI in preview.');
-            }
-            const idToken = await user.getIdToken();
-            const token = sessionTokenRef.current;
-            const requestBody: Record<string, unknown> = {
-              prompt: typeof bodyObj.prompt === 'string' ? bodyObj.prompt : undefined,
-              messages: Array.isArray(bodyObj.messages) ? bodyObj.messages : undefined,
-              systemInstruction:
-                typeof bodyObj.systemInstruction === 'string'
-                  ? bodyObj.systemInstruction
-                  : undefined,
-              jsonMode: Boolean(bodyObj.jsonMode),
-            };
-            if (token) {
-              requestBody.sessionToken = token;
-            } else {
-              requestBody.providerConfig = providerConfig;
-            }
-
-            const resp = await fetch('/api/app-ai', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${idToken}`,
-              },
-              body: JSON.stringify(requestBody),
-            });
-            const data = (await resp.json()) as {
-              text?: string;
-              provider?: string;
-              model?: string;
-              error?: string;
-              incident?: ModelHealthIncident;
-            };
-            if (!resp.ok || !data.text) {
-              iframeRef.current?.contentWindow?.postMessage(
-                {
-                  type: 'MIST_APP_AI_RESPONSE',
-                  requestId: reqId,
-                  ok: false,
-                  error: data.incident?.message || data.error || 'App AI request failed.',
-                },
-                '*',
-              );
-              return;
-            }
-            iframeRef.current?.contentWindow?.postMessage(
-              {
-                type: 'MIST_APP_AI_RESPONSE',
-                requestId: reqId,
-                ok: true,
-                text: data.text,
-                provider: data.provider,
-                model: data.model,
-              },
-              '*',
-            );
-          } catch (err) {
-            iframeRef.current?.contentWindow?.postMessage(
-              {
-                type: 'MIST_APP_AI_RESPONSE',
-                requestId: reqId,
-                ok: false,
-                error: err instanceof Error ? err.message : 'App AI relay failed.',
-              },
-              '*',
-            );
-          }
-        })();
-      }
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, [hasAppAi, providerConfig, user]);
-
-  const syncBridgeToIframe = () => {
-    const win = iframeRef.current?.contentWindow;
-    if (win) {
-      win.postMessage(
-        { type: 'MIST_TOGGLE_INSPECTOR', enabled: viewMode === 'visual' },
-        '*',
-      );
-      win.postMessage(
-        {
-          type: 'MIST_SET_APP_AI_STATE',
-          payload: {
-            appAiEnabled: hasAppAi,
-          },
-        },
-        '*',
-      );
-    }
-  };
-
-  useEffect(() => {
-    syncBridgeToIframe();
-  }, [viewMode, activePane, hasAppAi]);
-
-  const handleIframeLoad = () => {
-    syncBridgeToIframe();
-  };
-
-  const handleLivePreviewPatch = (patch: VisualElementPatch) => {
-    const win = iframeRef.current?.contentWindow;
-    if (win) {
-      win.postMessage({ type: 'MIST_LIVE_PATCH', payload: patch }, '*');
-    }
-  };
-
   const handleRefineSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!refineInput.trim()) {
@@ -421,28 +192,6 @@ export default function WorkspaceView({
     setRefineInput('');
   };
 
-  const handleAddFile = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleaned = newFilePath.trim().replace(/^\/+/, '');
-    if (!cleaned || !cleaned.includes('.')) {
-      setNewFileError('Enter a valid path such as src/components/Footer.tsx');
-      return;
-    }
-    if (project.files.some((f) => f.path === cleaned)) {
-      setNewFileError('A file with that path already exists.');
-      return;
-    }
-    setNewFileError(null);
-    onCreateFile(cleaned);
-    setActiveFilePath(cleaned);
-    setNewFilePath('');
-    setShowNewFileInput(false);
-    setViewMode((prev) => (prev === 'preview' ? 'code' : prev));
-    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
-      setActivePane('preview');
-    }
-  };
-
   const iframeWidthClass =
     viewport === 'mobile'
       ? 'w-[390px]'
@@ -452,230 +201,33 @@ export default function WorkspaceView({
 
   return (
     <div className="flex h-[100dvh] w-full flex-col overflow-hidden bg-[#FAFAFA] text-zinc-950 dark:bg-[#09090B] dark:text-zinc-100">
-      {/* Compact Top App Bar (< lg: mobile & tablet) */}
-      <header className="flex lg:hidden h-13 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white/95 px-2.5 backdrop-blur-md dark:border-zinc-800 dark:bg-[#0F0F12]/95">
-        <button
-          type="button"
-          onClick={onBackHome}
-          aria-label="Back to Websites"
-          className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-800 shrink-0 cursor-pointer"
-        >
-          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-          <span>Back</span>
-        </button>
+      {/* Top Workspace Header (Unified Desktop & Mobile) */}
+      <WorkspaceHeader
+        user={user}
+        project={project}
+        viewMode={viewMode}
+        viewport={viewport}
+        shortProviderLabel={shortProviderLabel}
+        providerApiKey={providerConfig.apiKey}
+        activePane={activePane}
+        onBackHome={onBackHome}
+        onUpdateProjectName={onUpdateProjectName}
+        onSetViewMode={setViewMode}
+        onSetViewport={setViewport}
+        onSetActivePane={setActivePane}
+        onOpenMobileMore={() => setMobileMoreOpen(true)}
+        onOpenVoiceChat={onOpenVoiceChat}
+        onOpenProviders={onOpenProviders}
+        onDuplicateProject={onDuplicateProject}
+        onExportZip={onExportZip}
+        onOpenDeploy={onOpenDeploy}
+        onOpenSettings={onOpenSettings}
+        onOpenAccount={onOpenAccount}
+      />
 
-        <input
-          type="text"
-          aria-label="Mobile project name"
-          value={project.name}
-          onChange={(e) => onUpdateProjectName(e.target.value)}
-          className="min-w-0 flex-1 truncate rounded-lg border border-transparent bg-transparent px-2 py-1 text-center font-display text-sm font-semibold text-zinc-950 focus:border-blue-500 focus:bg-white focus:outline-none dark:text-white dark:focus:bg-zinc-900"
-        />
-
-        <div className="flex items-center gap-1.5 shrink-0">
-          <button
-            type="button"
-            onClick={onOpenDeploy}
-            className="inline-flex h-10 items-center gap-1.5 rounded-xl mist-primary-gradient px-3 text-xs font-medium text-white shadow-sm transition-all whitespace-nowrap cursor-pointer"
-          >
-            <Globe className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Publish</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setMobileMoreOpen(true)}
-            aria-label="Open workspace actions"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-800 cursor-pointer"
-          >
-            <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
-          </button>
-        </div>
-      </header>
-
-      {/* Desktop Studio Top Bar (>= lg) */}
-      <header className="hidden lg:flex h-14 shrink-0 items-center justify-between gap-2 xl:gap-3 border-b border-zinc-200 bg-white px-3 xl:px-4 dark:border-zinc-800 dark:bg-[#0F0F12]">
-        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-          <button
-            type="button"
-            onClick={onBackHome}
-            aria-label="Back to Websites"
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Back</span>
-            <span className="text-zinc-300 dark:text-zinc-700">·</span>
-            <MistLogo size="xs" showWordmark={false} />
-            <span className="font-display font-bold text-black dark:text-white">Mist</span>
-          </button>
-
-          <span className="text-zinc-300 dark:text-zinc-700 shrink-0">/</span>
-
-          <input
-            type="text"
-            aria-label="Project name"
-            value={project.name}
-            onChange={(e) => onUpdateProjectName(e.target.value)}
-            onBlur={() => {
-              setTitleSavedToast(true);
-              setTimeout(() => setTitleSavedToast(false), 1200);
-            }}
-            className="min-w-[72px] max-w-[140px] xl:max-w-[190px] flex-1 truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 font-display text-xs xl:text-sm font-semibold text-zinc-950 hover:border-zinc-200 focus:border-blue-500 focus:bg-white focus:outline-none dark:text-white dark:hover:border-zinc-700 dark:focus:bg-zinc-900"
-          />
-
-          {titleSavedToast && (
-            <span className="hidden xl:inline text-[11px] text-emerald-600 dark:text-emerald-400 whitespace-nowrap shrink-0">
-              Saved
-            </span>
-          )}
-        </div>
-
-        {/* Center View Mode Switcher */}
-        <div
-          role="tablist"
-          aria-label="Workspace view mode"
-          className="flex shrink-0 items-center gap-0.5 sm:gap-1 rounded-lg bg-zinc-100 p-0.5 sm:p-1 dark:bg-zinc-900"
-        >
-          {(
-            [
-              { id: 'preview', label: 'Preview', icon: Eye },
-              { id: 'visual', label: 'Visual', icon: MousePointerClick },
-              { id: 'code', label: 'Code', icon: Code2 },
-              { id: 'split', label: 'Split', icon: Columns2 },
-            ] as const
-          ).map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              role="tab"
-              aria-selected={viewMode === id}
-              aria-label={label}
-              type="button"
-              onClick={() => {
-                setViewMode(id);
-                if (typeof window !== 'undefined' && window.innerWidth < 1024) {
-                  setActivePane('preview');
-                }
-              }}
-              className={`inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                viewMode === id
-                  ? 'bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-white'
-                  : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white'
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>{label}</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Right Actions */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          {viewMode !== 'code' && (
-            <div className="hidden xl:flex items-center gap-0.5 rounded-lg border border-zinc-200 p-0.5 dark:border-zinc-800">
-              {(
-                [
-                  { id: 'desktop', icon: Monitor, label: 'Desktop viewport' },
-                  { id: 'tablet', icon: Tablet, label: 'Tablet viewport' },
-                  { id: 'mobile', icon: Smartphone, label: 'Mobile viewport' },
-                ] as const
-              ).map(({ id, icon: Icon, label }) => (
-                <button
-                  key={id}
-                  type="button"
-                  aria-label={label}
-                  onClick={() => setViewport(id)}
-                  className={`rounded-md p-1.5 transition-colors cursor-pointer ${
-                    viewport === id
-                      ? 'bg-zinc-900 text-white dark:bg-zinc-700'
-                      : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white'
-                  }`}
-                >
-                  <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-              ))}
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={onOpenVoiceChat}
-            aria-label="Open voice refinement studio"
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2 xl:px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Mic className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-            <span className="hidden xl:inline">Voice</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenProviders}
-            aria-label="Configure AI models"
-            title={
-              maskApiKey(providerConfig.apiKey)
-                ? `Active Key: ${maskApiKey(providerConfig.apiKey)}`
-                : 'Add BYOK API key'
-            }
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Cpu className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-            <span className="max-w-[90px] truncate">{shortProviderLabel}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onDuplicateProject}
-            aria-label="Duplicate project"
-            className="hidden xl:inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Duplicate</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onExportZip}
-            aria-label="Export ZIP"
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 px-2 xl:px-3 text-xs font-medium text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Download className="h-3.5 w-3.5" aria-hidden="true" />
-            <span className="hidden xl:inline">Export ZIP</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenDeploy}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg mist-primary-gradient px-3 text-xs font-medium text-white shadow-sm transition-all whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Globe className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Publish</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            aria-label="Open Studio Settings"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer"
-          >
-            <Settings className="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenAccount}
-            aria-label="Account profile"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer overflow-hidden"
-          >
-            {user?.photoURL ? (
-              <img src={user.photoURL} alt={user.displayName || 'Account'} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
-            ) : (
-              <UserIcon className="h-3.5 w-3.5" aria-hidden="true" />
-            )}
-          </button>
-        </div>
-      </header>
-
-      {/* Main Body */}
-      <div className="relative flex flex-1 min-h-0 overflow-hidden">
-        {/* Left Sidebar (Chat & Files) */}
+      {/* Main Workspace Body */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        {/* Left Drawer: AI Refinement or Source Files */}
         <aside
           className={`${
             activePane === 'chat'
@@ -689,7 +241,7 @@ export default function WorkspaceView({
               onClick={() => setLeftTab('ai')}
               className={`flex-1 py-2.5 text-xs font-medium border-b-2 transition-colors cursor-pointer ${
                 leftTab === 'ai'
-                  ? 'border-blue-600 text-zinc-950 dark:text-white'
+                  ? 'border-(--mist-c2) text-zinc-950 dark:text-white'
                   : 'border-transparent text-zinc-500 hover:text-zinc-800 dark:text-zinc-400'
               }`}
             >
@@ -700,7 +252,7 @@ export default function WorkspaceView({
               onClick={() => setLeftTab('files')}
               className={`flex-1 py-2.5 text-xs font-medium border-b-2 transition-colors cursor-pointer ${
                 leftTab === 'files'
-                  ? 'border-blue-600 text-zinc-950 dark:text-white'
+                  ? 'border-(--mist-c2) text-zinc-950 dark:text-white'
                   : 'border-transparent text-zinc-500 hover:text-zinc-800 dark:text-zinc-400'
               }`}
             >
@@ -709,352 +261,51 @@ export default function WorkspaceView({
           </div>
 
           {leftTab === 'ai' ? (
-            <div className="flex flex-1 flex-col min-h-0">
-              <div className="flex-1 overflow-y-auto p-4 space-y-3 mist-scrollbar">
-                {project.chatHistory.map((msg) => (
-                  <motion.div
-                    key={msg.id}
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.18 }}
-                    className={`rounded-xl p-3 text-xs leading-relaxed ${
-                      msg.role === 'user'
-                        ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800/90 dark:text-zinc-100'
-                        : 'border border-zinc-200 bg-white text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300'
-                    }`}
-                  >
-                    <p className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mb-1">
-                      {msg.role === 'user' ? 'You' : 'Mist'}
-                    </p>
-                    <p className="whitespace-pre-wrap break-words">{msg.content}</p>
-                    {msg.role === 'assistant' && msg.searchOutcome && (
-                      <SearchSourcesCard outcome={msg.searchOutcome} compact />
-                    )}
-                    {msg.changedFiles && msg.changedFiles.length > 0 && (
-                      <p className="mt-2 font-mono text-[11px] text-blue-600 dark:text-blue-400">
-                        Updated: {msg.changedFiles.join(', ')}
-                      </p>
-                    )}
-                  </motion.div>
-                ))}
-
-                {/* Live SSE Streaming Refinement Card */}
-                {isRefining && streamProgress && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    aria-live="polite"
-                    className="rounded-xl border border-blue-500/35 bg-gradient-to-br from-blue-50/90 to-pink-50/60 p-3 text-xs dark:border-blue-500/30 dark:from-blue-950/35 dark:to-indigo-950/25"
-                  >
-                    <div className="relative h-1 w-full overflow-hidden rounded-full bg-blue-500/15 mb-2.5">
-                      <div className="mist-shimmer-bar absolute inset-y-0 left-0 w-1/2 rounded-full mist-primary-gradient" />
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="inline-flex items-center gap-1.5 font-semibold text-zinc-950 dark:text-white truncate">
-                        <MistMark className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400 animate-pulse shrink-0" title="Refining" />
-                        <span className="truncate">
-                          {streamProgress.activeFile
-                            ? `Editing ${streamProgress.activeFile}...`
-                            : streamProgress.phase}
-                        </span>
-                      </span>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 tabular-nums">
-                          {refineElapsed}s
-                        </span>
-                        <button
-                          type="button"
-                          onClick={onCancelRefine}
-                          className="rounded border border-zinc-300/80 bg-white/90 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 cursor-pointer"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-
-                    {streamProgress.searchState && streamProgress.searchState !== 'idle' && (
-                      <div className="mt-2 rounded-lg border border-zinc-200/80 bg-white/80 px-2 py-1.5 text-[11px] dark:border-zinc-800 dark:bg-zinc-950/60">
-                        <span className="inline-flex items-center gap-1.5 font-medium text-zinc-800 dark:text-zinc-200">
-                          {streamProgress.searchState === 'searching' ? (
-                            <Loader2 className="h-3 w-3 animate-spin text-blue-500" aria-hidden="true" />
-                          ) : streamProgress.searchState === 'failed' ? (
-                            <AlertTriangle className="h-3 w-3 text-amber-500" aria-hidden="true" />
-                          ) : (
-                            <Globe className="h-3 w-3 text-emerald-500" aria-hidden="true" />
-                          )}
-                          <span>
-                            {streamProgress.searchState === 'searching'
-                              ? 'Searching live web sources...'
-                              : streamProgress.searchState === 'failed'
-                                ? 'Web search failed'
-                                : `Retrieved ${streamProgress.searchSources?.length ?? 0} verified source${
-                                    (streamProgress.searchSources?.length ?? 0) === 1 ? '' : 's'
-                                  }`}
-                          </span>
-                        </span>
-                        {streamProgress.searchError && (
-                          <p className="mt-0.5 text-[10px] text-amber-700 dark:text-amber-300">
-                            {streamProgress.searchError}
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    {streamProgress.completedFiles.length > 0 && (
-                      <div className="mt-2 space-y-1 font-mono text-[11px]">
-                        {streamProgress.completedFiles.map((filePath) => (
-                          <div key={filePath} className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
-                            <CheckCircle2 className="h-3 w-3 shrink-0" aria-hidden="true" />
-                            <span className="truncate">{filePath}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </motion.div>
-                )}
-              </div>
-
-              {modelIncident && (
-                <div
-                  role="alert"
-                  className="mx-3 mb-2 rounded-xl border border-amber-300 bg-amber-50 p-2.5 text-[11px] text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/50 dark:text-amber-200"
-                >
-                  <div className="flex items-start gap-2">
-                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" aria-hidden="true" />
-                    <div className="min-w-0 flex-1">
-                      <p className="font-semibold truncate">{modelIncident.title}</p>
-                      <button
-                        type="button"
-                        onClick={onOpenProviders}
-                        className="mt-1 font-medium text-amber-800 underline dark:text-amber-300 cursor-pointer"
-                      >
-                        Switch Model
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Quick Refinement Chips */}
-              <div className="border-t border-zinc-100 px-3 pt-3 pb-1 dark:border-zinc-800">
-                <p className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mb-2">
-                  Quick refinements
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {REFINEMENT_SUGGESTIONS.map((item) => (
-                    <button
-                      key={item}
-                      type="button"
-                      onClick={() => setRefineInput(item)}
-                      className="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <form
-                onSubmit={handleRefineSubmit}
-                className="border-t border-zinc-200 p-3 pb-16 dark:border-zinc-800"
-              >
-                {selectedElement && (
-                  <div className="mb-2 flex items-center justify-between rounded-lg bg-blue-50 px-2.5 py-1 text-[11px] text-blue-700 dark:bg-blue-950/60 dark:text-blue-300">
-                    <span className="truncate font-mono">
-                      Target: &lt;{selectedElement.tagName}&gt;
-                    </span>
-                    <button
-                      type="button"
-                      aria-label="Clear selected element"
-                      onClick={() => setSelectedElement(null)}
-                      className="ml-2 font-semibold hover:underline cursor-pointer"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                )}
-
-                {(refineValidationError || refineError) && (
-                  <p role="alert" className="mb-2 text-[11px] font-medium text-red-600 dark:text-red-400">
-                    {refineValidationError || refineError}
-                  </p>
-                )}
-
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <label className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
-                    <Globe
-                      className={`h-3 w-3 shrink-0 ${
-                        webSearchMode === 'on'
-                          ? 'text-blue-600 dark:text-blue-400'
-                          : webSearchMode === 'auto'
-                            ? 'text-emerald-600 dark:text-emerald-400'
-                            : 'text-zinc-400'
-                      }`}
-                      aria-hidden="true"
-                    />
-                    <select
-                      aria-label="Refinement Search Web mode"
-                      value={webSearchMode}
-                      onChange={(e) => onChangeWebSearchMode(e.target.value as WebSearchMode)}
-                      className="bg-transparent text-[11px] font-medium text-zinc-700 dark:text-zinc-200 focus:outline-none cursor-pointer"
-                    >
-                      <option value="auto" className="bg-white dark:bg-zinc-900">
-                        Search: Auto
-                      </option>
-                      <option value="on" className="bg-white dark:bg-zinc-900">
-                        Search: On
-                      </option>
-                      <option value="off" className="bg-white dark:bg-zinc-900">
-                        Search: Off
-                      </option>
-                    </select>
-                  </label>
-
-                  {webSearchMode === 'on' && !hasWebSearchKey && (
-                    <button
-                      type="button"
-                      onClick={onOpenSettings}
-                      className="text-[10px] font-medium text-amber-700 hover:underline dark:text-amber-300 cursor-pointer"
-                    >
-                      Add Search Key
-                    </button>
-                  )}
-                </div>
-
-                <label htmlFor="mist-refine-input" className="sr-only">
-                  Refine website with AI
-                </label>
-                <div className="flex items-end gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 p-2 focus-within:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900">
-                  <textarea
-                    id="mist-refine-input"
-                    rows={2}
-                    value={refineInput}
-                    onChange={(e) => {
-                      setRefineInput(e.target.value);
-                      if (refineValidationError) setRefineValidationError(null);
-                    }}
-                    placeholder='Describe updates, color changes, or bug fixes...'
-                    className="flex-1 resize-none bg-transparent text-xs text-zinc-950 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100"
-                  />
-                  <button
-                    type="button"
-                    onClick={onOpenVoiceChat}
-                    aria-label="Voice refine with Mist"
-                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
-                  >
-                    <Mic className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isRefining}
-                    aria-label="Apply AI refinement"
-                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg mist-primary-gradient text-white shadow-sm disabled:opacity-50 transition-all cursor-pointer"
-                  >
-                    {isRefining ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                    ) : (
-                      <Send className="h-3.5 w-3.5" aria-hidden="true" />
-                    )}
-                  </button>
-                </div>
-              </form>
-            </div>
+            <WorkspaceChatDrawer
+              project={project}
+              isRefining={isRefining}
+              streamProgress={streamProgress}
+              refineElapsed={refineElapsed}
+              refineInput={refineInput}
+              refineValidationError={refineValidationError}
+              refineError={refineError}
+              selectedElement={selectedElement}
+              webSearchMode={webSearchMode}
+              hasWebSearchKey={hasWebSearchKey}
+              modelIncident={modelIncident}
+              suggestions={REFINEMENT_SUGGESTIONS}
+              onChangeRefineInput={setRefineInput}
+              onClearSelectedElement={() => setSelectedElement(null)}
+              onChangeWebSearchMode={onChangeWebSearchMode}
+              onOpenVoiceChat={onOpenVoiceChat}
+              onOpenProviders={onOpenProviders}
+              onOpenSettings={onOpenSettings}
+              onCancelRefine={onCancelRefine}
+              onSubmitRefine={handleRefineSubmit}
+            />
           ) : (
-            <div className="flex flex-1 flex-col min-h-0">
-              <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-2.5 dark:border-zinc-800">
-                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-600 dark:text-zinc-400">
-                  <FolderTree className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Source Tree</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowNewFileInput((v) => !v)}
-                  aria-label="Create new source file"
-                  className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950/50 cursor-pointer"
-                >
-                  <Plus className="h-3 w-3" aria-hidden="true" />
-                  <span>New File</span>
-                </button>
-              </div>
-
-              {showNewFileInput && (
-                <form
-                  onSubmit={handleAddFile}
-                  className="border-b border-zinc-200 bg-zinc-50 p-3 space-y-2 dark:border-zinc-800 dark:bg-zinc-900"
-                >
-                  <input
-                    type="text"
-                    aria-label="New file path"
-                    value={newFilePath}
-                    onChange={(e) => setNewFilePath(e.target.value)}
-                    placeholder="src/components/Footer.tsx"
-                    className="w-full rounded border border-zinc-300 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-950"
-                  />
-                  {newFileError && (
-                    <p className="text-[11px] text-red-600 dark:text-red-400">{newFileError}</p>
-                  )}
-                  <div className="flex justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowNewFileInput(false)}
-                      className="rounded px-2 py-1 text-[11px] text-zinc-600 dark:text-zinc-400 cursor-pointer"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      className="rounded bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white cursor-pointer"
-                    >
-                      Add
-                    </button>
-                  </div>
-                </form>
-              )}
-
-              <div className="flex-1 overflow-y-auto p-2 pb-16 space-y-0.5 mist-scrollbar">
-                {project.files.map((file) => {
-                  const isActive = file.path === activeFilePath;
-                  const canDelete = file.path !== 'src/App.tsx' && file.path !== 'src/index.css';
-                  return (
-                    <div
-                      key={file.id}
-                      className={`group flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs font-mono ${
-                        isActive
-                          ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300'
-                          : 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800/60'
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setActiveFilePath(file.path);
-                          if (viewMode === 'preview' || viewMode === 'visual') {
-                            setViewMode('code');
-                          }
-                          if (typeof window !== 'undefined' && window.innerWidth < 1024) {
-                            setActivePane('preview');
-                          }
-                        }}
-                        className="flex min-w-0 flex-1 items-center gap-2 text-left cursor-pointer"
-                      >
-                        <FileCode2 className="h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden="true" />
-                        <span className="truncate">{file.path}</span>
-                      </button>
-                      {canDelete && (
-                        <button
-                          type="button"
-                          aria-label={`Delete ${file.path}`}
-                          onClick={() => onDeleteFile(file.path)}
-                          className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 p-1 text-zinc-400 hover:text-red-600 transition-opacity cursor-pointer"
-                        >
-                          <Trash2 className="h-3 w-3" aria-hidden="true" />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            <WorkspaceFileDrawer
+              project={project}
+              activeFilePath={activeFilePath}
+              onSelectFile={(path) => {
+                setActiveFilePath(path);
+                if (viewMode === 'preview' || viewMode === 'visual') {
+                  setViewMode('code');
+                }
+                if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                  setActivePane('preview');
+                }
+              }}
+              onCreateFile={(path) => {
+                onCreateFile(path);
+                setActiveFilePath(path);
+                setViewMode((prev) => (prev === 'preview' ? 'code' : prev));
+                if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                  setActivePane('preview');
+                }
+              }}
+              onDeleteFile={onDeleteFile}
+            />
           )}
         </aside>
 
@@ -1157,7 +408,7 @@ export default function WorkspaceView({
                     title="Mist Live Website Preview"
                     srcDoc={bundledHtml}
                     sandbox="allow-scripts allow-forms allow-modals allow-popups"
-                    onLoad={handleIframeLoad}
+                    onLoad={syncBridgeToIframe}
                     className="h-full w-full border-0 bg-white"
                   />
                 </div>
@@ -1222,7 +473,7 @@ export default function WorkspaceView({
                       title="Mist Live Website Preview"
                       srcDoc={bundledHtml}
                       sandbox="allow-scripts allow-forms allow-modals allow-popups"
-                      onLoad={handleIframeLoad}
+                      onLoad={syncBridgeToIframe}
                       className="h-full w-full border-0 bg-white"
                     />
                   )}
