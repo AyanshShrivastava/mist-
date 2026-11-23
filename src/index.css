@@ -234,104 +234,153 @@ a[href*="clerk.dev?utm_source"] {
   overflow: hidden !important;
 }
 
-/* Force dark contrast on Clerk modal elements */
-.cl-rootBox,
-.cl-card,
-.cl-modalBackdrop,
-.cl-modalContent,
-[data-clerk-modal] {
+/* Theme-adaptive Clerk Modal & Cards (Dark Mode) */
+.dark .cl-rootBox,
+.dark .cl-card,
+.dark .cl-modalContent,
+.dark [data-clerk-modal] {
   color-scheme: dark !important;
 }
 
-.cl-modalBackdrop {
+.dark .cl-modalBackdrop {
   background-color: rgba(0, 0, 0, 0.82) !important;
-  backdrop-filter: blur(8px) !important;
+  backdrop-filter: blur(12px) !important;
 }
 
-.cl-card {
+.dark .cl-card {
   background-color: #0d0f18 !important;
   border: 1px solid rgba(255, 255, 255, 0.1) !important;
   box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.85) !important;
   color: #f8fafc !important;
 }
 
-.cl-headerTitle {
+.dark .cl-headerTitle {
   color: #ffffff !important;
   font-weight: 700 !important;
 }
 
-.cl-headerSubtitle {
+.dark .cl-headerSubtitle {
   color: #94a3b8 !important;
 }
 
-.cl-socialButtonsBlockButton,
-.cl-socialButtonsBlockButton *,
-.cl-socialButtonsBlockButtonText,
-.cl-socialButtonsIconButton,
-.cl-button {
+.dark .cl-socialButtonsBlockButton,
+.dark .cl-socialButtonsBlockButton *,
+.dark .cl-socialButtonsBlockButtonText,
+.dark .cl-socialButtonsIconButton,
+.dark .cl-button {
   color: #ffffff !important;
 }
 
-.cl-socialButtonsBlockButton {
+.dark .cl-socialButtonsBlockButton {
   background-color: #161924 !important;
   border: 1px solid rgba(255, 255, 255, 0.12) !important;
 }
 
-.cl-socialButtonsBlockButton:hover,
-.cl-socialButtonsIconButton:hover {
+.dark .cl-socialButtonsBlockButton:hover,
+.dark .cl-socialButtonsIconButton:hover {
   background-color: #1f2433 !important;
   border-color: rgba(255, 255, 255, 0.25) !important;
   color: #ffffff !important;
 }
 
-.cl-socialButtonsBlockButtonText {
+.dark .cl-socialButtonsBlockButtonText {
   color: #f8fafc !important;
   font-weight: 600 !important;
 }
 
-.cl-socialButtonsIconButton {
+.dark .cl-socialButtonsIconButton {
   background-color: #161924 !important;
   border: 1px solid rgba(255, 255, 255, 0.12) !important;
   color: #f8fafc !important;
 }
 
-.cl-dividerLine {
+.dark .cl-dividerLine {
   background-color: rgba(255, 255, 255, 0.1) !important;
 }
 
-.cl-dividerText {
+.dark .cl-dividerText {
   color: #64748b !important;
   font-weight: 600 !important;
 }
 
-.cl-formFieldLabel {
+.dark .cl-formFieldLabel {
   color: #cbd5e1 !important;
   font-weight: 500 !important;
 }
 
-.cl-formFieldInput,
-.cl-input,
-input.cl-input,
-input.cl-formFieldInput,
-input[name="identifier"] {
+.dark .cl-formFieldInput,
+.dark .cl-input,
+.dark input.cl-input,
+.dark input.cl-formFieldInput,
+.dark input[name="identifier"] {
   background-color: #161924 !important;
   border: 1px solid rgba(255, 255, 255, 0.15) !important;
   color: #ffffff !important;
   -webkit-text-fill-color: #ffffff !important;
 }
 
-.cl-formFieldInput:focus,
-.cl-input:focus,
-input.cl-input:focus {
+.dark .cl-formFieldInput:focus,
+.dark .cl-input:focus,
+.dark input.cl-input:focus {
   border-color: #3b82f6 !important;
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25) !important;
 }
 
-.cl-formFieldInput::placeholder,
-.cl-input::placeholder,
-input.cl-input::placeholder {
+.dark .cl-formFieldInput::placeholder,
+.dark .cl-input::placeholder,
+.dark input.cl-input::placeholder {
   color: #64748b !important;
   -webkit-text-fill-color: #64748b !important;
+}
+
+/* Light Mode Clerk overrides */
+html:not(.dark) .cl-rootBox,
+html:not(.dark) .cl-card,
+html:not(.dark) .cl-modalContent,
+html:not(.dark) [data-clerk-modal] {
+  color-scheme: light !important;
+}
+
+html:not(.dark) .cl-modalBackdrop {
+  background-color: rgba(18, 18, 20, 0.45) !important;
+  backdrop-filter: blur(12px) !important;
+}
+
+html:not(.dark) .cl-card {
+  background-color: #ffffff !important;
+  color: #121214 !important;
+  border: 1px solid rgba(18, 18, 20, 0.08) !important;
+  box-shadow: 0 20px 48px -12px rgba(18, 18, 20, 0.18) !important;
+}
+
+html:not(.dark) .cl-headerTitle {
+  color: #121214 !important;
+  font-weight: 700 !important;
+}
+
+html:not(.dark) .cl-headerSubtitle,
+html:not(.dark) .cl-dividerText {
+  color: #71717a !important;
+}
+
+html:not(.dark) .cl-socialButtonsBlockButton,
+html:not(.dark) .cl-socialButtonsIconButton,
+html:not(.dark) .cl-formFieldInput,
+html:not(.dark) .cl-input,
+html:not(.dark) input[name="identifier"] {
+  background-color: #f7f6f2 !important;
+  border: 1px solid rgba(18, 18, 20, 0.12) !important;
+  color: #121214 !important;
+  -webkit-text-fill-color: #121214 !important;
+}
+
+html:not(.dark) .cl-socialButtonsBlockButton *,
+html:not(.dark) .cl-socialButtonsBlockButtonText {
+  color: #121214 !important;
+}
+
+html:not(.dark) .cl-formFieldLabel {
+  color: #3f3f46 !important;
 }
 
 .cl-formButtonPrimary {
@@ -345,4 +394,74 @@ input.cl-input::placeholder {
 .cl-formButtonPrimary:hover {
   opacity: 0.94 !important;
   box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5) !important;
+}
+
+/* ======================================================================
+   Mist Polish Layer — Premium Typography, Surfaces, Motion, and Focus
+   ====================================================================== */
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "ss01", "cv11";
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1, h2, h3 {
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--mist-c2) 32%, transparent);
+}
+
+:where(button, a, [role="button"], [role="tab"], [role="menuitem"], summary) {
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: 160ms;
+  transition-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+:where(button, [role="button"]):not(:disabled):active {
+  transform: translateY(0.5px) scale(0.985);
+}
+
+:where(button, input, textarea, select):disabled {
+  cursor: not-allowed;
+}
+
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select) {
+  transition: border-color 160ms ease, box-shadow 200ms ease, background-color 160ms ease;
+}
+
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--mist-c2) 22%, transparent),
+              0 0 0 1px color-mix(in oklab, var(--mist-c2) 70%, transparent);
+}
+
+.mist-glass {
+  background: color-mix(in oklab, #ffffff 75%, transparent);
+  backdrop-filter: blur(18px) saturate(1.6);
+  -webkit-backdrop-filter: blur(18px) saturate(1.6);
+  border: 1px solid rgba(18, 18, 20, 0.07);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 12px 32px -18px rgba(18, 18, 20, 0.25);
+}
+
+.dark .mist-glass {
+  background: color-mix(in oklab, #121215 72%, transparent);
+  border-color: rgba(255, 255, 255, 0.07);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 18px 40px -20px rgba(0, 0, 0, 0.85);
+}
+
+@keyframes mistDialogIn {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+
+:where([role="dialog"], [aria-modal="true"]) {
+  animation: mistDialogIn 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
