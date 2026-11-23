@@ -1,3 +1,4 @@
+import './instrument.ts';
 import { createRoot } from 'react-dom/client';
 import { ClerkProvider } from '@clerk/react';
 import App from './App.tsx';
