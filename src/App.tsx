@@ -67,6 +67,7 @@ import {
   DeployModal,
   ProvidersModal,
 } from './components/Modals';
+import MistCodeModal from './components/MistCodeModal';
 import { mistClerkAppearance } from './utils/clerkTheme';
 import {
   clearPendingDirtyQueue,
@@ -306,6 +307,7 @@ export default function App() {
   const [deploymentsListOpen, setDeploymentsListOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [voiceChatOpen, setVoiceChatOpen] = useState(false);
+  const [mistCodeOpen, setMistCodeOpen] = useState(false);
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null;
   const deployProject =
@@ -1645,6 +1647,7 @@ export default function App() {
             setAuthPromptReason(null);
             setAccountOpen(true);
           }}
+          onOpenMistCode={() => setMistCodeOpen(true)}
         />
       ) : (
         <HomeView
@@ -1685,6 +1688,7 @@ export default function App() {
             setAuthPromptReason(null);
             setAccountOpen(true);
           }}
+          onOpenMistCode={() => setMistCodeOpen(true)}
         />
       )}
 
@@ -1756,6 +1760,11 @@ export default function App() {
             handleGenerateWebsite(synthesized);
           }
         }}
+      />
+
+      <MistCodeModal
+        isOpen={mistCodeOpen}
+        onClose={() => setMistCodeOpen(false)}
       />
     </>
   );

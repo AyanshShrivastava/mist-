@@ -89,6 +89,7 @@ interface HomeViewProps {
   onOpenSettings: () => void;
   onOpenDeployments: () => void;
   onOpenAccount: () => void;
+  onOpenMistCode?: () => void;
 }
 
 const INTERACTIVE_MODES = [
@@ -187,6 +188,7 @@ export default function HomeView({
   onOpenSettings,
   onOpenDeployments,
   onOpenAccount,
+  onOpenMistCode,
 }: HomeViewProps) {
   const [promptInput, setPromptInput] = useState('');
   const [selectedMode, setSelectedMode] = useState<string>('web');
@@ -1005,6 +1007,15 @@ export default function HomeView({
               ))}
             </nav>
             <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={onOpenMistCode}
+                className="hidden sm:inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-zinc-700 hover:text-zinc-950 bg-zinc-900/[0.04] hover:bg-zinc-900/[0.08] dark:text-zinc-300 dark:hover:text-white dark:bg-white/[0.06] dark:hover:bg-white/[0.12] border border-zinc-200/60 dark:border-white/10 transition-all cursor-pointer shadow-sm group"
+                title="Mist Code Desktop Companion"
+              >
+                <Terminal className="h-3.5 w-3.5 text-blue-500 dark:text-blue-400 group-hover:scale-110 transition-transform" />
+                <span>Mist Code</span>
+              </button>
               {themeButton}
               <button type="button" onClick={onOpenAccount} className="hidden sm:inline-flex h-9 items-center rounded-lg px-3 text-sm font-medium text-zinc-700 hover:bg-zinc-900/5 dark:text-zinc-300 dark:hover:bg-white/10 transition-colors cursor-pointer">Sign in</button>
               <button type="button" onClick={onOpenAccount} className="inline-flex h-9 items-center gap-1.5 rounded-lg mist-primary-gradient px-3.5 text-sm font-semibold cursor-pointer">Create account</button>
@@ -1149,7 +1160,16 @@ export default function HomeView({
               </button>
             ))}
           </nav>
-          <div className="ml-auto md:ml-0 flex items-center gap-1">
+          <div className="ml-auto md:ml-0 flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onOpenMistCode}
+              className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-zinc-700 hover:text-zinc-950 bg-zinc-900/[0.04] hover:bg-zinc-900/[0.08] dark:text-zinc-300 dark:hover:text-white dark:bg-white/[0.06] dark:hover:bg-white/[0.12] border border-zinc-200/60 dark:border-white/10 transition-all cursor-pointer shadow-sm group"
+              title="Mist Code Desktop Companion"
+            >
+              <Terminal className="h-3.5 w-3.5 text-blue-500 dark:text-blue-400 group-hover:scale-110 transition-transform" />
+              <span>Mist Code</span>
+            </button>
             {themeButton}
             <button type="button" aria-expanded={mobileMenuOpen} aria-label="Toggle menu" onClick={() => setMobileMenuOpen((v) => !v)} className="md:hidden inline-flex h-9 w-9 items-center justify-center rounded-full hover:bg-zinc-900/5 dark:hover:bg-white/10 cursor-pointer">
               {mobileMenuOpen ? <X className="h-4 w-4" aria-hidden="true" /> : <Menu className="h-4 w-4" aria-hidden="true" />}
@@ -1167,7 +1187,7 @@ export default function HomeView({
           {mobileMenuOpen && (
             <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="md:hidden overflow-hidden">
               <div className="grid grid-cols-2 gap-2 p-3">
-                {[...navItems, { icon: UserIcon, label: 'Account', onClick: onOpenAccount }].map(({ icon: Icon, label, onClick }) => (
+                {[...navItems, { icon: Terminal, label: 'Mist Code', onClick: () => onOpenMistCode?.() }, { icon: UserIcon, label: 'Account', onClick: onOpenAccount }].map(({ icon: Icon, label, onClick }) => (
                   <button key={label} type="button" onClick={() => { setMobileMenuOpen(false); onClick(); }} className="flex min-h-[44px] items-center gap-2 rounded-xl border border-zinc-200 bg-white/80 px-3 text-sm font-medium dark:border-zinc-800 dark:bg-zinc-900 cursor-pointer">
                     <Icon className="h-4 w-4" aria-hidden="true" />{label}
                   </button>

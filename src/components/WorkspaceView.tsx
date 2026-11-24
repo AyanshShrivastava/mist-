@@ -71,6 +71,7 @@ interface WorkspaceViewProps {
   onOpenProviders: () => void;
   onOpenSettings: () => void;
   onOpenAccount: () => void;
+  onOpenMistCode?: () => void;
 }
 
 const REFINEMENT_SUGGESTIONS = [
@@ -111,6 +112,7 @@ export default function WorkspaceView({
   onOpenProviders,
   onOpenSettings,
   onOpenAccount,
+  onOpenMistCode,
 }: WorkspaceViewProps) {
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>(defaultViewMode);
   const [viewport, setViewport] = useState<ViewportSize>(defaultViewport);
