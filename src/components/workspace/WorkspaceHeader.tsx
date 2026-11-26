@@ -1,5 +1,5 @@
 import React from 'react';
-import type { MistUser as User, MistProject, ViewportSize, WorkspaceViewMode } from '../../types/mist';
+import type { MistProject, MistUser as User, ViewportSize, WorkspaceViewMode } from '../../types/mist';
 import MobileWorkspaceHeader from './MobileWorkspaceHeader';
 import DesktopWorkspaceHeader from './DesktopWorkspaceHeader';
 
@@ -11,6 +11,8 @@ interface WorkspaceHeaderProps {
   shortProviderLabel: string;
   providerApiKey?: string;
   activePane: 'chat' | 'preview';
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
   onBackHome: () => void;
   onUpdateProjectName: (name: string) => void;
   onSetViewMode: (mode: WorkspaceViewMode) => void;
@@ -45,6 +47,8 @@ export default function WorkspaceHeader(props: WorkspaceHeaderProps) {
         viewport={props.viewport}
         shortProviderLabel={props.shortProviderLabel}
         providerApiKey={props.providerApiKey}
+        sidebarCollapsed={props.sidebarCollapsed}
+        onToggleSidebar={props.onToggleSidebar}
         onBackHome={props.onBackHome}
         onUpdateProjectName={props.onUpdateProjectName}
         onSetViewMode={props.onSetViewMode}

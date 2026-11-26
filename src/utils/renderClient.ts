@@ -153,7 +153,39 @@ function validateServiceId(serviceId: unknown): string {
   if (typeof serviceId !== 'string' || !serviceId.trim()) {
     throw new SecurityValidationError(400, 'Service ID is required.');
   }
-  return serviceId.trim();
+  const clean = serviceId.trim();
+  if (!/^[a-zA-Z0-9_-]{3,80}$/.test(clean)) {
+    throw new SecurityValidationError(
+      400,
+      'Invalid Render service ID format (must be 3-80 alphanumeric, underscore, or hyphen characters).',
+      'INVALID_SERVICE_ID',
+    );
+  }
+  return clean;
+}
+
+const RENDER_REQUEST_TIMEOUT_MS = 20_000;
+
+async function fetchRenderApi(
+  url: string,
+  init: RequestInit,
+  options?: { fetchImpl?: typeof fetch; signal?: AbortSignal },
+): Promise<Response> {
+  const fetchFn = options?.fetchImpl || globalThis.fetch;
+  const timeoutSignal =
+    typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+      ? AbortSignal.timeout(RENDER_REQUEST_TIMEOUT_MS)
+      : undefined;
+  const combinedSignal =
+    options?.signal && timeoutSignal && typeof (AbortSignal as any).any === 'function'
+      ? (AbortSignal as any).any([options.signal, timeoutSignal])
+      : options?.signal || timeoutSignal;
+
+  return fetchFn(url, {
+    ...init,
+    redirect: 'error',
+    signal: combinedSignal,
+  });
 }
 
 /**
@@ -339,19 +371,21 @@ export async function verifyRenderApiKey(
   apiKey: string,
   options?: { fetchImpl?: typeof fetch; signal?: AbortSignal },
 ): Promise<RenderVerificationResult> {
-  const fetchFn = options?.fetchImpl || globalThis.fetch;
   const validatedKey = validateRenderApiKey(apiKey);
 
   let response: Response;
   try {
-    response = await fetchFn(`${RENDER_API_BASE}/owners?limit=20`, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${validatedKey}`,
+    response = await fetchRenderApi(
+      `${RENDER_API_BASE}/owners?limit=20`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${validatedKey}`,
+        },
       },
-      signal: options?.signal,
-    });
+      options,
+    );
   } catch (err: any) {
     handleRenderFetchError(err, 'verification');
   }
@@ -385,7 +419,6 @@ export async function createRenderStaticSite(
   params: RenderCreateStaticSiteParams,
   options?: { fetchImpl?: typeof fetch; signal?: AbortSignal },
 ): Promise<RenderServiceSummary> {
-  const fetchFn = options?.fetchImpl || globalThis.fetch;
   const validatedKey = validateRenderApiKey(apiKey);
   const validatedRepo = validateGitHubRepoUrl(params.repo);
   const validatedName = validateRenderServiceName(params.name);
@@ -398,16 +431,19 @@ export async function createRenderStaticSite(
 
   let response: Response;
   try {
-    response = await fetchFn(`${RENDER_API_BASE}/services`, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${validatedKey}`,
+    response = await fetchRenderApi(
+      `${RENDER_API_BASE}/services`,
+      {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${validatedKey}`,
+        },
+        body: JSON.stringify(requestBody),
       },
-      body: JSON.stringify(requestBody),
-      signal: options?.signal,
-    });
+      options,
+    );
   } catch (err: any) {
     handleRenderFetchError(err, 'deploy');
   }
@@ -436,25 +472,32 @@ export async function getRenderService(
   serviceId: string,
   options?: { fetchImpl?: typeof fetch; signal?: AbortSignal },
 ): Promise<RenderServiceSummary> {
-  const fetchFn = options?.fetchImpl || globalThis.fetch;
   const validatedKey = validateRenderApiKey(apiKey);
   const cleanId = validateServiceId(serviceId);
 
-  const response = await fetchFn(`${RENDER_API_BASE}/services/${cleanId}`, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${validatedKey}`,
-    },
-    signal: options?.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetchRenderApi(
+      `${RENDER_API_BASE}/services/${cleanId}`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${validatedKey}`,
+        },
+      },
+      options,
+    );
+  } catch (err: any) {
+    handleRenderFetchError(err, 'service lookup');
+  }
 
   if (response.status === 404) {
     throw new SecurityValidationError(404, `Render service '${cleanId}' was not found.`, 'SERVICE_NOT_FOUND');
   }
 
   if (!response.ok) {
-    throw new SecurityValidationError(response.status, `Failed to load Render service: ${response.statusText}`);
+    await handleRenderHttpError(response, 'service lookup');
   }
 
   const s = (await response.json()) as any;
@@ -473,18 +516,25 @@ export async function getRenderLatestDeploy(
   serviceId: string,
   options?: { fetchImpl?: typeof fetch; signal?: AbortSignal },
 ): Promise<RenderDeploySummary | null> {
-  const fetchFn = options?.fetchImpl || globalThis.fetch;
   const validatedKey = validateRenderApiKey(apiKey);
   const cleanId = validateServiceId(serviceId);
 
-  const response = await fetchFn(`${RENDER_API_BASE}/services/${cleanId}/deploys?limit=1`, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${validatedKey}`,
-    },
-    signal: options?.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetchRenderApi(
+      `${RENDER_API_BASE}/services/${cleanId}/deploys?limit=1`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${validatedKey}`,
+        },
+      },
+      options,
+    );
+  } catch (err: any) {
+    handleRenderFetchError(err, 'latest deploy lookup');
+  }
 
   if (!response.ok) return null;
 
@@ -510,25 +560,32 @@ export async function triggerRenderDeploy(
   serviceId: string,
   options?: { clearCache?: boolean; fetchImpl?: typeof fetch; signal?: AbortSignal },
 ): Promise<{ id: string; status: string }> {
-  const fetchFn = options?.fetchImpl || globalThis.fetch;
   const validatedKey = validateRenderApiKey(apiKey);
   const cleanId = validateServiceId(serviceId);
 
-  const response = await fetchFn(`${RENDER_API_BASE}/services/${cleanId}/deploys`, {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${validatedKey}`,
-    },
-    body: JSON.stringify({
-      clearCache: options?.clearCache ? 'clear' : 'do_not_clear',
-    }),
-    signal: options?.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetchRenderApi(
+      `${RENDER_API_BASE}/services/${cleanId}/deploys`,
+      {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${validatedKey}`,
+        },
+        body: JSON.stringify({
+          clearCache: options?.clearCache ? 'clear' : 'do_not_clear',
+        }),
+      },
+      options,
+    );
+  } catch (err: any) {
+    handleRenderFetchError(err, 'deploy trigger');
+  }
 
   if (!response.ok) {
-    throw new SecurityValidationError(response.status, `Failed to trigger Render deploy: ${response.statusText}`);
+    await handleRenderHttpError(response, 'deploy trigger');
   }
 
   const d = (await response.json()) as any;
@@ -555,26 +612,33 @@ export async function listRenderStaticSites(
   apiKey: string,
   options?: { ownerId?: string; limit?: number; fetchImpl?: typeof fetch; signal?: AbortSignal },
 ): Promise<RenderServiceSummary[]> {
-  const fetchFn = options?.fetchImpl || globalThis.fetch;
   const validatedKey = validateRenderApiKey(apiKey);
-  const limit = options?.limit || 20;
+  const limit = Math.min(100, Math.max(1, options?.limit || 20));
 
   let url = `${RENDER_API_BASE}/services?type=static_site&limit=${limit}`;
   if (options?.ownerId) {
     url += `&ownerId=${encodeURIComponent(options.ownerId)}`;
   }
 
-  const response = await fetchFn(url, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${validatedKey}`,
-    },
-    signal: options?.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetchRenderApi(
+      url,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${validatedKey}`,
+        },
+      },
+      options,
+    );
+  } catch (err: any) {
+    handleRenderFetchError(err, 'service list');
+  }
 
   if (!response.ok) {
-    throw new SecurityValidationError(response.status, `Failed to list Render services: ${response.statusText}`);
+    await handleRenderHttpError(response, 'service list');
   }
 
   const data = (await response.json()) as any;

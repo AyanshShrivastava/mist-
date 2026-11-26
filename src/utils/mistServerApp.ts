@@ -7,7 +7,14 @@ import { compile as compileTailwind } from 'tailwindcss';
 import type {
   AiProviderConfig,
   AiProviderId,
+  McpApprovalRequest,
+  McpAuthType,
+  McpServerConfig,
+  McpServerCredential,
+  McpServerPublicStatus,
   MistProject,
+  PreviewConsoleEntry,
+  PreviewHealthSnapshot,
   ProjectFile,
   WebSearchConfig,
   WebSearchMode,
@@ -24,8 +31,10 @@ import {
   validateAndExtractCitations,
 } from '../data/webSearch';
 import { classifyModelError, type ModelHealthIncident } from './aiErrors';
-import { maskApiKey, normalizeProjectFilePath, resolveAppEntryPath } from './projectOps';
+import { createSafeId, maskApiKey, normalizeProjectFilePath, resolveAppEntryPath } from './projectOps';
 import {
+  assertSafeExternalUrl,
+  assertSafePlainObject,
   BODY_LIMITS,
   BUILDER_CSP,
   createBodySizeLimitMiddleware,
@@ -51,18 +60,41 @@ import {
   sendSecurityErrorResponse,
   unsealUserVaultPayload,
   validateAiProviderConfig,
+  validateChatMessagesInput,
   validateExternalUrlSyntax,
+  validateIdParam,
   validateProjectFilesPayload,
   validateProjectPayload,
+  validatePromptInput,
+  validateSelectedVisualElementInput,
+  validateUserPreferencesPayload,
   validateVaultPayload,
   validateWebSearchConfig,
   verifyClerkAuthHeader,
   verifyFirebaseAuthHeader,
   type AuthenticatedRequest,
+  type LookupFn,
+  type RenderCredentialConfig,
   type SharedRateLimitAdapter,
+  type VaultPlainPayload,
   type VerifiedClerkUser,
   type VerifiedFirebaseUser,
 } from './serverSecurity';
+import {
+  executeSandboxTerminalCommand,
+  type SandboxBuildBundleFn,
+} from './mistSandboxRunner';
+import {
+  connectAndDiscoverMcpTools,
+  createMcpOAuthAuthorizationRequest,
+  exchangeMcpOAuthAuthorizationCode,
+  invokeMcpServerTool,
+  classifyMcpToolSensitivity,
+  sanitizeMcpError,
+  McpClientError,
+  type PendingMcpOAuthState,
+} from './mcpClient';
+import { runMistBuilderAgent } from './mistAgentBuilder';
 import { fetchGatewayModelsCatalog } from './modelCatalogServer';
 import {
   callByokCompletionRaw,
@@ -87,7 +119,6 @@ import {
   triggerRenderDeploy,
   listRenderStaticSites,
 } from './renderClient';
-import type { RenderCredentialConfig, VaultPlainPayload } from './serverSecurity';
 import {
   FirestoreAdminStore,
   InMemoryAdminStore,
@@ -96,6 +127,7 @@ import {
 import {
   CloudflareR2ArtifactStore,
   InMemoryR2ArtifactStore,
+  validateSiteSlug,
   type R2StorageOperations,
 } from './r2ArtifactStore';
 
@@ -351,9 +383,208 @@ const INSPECTOR_BRIDGE_SCRIPT = `
     }
   }, true);
 
+  function forwardPreviewLog(level, message, meta) {
+    try {
+      window.parent.postMessage({
+        type: 'MIST_PREVIEW_LOG',
+        payload: {
+          level: level,
+          message: String(message || '').slice(0, 2000),
+          source: meta && meta.source ? String(meta.source).slice(0, 200) : undefined,
+          line: meta && typeof meta.line === 'number' ? meta.line : undefined,
+          column: meta && typeof meta.column === 'number' ? meta.column : undefined,
+          stack: meta && meta.stack ? String(meta.stack).slice(0, 2000) : undefined,
+          timestamp: new Date().toISOString()
+        }
+      }, '*');
+    } catch (_) {}
+  }
+
+  var runtimeErrorCount = 0;
+  var consoleErrorCount = 0;
+
+  window.addEventListener('error', function(e) {
+    runtimeErrorCount += 1;
+    forwardPreviewLog('runtime_error', e.message || 'Uncaught preview script error', {
+      source: e.filename,
+      line: e.lineno,
+      column: e.colno,
+      stack: e.error && e.error.stack
+    });
+  });
+
+  window.addEventListener('unhandledrejection', function(e) {
+    runtimeErrorCount += 1;
+    var reason = e.reason;
+    var msg = reason && reason.message ? reason.message : String(reason || 'Unhandled Promise rejection');
+    forwardPreviewLog('runtime_error', msg, {
+      stack: reason && reason.stack
+    });
+  });
+
+  // Preserve WebGL drawing buffer so 3D previews can be captured reliably in preview screenshots
+  if (typeof HTMLCanvasElement !== 'undefined' && HTMLCanvasElement.prototype && HTMLCanvasElement.prototype.getContext) {
+    var origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+      if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
+        var nextAttrs = Object.assign({}, attrs || {}, { preserveDrawingBuffer: true });
+        return origGetContext.call(this, type, nextAttrs);
+      }
+      return origGetContext.call(this, type, attrs);
+    };
+  }
+
+  if (typeof console !== 'undefined') {
+    var origError = console.error ? console.error.bind(console) : null;
+    var origWarn = console.warn ? console.warn.bind(console) : null;
+    console.error = function() {
+      consoleErrorCount += 1;
+      try {
+        var text = Array.prototype.slice.call(arguments).map(function(a) {
+          if (a instanceof Error) return a.message + (a.stack ? '\\n' + a.stack : '');
+          if (typeof a === 'object') { try { return JSON.stringify(a); } catch (_) { return String(a); } }
+          return String(a);
+        }).join(' ');
+        forwardPreviewLog('error', text);
+      } catch (_) {}
+      if (origError) return origError.apply(console, arguments);
+    };
+    console.warn = function() {
+      try {
+        var text = Array.prototype.slice.call(arguments).map(function(a) { return String(a); }).join(' ');
+        forwardPreviewLog('warn', text);
+      } catch (_) {}
+      if (origWarn) return origWarn.apply(console, arguments);
+    };
+  }
+
+  function collectPreviewHealth() {
+    var root = document.getElementById('root');
+    var rootHtml = root ? root.innerHTML : '';
+    var textLen = document.body && document.body.innerText ? document.body.innerText.trim().length : 0;
+    var elCount = root ? root.querySelectorAll('*').length : 0;
+    var canvases = document.querySelectorAll('canvas');
+    var imgs = document.querySelectorAll('img');
+    var brokenImgs = 0;
+    for (var i = 0; i < imgs.length; i++) {
+      if (!imgs[i].complete || imgs[i].naturalWidth === 0) brokenImgs++;
+    }
+    var docEl = document.documentElement;
+    var overflowPx = Math.max(0, (docEl ? docEl.scrollWidth : 0) - window.innerWidth);
+    return {
+      capturedAt: new Date().toISOString(),
+      rootHtmlLength: rootHtml.length,
+      textLength: textLen,
+      elementCount: elCount,
+      canvasCount: canvases.length,
+      horizontalOverflowPx: overflowPx,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      brokenImages: brokenImgs,
+      runtimeErrorCount: runtimeErrorCount,
+      consoleErrorCount: consoleErrorCount
+    };
+  }
+
+  function captureAndPostSnapshot(requestId) {
+    var metrics = collectPreviewHealth();
+    var vw = Math.max(320, Math.min(window.innerWidth || 1024, 1440));
+    var vh = Math.max(240, Math.min(window.innerHeight || 768, 960));
+    var targetW = 720;
+    var scale = Math.min(1, targetW / vw);
+    var outW = Math.round(vw * scale);
+    var outH = Math.round(vh * scale);
+
+    function sendResult(dataUrl, format) {
+      window.parent.postMessage({
+        type: 'MIST_PREVIEW_SNAPSHOT',
+        requestId: requestId || null,
+        payload: Object.assign({}, metrics, {
+          screenshotDataUrl: dataUrl || undefined,
+          screenshotFormat: format || undefined
+        })
+      }, '*');
+    }
+
+    try {
+      var outCanvas = document.createElement('canvas');
+      outCanvas.width = outW;
+      outCanvas.height = outH;
+      var ctx = outCanvas.getContext('2d');
+      if (!ctx) {
+        sendResult(null, null);
+        return;
+      }
+
+      // Build serialized DOM SVG for foreignObject rasterization
+      var clone = document.documentElement.cloneNode(true);
+      var scripts = clone.querySelectorAll('script, [data-mist-ui="true"]');
+      for (var s = 0; s < scripts.length; s++) {
+        scripts[s].parentNode && scripts[s].parentNode.removeChild(scripts[s]);
+      }
+      var xhtml = new XMLSerializer().serializeToString(clone);
+      var svgStr = '<svg xmlns="http://www.w3.org/2000/svg" width="' + vw + '" height="' + vh + '">' +
+        '<foreignObject width="100%" height="100%">' + xhtml + '</foreignObject></svg>';
+      var svgDataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
+
+      var img = new Image();
+      img.onload = function() {
+        try {
+          ctx.fillStyle = window.getComputedStyle(document.body).backgroundColor || '#ffffff';
+          ctx.fillRect(0, 0, outW, outH);
+          ctx.drawImage(img, 0, 0, outW, outH);
+          // Composite live 2D/WebGL canvases so games and Three.js renders appear accurately
+          var liveCanvases = document.querySelectorAll('canvas');
+          for (var c = 0; c < liveCanvases.length; c++) {
+            var lc = liveCanvases[c];
+            var rect = lc.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              try {
+                ctx.drawImage(lc, rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
+              } catch (_) {}
+            }
+          }
+          var png = outCanvas.toDataURL('image/png');
+          sendResult(png, 'png');
+        } catch (_) {
+          // Fallback: composite just canvases if DOM foreignObject tainted canvas
+          try {
+            ctx.fillStyle = window.getComputedStyle(document.body).backgroundColor || '#ffffff';
+            ctx.fillRect(0, 0, outW, outH);
+            var liveCanvases2 = document.querySelectorAll('canvas');
+            for (var c2 = 0; c2 < liveCanvases2.length; c2++) {
+              var lc2 = liveCanvases2[c2];
+              var rect2 = lc2.getBoundingClientRect();
+              if (rect2.width > 0 && rect2.height > 0) {
+                ctx.drawImage(lc2, rect2.left * scale, rect2.top * scale, rect2.width * scale, rect2.height * scale);
+              }
+            }
+            if (liveCanvases2.length > 0) {
+              sendResult(outCanvas.toDataURL('image/png'), 'png');
+            } else {
+              sendResult(svgDataUrl, 'svg');
+            }
+          } catch (__) {
+            sendResult(svgDataUrl, 'svg');
+          }
+        }
+      };
+      img.onerror = function() {
+        sendResult(null, null);
+      };
+      img.src = svgDataUrl;
+    } catch (_) {
+      sendResult(null, null);
+    }
+  }
+
   window.addEventListener('message', function(e) {
     if (e.source !== window.parent) return;
     if (!e.data || typeof e.data !== 'object') return;
+    if (e.data.type === 'MIST_CAPTURE_PREVIEW') {
+      captureAndPostSnapshot(e.data.requestId);
+      return;
+    }
     if (e.data.type === 'MIST_TOGGLE_INSPECTOR') {
       inspectorActive = Boolean(e.data.enabled);
       document.body.style.cursor = inspectorActive ? 'crosshair' : '';
@@ -416,30 +647,43 @@ function collectImportedLucideSymbols(files: ProjectFile[]): string[] {
 }
 
 function resolveThreeModulePath(specifier: string): string | null {
+  if (!specifier || specifier.includes('\0') || specifier.includes('\\')) {
+    return null;
+  }
   const threeDir = path.resolve(process.cwd(), 'node_modules/three');
+  const resolveContainedJs = (candidatePath: string): string | null => {
+    const tries = [candidatePath, `${candidatePath}.js`, `${candidatePath}.mjs`];
+    for (const candidate of tries) {
+      const resolved = path.resolve(candidate);
+      if (
+        (resolved === threeDir || resolved.startsWith(threeDir + path.sep)) &&
+        (resolved.endsWith('.js') || resolved.endsWith('.mjs')) &&
+        fs.existsSync(resolved) &&
+        fs.statSync(resolved).isFile()
+      ) {
+        return resolved;
+      }
+    }
+    return null;
+  };
+
   if (specifier === 'three') {
-    return path.join(threeDir, 'build/three.module.js');
+    return resolveContainedJs(path.join(threeDir, 'build/three.module.js'));
   }
   if (specifier === 'three/addons') {
-    return path.join(threeDir, 'examples/jsm/Addons.js');
+    return resolveContainedJs(path.join(threeDir, 'examples/jsm/Addons.js'));
   }
   if (specifier.startsWith('three/addons/')) {
     const rel = specifier.slice('three/addons/'.length);
-    const candidate = path.join(threeDir, 'examples/jsm', rel);
-    if (fs.existsSync(candidate)) return candidate;
-    if (fs.existsSync(`${candidate}.js`)) return `${candidate}.js`;
+    return resolveContainedJs(path.join(threeDir, 'examples/jsm', rel));
   }
   if (specifier.startsWith('three/examples/jsm/')) {
     const rel = specifier.slice('three/examples/jsm/'.length);
-    const candidate = path.join(threeDir, 'examples/jsm', rel);
-    if (fs.existsSync(candidate)) return candidate;
-    if (fs.existsSync(`${candidate}.js`)) return `${candidate}.js`;
+    return resolveContainedJs(path.join(threeDir, 'examples/jsm', rel));
   }
   if (specifier.startsWith('three/')) {
     const rel = specifier.slice('three/'.length);
-    const candidate = path.join(threeDir, rel);
-    if (fs.existsSync(candidate)) return candidate;
-    if (fs.existsSync(`${candidate}.js`)) return `${candidate}.js`;
+    return resolveContainedJs(path.join(threeDir, rel));
   }
   return null;
 }
@@ -558,7 +802,7 @@ export async function bundleProjectToHtml(params: {
         if (args.path === entryPath) {
           return { path: entryPath, namespace: 'mist-fs' };
         }
-        if (args.path.endsWith('.css')) {
+        if (args.path.endsWith('.css') && !args.path.includes('\0')) {
           return { path: args.path, namespace: 'mist-css-noop' };
         }
         const importerDir =
@@ -714,7 +958,12 @@ export async function bundleProjectToHtml(params: {
     .join('\n')
     .replace(/<\/style/gi, '<\\/style');
 
-  const safeTitle = params.title.replace(/[<>]/g, '');
+  const safeTitle = String(params.title || 'Mist App')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
   const isStandaloneExport = Boolean(params.standaloneExport);
   const initialAppAiEnabled = isStandaloneExport ? false : Boolean(params.enableAppAi);
   const inlineVendorScript = Boolean(params.includeInspector) || isStandaloneExport;
@@ -1055,9 +1304,11 @@ export interface MistAppDeps {
   verifyAuthHeader?: (authHeader?: string) => Promise<VerifiedClerkUser>;
   aiFetchImpl?: typeof fetch;
   searchFetchImpl?: typeof fetch;
+  mcpFetchImpl?: typeof fetch;
   searchService?: WebSearchService;
   notificationService?: PushNotificationService;
   skipDnsLookup?: boolean;
+  lookupFn?: LookupFn;
   trustProxy?: boolean | number | string;
   aiRateLimitMax?: number;
   catalogRateLimitMax?: number;
@@ -1130,6 +1381,7 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
   const verifyAuth = deps.verifyAuthHeader || verifyClerkAuthHeader;
   const aiFetchImpl = deps.aiFetchImpl;
   const searchFetchImpl = deps.searchFetchImpl ?? deps.aiFetchImpl;
+  const mcpFetchImpl = deps.mcpFetchImpl;
   const searchService = deps.searchService || defaultWebSearchService;
   const notificationService =
     deps.notificationService ||
@@ -1137,7 +1389,71 @@ export function createMistApp(deps: MistAppDeps = {}): Express {
       store: adminStore,
     });
   const skipDnsLookup = deps.skipDnsLookup;
+  const lookupFn = deps.lookupFn;
   const renderFetchImpl = deps.renderFetchImpl;
+
+  const pendingMcpOAuthStates = new Map<string, PendingMcpOAuthState>();
+  const pendingMcpApprovals = new Map<
+    string,
+    { ownerUid: string; resolve: (approved: boolean) => void; timer: ReturnType<typeof setTimeout> }
+  >();
+
+  async function loadUserVaultOrEmpty(user: VerifiedClerkUser): Promise<VaultPlainPayload> {
+    if (!user.email) return {};
+    const vaultDoc = await adminStore.getUserVault(user.userId);
+    if (!vaultDoc?.ciphertext) return {};
+    try {
+      return unsealUserVaultPayload({
+        uid: user.userId,
+        email: user.email,
+        encryptedPayload: vaultDoc.ciphertext,
+      });
+    } catch {
+      throw new SecurityValidationError(
+        409,
+        'Existing encrypted vault could not be decrypted. Reset your vault before saving new credentials.',
+        'VAULT_DECRYPT_CONFLICT',
+      );
+    }
+  }
+
+  async function persistUserVault(
+    user: VerifiedClerkUser,
+    payload: Omit<VaultPlainPayload, 'needsReencryption'>,
+  ) {
+    if (!user.email) {
+      throw new SecurityValidationError(400, 'An account email is required to seal credentials.');
+    }
+    const sealed = sealUserVaultPayload({
+      uid: user.userId,
+      email: user.email,
+      aiConfig: payload.aiConfig,
+      searchConfig: payload.searchConfig,
+      renderConfig: payload.renderConfig,
+      mcpServers: payload.mcpServers,
+      mcpCredentials: payload.mcpCredentials,
+    });
+    await adminStore.saveUserVault(user.userId, user.email, {
+      ciphertext: sealed.encryptedPayload,
+      aiKeyHint: sealed.aiKeyHint,
+      searchKeyHint: sealed.searchKeyHint,
+      renderKeyHint: sealed.renderKeyHint,
+    });
+    return sealed;
+  }
+
+  const runSandboxBundleCheck: SandboxBuildBundleFn = async (files) => {
+    const bundled = await bundleProjectToHtml({
+      files,
+      title: 'Mist Verification',
+      includeInspector: false,
+      enableAppAi: false,
+    });
+    return {
+      html: bundled.html,
+      bundleError: bundled.bundleError ?? null,
+    };
+  };
 
   const configuredTrustProxy =
     deps.trustProxy !== undefined
@@ -1427,7 +1743,7 @@ Return JSON: { "content": "..." }`;
 
     if (detectGatewayFromBaseUrl(baseUrl) !== 'openrouter') {
       res.status(401).json({
-        error: 'Sign in with Google to inspect models on non-public gateways.',
+        error: 'Sign in to Mist to inspect models on non-public gateways.',
       });
       return;
     }
@@ -1492,21 +1808,15 @@ Return JSON: { "content": "..." }`;
           aiConfig?: AiProviderConfig;
           searchConfig?: WebSearchConfig;
         };
+        const existing = await loadUserVaultOrEmpty(user);
         const validated = validateVaultPayload({
           aiConfig: aiConfig ? normalizeProviderConfigToStudio(aiConfig) : undefined,
           searchConfig: searchConfig ? normalizeWebSearchConfig(searchConfig) : undefined,
+          renderConfig: existing.renderConfig,
+          mcpServers: existing.mcpServers,
+          mcpCredentials: existing.mcpCredentials,
         });
-        const sealed = sealUserVaultPayload({
-          uid: user.userId,
-          email: user.email,
-          aiConfig: validated.aiConfig,
-          searchConfig: validated.searchConfig,
-        });
-        await adminStore.saveUserVault(user.userId, user.email, {
-          ciphertext: sealed.encryptedPayload,
-          aiKeyHint: sealed.aiKeyHint,
-          searchKeyHint: sealed.searchKeyHint,
-        });
+        const sealed = await persistUserVault(user, validated);
         res.json(sealed);
       } catch (err) {
         sendSecurityErrorResponse(res, err, 400);
@@ -1544,17 +1854,7 @@ Return JSON: { "content": "..." }`;
         // Key rotation & migration: if decrypted with a previous key or legacy fallback, seamlessly re-encrypt
         if (unsealed.needsReencryption) {
           try {
-            const resealed = sealUserVaultPayload({
-              uid: user.userId,
-              email: user.email,
-              aiConfig: unsealed.aiConfig,
-              searchConfig: unsealed.searchConfig,
-            });
-            await adminStore.saveUserVault(user.userId, user.email, {
-              ciphertext: resealed.encryptedPayload,
-              aiKeyHint: resealed.aiKeyHint,
-              searchKeyHint: resealed.searchKeyHint,
-            });
+            await persistUserVault(user, unsealed);
           } catch (reencryptErr) {
             console.warn('[Mist Vault] Silent re-encryption update skipped:', sanitizeErrorMessage(reencryptErr));
           }
@@ -1625,20 +1925,8 @@ Return JSON: { "content": "..." }`;
           fetchImpl: renderFetchImpl,
         });
 
-        // Unseal existing vault if present to preserve AI & search configs
-        const vaultDoc = await adminStore.getUserVault(user.userId);
-        let unsealed: VaultPlainPayload = {};
-        if (vaultDoc?.ciphertext) {
-          try {
-            unsealed = unsealUserVaultPayload({
-              uid: user.userId,
-              email: user.email,
-              encryptedPayload: vaultDoc.ciphertext,
-            });
-          } catch {
-            // Start clean if existing ciphertext was invalid
-          }
-        }
+        // Unseal existing vault if present to preserve AI, search, and MCP configs
+        const unsealed = await loadUserVaultOrEmpty(user);
 
         const renderConfig: RenderCredentialConfig = {
           apiKey: validatedKey,
@@ -1649,19 +1937,9 @@ Return JSON: { "content": "..." }`;
           connectedAt: new Date().toISOString(),
         };
 
-        const sealed = sealUserVaultPayload({
-          uid: user.userId,
-          email: user.email,
-          aiConfig: unsealed.aiConfig,
-          searchConfig: unsealed.searchConfig,
+        const sealed = await persistUserVault(user, {
+          ...unsealed,
           renderConfig,
-        });
-
-        await adminStore.saveUserVault(user.userId, user.email, {
-          ciphertext: sealed.encryptedPayload,
-          aiKeyHint: sealed.aiKeyHint,
-          searchKeyHint: sealed.searchKeyHint,
-          renderKeyHint: sealed.renderKeyHint,
         });
 
         res.json({
@@ -1707,12 +1985,26 @@ Return JSON: { "content": "..." }`;
         }
 
         if (!unsealed.renderConfig || !unsealed.renderConfig.apiKey) {
-          res.json({ connected: false });
+          const renderMcp = (unsealed.mcpServers || []).find(
+            (s) => s.presetId === 'render' || s.url.includes('mcp.render.com'),
+          );
+          const renderMcpCred = renderMcp ? unsealed.mcpCredentials?.[renderMcp.id] : undefined;
+          res.json({
+            connected: false,
+            oauthMcpConnected: Boolean(renderMcp?.enabled && renderMcpCred?.accessToken),
+          });
           return;
         }
 
+        const renderMcp = (unsealed.mcpServers || []).find(
+          (s) => s.presetId === 'render' || s.url.includes('mcp.render.com'),
+        );
+        const renderMcpCred = renderMcp ? unsealed.mcpCredentials?.[renderMcp.id] : undefined;
+
         res.json({
           connected: true,
+          authMethod: 'api_key',
+          oauthMcpConnected: Boolean(renderMcp?.enabled && renderMcpCred?.accessToken),
           owner: {
             id: unsealed.renderConfig.ownerId,
             name: unsealed.renderConfig.ownerName,
@@ -1743,30 +2035,10 @@ Return JSON: { "content": "..." }`;
           res.status(400).json({ error: 'An account email is required.' });
           return;
         }
-        const vaultDoc = await adminStore.getUserVault(user.userId);
-        if (!vaultDoc?.ciphertext) {
-          res.json({ ok: true, connected: false });
-          return;
-        }
-        const unsealed = unsealUserVaultPayload({
-          uid: user.userId,
-          email: user.email,
-          encryptedPayload: vaultDoc.ciphertext,
-        });
-
-        const sealed = sealUserVaultPayload({
-          uid: user.userId,
-          email: user.email,
-          aiConfig: unsealed.aiConfig,
-          searchConfig: unsealed.searchConfig,
+        const unsealed = await loadUserVaultOrEmpty(user);
+        await persistUserVault(user, {
+          ...unsealed,
           renderConfig: undefined,
-        });
-
-        await adminStore.saveUserVault(user.userId, user.email, {
-          ciphertext: sealed.encryptedPayload,
-          aiKeyHint: sealed.aiKeyHint,
-          searchKeyHint: sealed.searchKeyHint,
-          renderKeyHint: '',
         });
 
         res.json({ ok: true, connected: false });
@@ -1917,7 +2189,7 @@ Return JSON: { "content": "..." }`;
           return;
         }
 
-        const serviceId = req.params.serviceId;
+        const serviceId = validateIdParam(req.params.serviceId, 'Render Service ID', 80);
         const service = await getRenderService(unsealed.renderConfig.apiKey, serviceId, {
           fetchImpl: renderFetchImpl,
         });
@@ -1972,6 +2244,531 @@ Return JSON: { "content": "..." }`;
     },
   );
 
+  app.post(
+    '/api/render/services/:serviceId/deploy',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'An account email is required.' });
+          return;
+        }
+        const vaultDoc = await adminStore.getUserVault(user.userId);
+        if (!vaultDoc?.ciphertext) {
+          res.status(400).json({ error: 'Render account is not connected.' });
+          return;
+        }
+        const unsealed = unsealUserVaultPayload({
+          uid: user.userId,
+          email: user.email,
+          encryptedPayload: vaultDoc.ciphertext,
+        });
+        if (!unsealed.renderConfig?.apiKey) {
+          res.status(400).json({ error: 'Render account is not connected.' });
+          return;
+        }
+        const serviceId = validateIdParam(req.params.serviceId, 'Render Service ID', 80);
+        const clearCache = Boolean(req.body?.clearCache);
+        const deploy = await triggerRenderDeploy(unsealed.renderConfig.apiKey, serviceId, {
+          clearCache,
+          fetchImpl: renderFetchImpl,
+        });
+        res.json({ ok: true, deploy });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  // --- First-Class MCP Ecosystem Endpoints (Encrypted Vault + OAuth 2.1 + Live Tool Discovery) ---
+  function formatMcpPublicStatus(
+    server: McpServerConfig,
+    cred?: McpServerCredential,
+    runtime?: { status?: McpServerPublicStatus['status']; tools?: any[]; lastCheckedAt?: string; lastError?: string },
+  ): McpServerPublicStatus {
+    const hasCred = Boolean(cred?.accessToken?.trim());
+    const expired =
+      server.authType === 'oauth2' &&
+      cred?.expiresAt &&
+      !Number.isNaN(Date.parse(cred.expiresAt)) &&
+      Date.parse(cred.expiresAt) <= Date.now() &&
+      !cred.refreshToken;
+    const defaultStatus: McpServerPublicStatus['status'] =
+      !server.enabled
+        ? 'disconnected'
+        : server.authType !== 'none' && !hasCred
+          ? 'disconnected'
+          : expired
+            ? 'auth_expired'
+            : 'connected';
+
+    return {
+      id: server.id,
+      name: server.name,
+      url: server.url,
+      authType: server.authType,
+      transport: server.transport || 'streamable_http',
+      enabled: server.enabled,
+      presetId: server.presetId || 'custom',
+      status: runtime?.status || defaultStatus,
+      hasCredential: hasCred,
+      credentialHint: hasCred ? maskApiKey(cred?.accessToken) : undefined,
+      tokenExpiresAt: cred?.expiresAt,
+      lastCheckedAt: runtime?.lastCheckedAt,
+      lastError: runtime?.lastError,
+      tools: runtime?.tools || [],
+    };
+  }
+
+  app.get(
+    '/api/mcp/servers',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const vault = await loadUserVaultOrEmpty(user);
+        const servers = (vault.mcpServers || []).map((s) =>
+          formatMcpPublicStatus(s, vault.mcpCredentials?.[s.id]),
+        );
+        res.json({ servers });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 500);
+      }
+    },
+  );
+
+  app.post(
+    '/api/mcp/servers',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.VAULT, 'MCP server config'),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'An account email is required to configure MCP servers.' });
+          return;
+        }
+        const body = assertSafePlainObject(req.body, 'MCP server configuration');
+        const id = body.id ? validateIdParam(body.id, 'MCP server ID', 64) : createSafeId('mcp');
+        const name = validatePromptInput(body.name, 'Server name', 80);
+        const rawUrl = validatePromptInput(body.url, 'MCP server URL', 2048);
+        validateExternalUrlSyntax(rawUrl);
+        await assertSafeExternalUrl(rawUrl, { skipDnsLookup, lookupFn });
+
+        const rawAuthType = body.authType;
+        let authType: McpAuthType = 'bearer';
+        if (rawAuthType !== undefined) {
+          if (
+            rawAuthType === 'oauth2' ||
+            rawAuthType === 'bearer' ||
+            rawAuthType === 'none'
+          ) {
+            authType = rawAuthType;
+          } else {
+            throw new SecurityValidationError(
+              400,
+              'authType must be oauth2, bearer, or none.',
+              'INVALID_AUTH_TYPE',
+            );
+          }
+        }
+        const presetId =
+          body.presetId === 'render' || body.presetId === 'github' || body.presetId === 'custom'
+            ? body.presetId
+            : 'custom';
+        const clientId =
+          typeof body.clientId === 'string' && body.clientId.trim() ? body.clientId.trim().slice(0, 256) : undefined;
+        const scopes = Array.isArray(body.scopes)
+          ? body.scopes.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim().slice(0, 80))
+          : undefined;
+        const bearerToken =
+          typeof body.bearerToken === 'string' && body.bearerToken.trim()
+            ? body.bearerToken.trim().slice(0, 4096)
+            : undefined;
+        const enabled = body.enabled !== false;
+
+        const vault = await loadUserVaultOrEmpty(user);
+        const now = new Date().toISOString();
+        const existingServers = vault.mcpServers || [];
+        const existingCreds = { ...(vault.mcpCredentials || {}) };
+
+        const existingServer = existingServers.find((s) => s.id === id);
+        const nextServer: McpServerConfig = {
+          id,
+          name,
+          url: rawUrl,
+          authType,
+          transport: body.transport === 'sse' ? 'sse' : 'streamable_http',
+          enabled,
+          presetId,
+          ...(clientId ? { clientId } : {}),
+          ...(scopes && scopes.length > 0 ? { scopes } : {}),
+          createdAt: existingServer?.createdAt || now,
+          updatedAt: now,
+        };
+
+        if (authType === 'none') {
+          delete existingCreds[id];
+        } else if (bearerToken) {
+          existingCreds[id] = {
+            serverId: id,
+            accessToken: bearerToken,
+            tokenType: 'Bearer',
+          };
+        }
+
+        const nextServers = existingServer
+          ? existingServers.map((s) => (s.id === id ? nextServer : s))
+          : [...existingServers, nextServer];
+
+        await persistUserVault(user, {
+          ...vault,
+          mcpServers: nextServers,
+          mcpCredentials: existingCreds,
+        });
+
+        res.json({
+          ok: true,
+          server: formatMcpPublicStatus(nextServer, existingCreds[id]),
+        });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.delete(
+    '/api/mcp/servers/:id',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const serverId = validateIdParam(req.params.id, 'MCP server ID', 64);
+        const vault = await loadUserVaultOrEmpty(user);
+        const nextServers = (vault.mcpServers || []).filter((s) => s.id !== serverId);
+        const nextCreds = { ...(vault.mcpCredentials || {}) };
+        delete nextCreds[serverId];
+
+        await persistUserVault(user, {
+          ...vault,
+          mcpServers: nextServers,
+          mcpCredentials: nextCreds,
+        });
+        res.json({ ok: true, deletedId: serverId });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.post(
+    '/api/mcp/servers/:id/test',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const serverId = validateIdParam(req.params.id, 'MCP server ID', 64);
+        const vault = await loadUserVaultOrEmpty(user);
+        const server = (vault.mcpServers || []).find((s) => s.id === serverId);
+        if (!server) {
+          res.status(404).json({ error: 'MCP server not found.' });
+          return;
+        }
+        const cred = vault.mcpCredentials?.[server.id];
+        if (server.authType !== 'none' && !cred?.accessToken) {
+          res.json({
+            ok: false,
+            server: formatMcpPublicStatus(server, cred, {
+              status: 'disconnected',
+              lastCheckedAt: new Date().toISOString(),
+              lastError:
+                server.authType === 'oauth2'
+                  ? 'Not authorized yet. Complete OAuth sign-in first.'
+                  : 'No API key or Bearer token saved for this server.',
+            }),
+          });
+          return;
+        }
+
+        let updatedCred = cred;
+        try {
+          const discovery = await connectAndDiscoverMcpTools({
+            server,
+            credential: cred,
+            options: {
+              fetchImpl: mcpFetchImpl,
+              skipDnsLookup,
+              lookupFn,
+              onCredentialUpdated: async (nextCred) => {
+                updatedCred = nextCred;
+                const latest = await loadUserVaultOrEmpty(user);
+                await persistUserVault(user, {
+                  ...latest,
+                  mcpCredentials: { ...(latest.mcpCredentials || {}), [server.id]: nextCred },
+                });
+              },
+            },
+          });
+          res.json({
+            ok: true,
+            protocolVersion: discovery.protocolVersion,
+            serverInfo: discovery.serverInfo,
+            server: formatMcpPublicStatus(server, updatedCred, {
+              status: 'connected',
+              tools: discovery.tools,
+              lastCheckedAt: new Date().toISOString(),
+            }),
+          });
+        } catch (err) {
+          const isAuthErr =
+            err instanceof McpClientError && (err.status === 401 || err.status === 403);
+          res.status(isAuthErr ? 401 : 502).json({
+            ok: false,
+            error: sanitizeMcpError(err),
+            server: formatMcpPublicStatus(server, updatedCred, {
+              status: isAuthErr ? 'auth_expired' : 'error',
+              lastCheckedAt: new Date().toISOString(),
+              lastError: sanitizeMcpError(err),
+            }),
+          });
+        }
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.post(
+    '/api/mcp/oauth/start',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        if (!user.email) {
+          res.status(400).json({ error: 'Verified account email is required for MCP OAuth.' });
+          return;
+        }
+        const serverId = validateIdParam(req.body?.serverId, 'MCP server ID', 64);
+        const vault = await loadUserVaultOrEmpty(user);
+        const server = (vault.mcpServers || []).find((s) => s.id === serverId);
+        if (!server) {
+          res.status(404).json({ error: 'Save the MCP server configuration before starting OAuth.' });
+          return;
+        }
+
+        const host = getEffectiveHost(req) || 'localhost:3000';
+        const proto = req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+        const redirectUri = `${proto}://${host}/api/mcp/oauth/callback`;
+
+        const { authorizeUrl, pendingState } = await createMcpOAuthAuthorizationRequest({
+          server,
+          userId: user.userId,
+          userEmail: user.email,
+          redirectUri,
+          fetchImpl: mcpFetchImpl,
+          skipDnsLookup,
+          lookupFn,
+        });
+
+        // Clean expired OAuth states (10 min TTL)
+        const now = Date.now();
+        for (const [k, v] of pendingMcpOAuthStates.entries()) {
+          if (now - v.createdAt > 10 * 60_000) pendingMcpOAuthStates.delete(k);
+        }
+        pendingMcpOAuthStates.set(pendingState.state, pendingState);
+
+        res.json({ ok: true, authorizeUrl, redirectUri });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.get('/api/mcp/oauth/callback', async (req, res) => {
+    const rawState = typeof req.query.state === 'string' ? req.query.state.trim() : '';
+    const rawCode = typeof req.query.code === 'string' ? req.query.code.trim() : '';
+    const oauthErr = typeof req.query.error === 'string' ? req.query.error.trim() : '';
+
+    const renderPopupHtml = (ok: boolean, message: string, serverId?: string) => {
+      const safeJson = JSON.stringify({
+        type: 'MIST_MCP_OAUTH_DONE',
+        ok,
+        serverId: serverId || null,
+        message,
+      }).replace(/</g, '\\u003c');
+      const safeMsg = message
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return `<!doctype html><html><body style="font-family:system-ui,sans-serif;background:#09090b;color:#f4f4f5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+        <div style="max-width:420px;padding:24px;border:1px solid #27272a;border-radius:16px;text-align:center;">
+          <h2 style="margin:0 0 8px;">${ok ? 'Connected to Mist' : 'Authorization Failed'}</h2>
+          <p style="color:#a1a1aa;font-size:14px;line-height:1.5;">${safeMsg}</p>
+          <script>
+            try {
+              if (window.opener) {
+                window.opener.postMessage(${safeJson}, window.location.origin);
+              }
+            } catch (_) {}
+            setTimeout(function() { try { window.close(); } catch (_) {} }, 1200);
+          </script>
+        </div>
+      </body></html>`;
+    };
+
+    if (oauthErr) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8').send(
+        renderPopupHtml(false, `Provider declined authorization: ${oauthErr}`),
+      );
+      return;
+    }
+
+    const pending = rawState ? pendingMcpOAuthStates.get(rawState) : undefined;
+    if (!pending || Date.now() - pending.createdAt > 10 * 60_000 || !rawCode) {
+      if (rawState) pendingMcpOAuthStates.delete(rawState);
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8').send(
+        renderPopupHtml(false, 'OAuth state expired or invalid authorization code.'),
+      );
+      return;
+    }
+    pendingMcpOAuthStates.delete(rawState);
+
+    try {
+      const cred = await exchangeMcpOAuthAuthorizationCode({
+        code: rawCode,
+        pending,
+        fetchImpl: mcpFetchImpl,
+        skipDnsLookup,
+        lookupFn,
+      });
+
+      const synthUser: VerifiedClerkUser = {
+        userId: pending.userId,
+        uid: pending.userId,
+        email: pending.userEmail,
+        emailVerified: true,
+        idToken: '',
+      };
+      const vault = await loadUserVaultOrEmpty(synthUser);
+      await persistUserVault(synthUser, {
+        ...vault,
+        mcpCredentials: {
+          ...(vault.mcpCredentials || {}),
+          [pending.serverId]: cred,
+        },
+      });
+
+      res.setHeader('Content-Type', 'text/html; charset=utf-8').send(
+        renderPopupHtml(true, 'OAuth authorization saved into your encrypted vault.', pending.serverId),
+      );
+    } catch (err) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8').send(
+        renderPopupHtml(false, sanitizeMcpError(err)),
+      );
+    }
+  });
+
+  app.post(
+    '/api/mcp/call',
+    requireVerifiedAuth,
+    renderRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_CONFIG, 'MCP tool call'),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const body = assertSafePlainObject(req.body, 'MCP tool call');
+        const serverId = validateIdParam(body.serverId, 'MCP server ID', 64);
+        const toolName = validatePromptInput(body.toolName, 'Tool name', 120);
+        const args = body.arguments ? assertSafePlainObject(body.arguments, 'Tool arguments') : {};
+        const approved = Boolean(body.approved);
+
+        const vault = await loadUserVaultOrEmpty(user);
+        const server = (vault.mcpServers || []).find((s) => s.id === serverId);
+        if (!server) {
+          res.status(404).json({ error: 'MCP server not found.' });
+          return;
+        }
+        const cred = vault.mcpCredentials?.[server.id];
+        const discovery = await connectAndDiscoverMcpTools({
+          server,
+          credential: cred,
+          options: { fetchImpl: mcpFetchImpl, skipDnsLookup, lookupFn },
+        });
+        const toolDef = discovery.tools.find((t) => t.name === toolName);
+        if (!toolDef) {
+          res.status(404).json({ error: `Tool "${toolName}" is not offered by ${server.name}.` });
+          return;
+        }
+
+        const sensitivity = classifyMcpToolSensitivity(toolDef);
+        if (sensitivity.sensitive && !approved) {
+          res.status(403).json({
+            error: `Tool "${toolName}" requires explicit user approval (${sensitivity.reason}).`,
+            code: 'APPROVAL_REQUIRED',
+            reason: sensitivity.reason,
+          });
+          return;
+        }
+
+        const result = await invokeMcpServerTool({
+          server,
+          credential: cred,
+          toolName,
+          args,
+          options: {
+            fetchImpl: mcpFetchImpl,
+            skipDnsLookup,
+            lookupFn,
+            onCredentialUpdated: async (nextCred) => {
+              const latest = await loadUserVaultOrEmpty(user);
+              await persistUserVault(user, {
+                ...latest,
+                mcpCredentials: { ...(latest.mcpCredentials || {}), [server.id]: nextCred },
+              });
+            },
+          },
+        });
+        res.json({ ok: !result.isError, result });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
+  app.post(
+    '/api/mcp/approvals/:approvalId',
+    requireVerifiedAuth,
+    catalogRateLimiter,
+    (req: AuthenticatedRequest, res) => {
+      try {
+        const user = req.authUser!;
+        const approvalId = validateIdParam(req.params.approvalId, 'Approval ID', 80);
+        const pending = pendingMcpApprovals.get(approvalId);
+        if (!pending) {
+          res.status(404).json({ error: 'Approval request expired or not found.' });
+          return;
+        }
+        if (pending.ownerUid !== user.userId) {
+          res.status(403).json({ error: 'Access denied: Approval belongs to another account.' });
+          return;
+        }
+        pendingMcpApprovals.delete(approvalId);
+        clearTimeout(pending.timer);
+        pending.resolve(Boolean(req.body?.approved));
+        res.json({ ok: true, approved: Boolean(req.body?.approved) });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
+      }
+    },
+  );
+
   // User Profile Preferences
   app.get(
     '/api/user/preferences',
@@ -1995,11 +2792,12 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        const { preferences, meta } = req.body || {};
-        await adminStore.saveUserPreferences(user.userId, preferences || {}, meta);
+        const { preferences, meta } = validateUserPreferencesPayload(req.body?.preferences, req.body?.meta);
+        await adminStore.saveUserPreferences(user.userId, preferences, meta);
         res.json({ success: true });
       } catch (err) {
-        res.status(500).json({ error: sanitizeErrorMessage(err) });
+        const status = err instanceof SecurityValidationError ? err.status : 500;
+        res.status(status).json({ error: sanitizeErrorMessage(err) });
       }
     },
   );
@@ -2027,7 +2825,8 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        const project = await adminStore.getProject(user.userId, req.params.id);
+        const projectId = validateIdParam(req.params.id, 'Project ID', 64);
+        const project = await adminStore.getProject(user.userId, projectId);
         if (!project) {
           res.status(404).json({ error: 'Project not found.' });
           return;
@@ -2064,13 +2863,9 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        const raw = req.body?.project;
-        if (!raw || typeof raw !== 'object') {
-          res.status(400).json({ success: false, error: 'Valid project data is required.' });
-          return;
-        }
-        (raw as any).id = req.params.id;
-        const validated = validateProjectPayload(raw);
+        const projectId = validateIdParam(req.params.id, 'Project ID', 64);
+        const raw = assertSafePlainObject(req.body?.project, 'project payload');
+        const validated = validateProjectPayload({ ...raw, id: projectId });
         await adminStore.saveProject(user.userId, validated);
         res.json({ success: true, project: validated });
       } catch (err) {
@@ -2087,7 +2882,8 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       try {
         const user = req.authUser!;
-        await adminStore.deleteProject(user.userId, req.params.id);
+        const projectId = validateIdParam(req.params.id, 'Project ID', 64);
+        await adminStore.deleteProject(user.userId, projectId);
         res.json({ success: true });
       } catch (err) {
         const status = err instanceof SecurityValidationError ? err.status : 500;
@@ -2594,7 +3390,124 @@ Return JSON: { "content": "..." }`;
     return { parsed, searchOutcome };
   }
 
-  // Streaming website generation (SSE) with disconnect cancellation & timeouts
+  async function executeMistAgentTask(params: {
+    req: AuthenticatedRequest;
+    mode: 'generate' | 'refine' | 'verify_preview';
+    instruction: string;
+    projectName?: string;
+    initialFiles?: ProjectFile[];
+    selectedElement?: { tagName: string; textContent: string; className: string };
+    enableAppAi: boolean;
+    config: AiProviderConfig;
+    searchMode?: WebSearchMode;
+    searchConfig?: WebSearchConfig;
+    previewConsoleEntries?: PreviewConsoleEntry[];
+    previewHealth?: PreviewHealthSnapshot;
+    signal: AbortSignal;
+    onEvent?: (ev: Record<string, unknown>) => void;
+  }) {
+    const vault = params.req.authUser ? await loadUserVaultOrEmpty(params.req.authUser).catch(() => ({} as VaultPlainPayload)) : ({} as VaultPlainPayload);
+    const requesterUid = params.req.authUser!.userId;
+
+    const agentResult = await runMistBuilderAgent({
+      mode: params.mode,
+      instruction: params.instruction,
+      projectName: params.projectName,
+      initialFiles: params.initialFiles,
+      selectedElement: params.selectedElement,
+      enableAppAi: params.enableAppAi,
+      config: params.config,
+      searchMode: params.searchMode,
+      searchConfig: params.searchConfig,
+      searchService,
+      mcpServers: vault.mcpServers,
+      mcpCredentials: vault.mcpCredentials,
+      onMcpCredentialUpdated: async (updatedCred) => {
+        if (!params.req.authUser) return;
+        const latest = await loadUserVaultOrEmpty(params.req.authUser);
+        await persistUserVault(params.req.authUser, {
+          ...latest,
+          mcpCredentials: {
+            ...(latest.mcpCredentials || {}),
+            [updatedCred.serverId]: updatedCred,
+          },
+        });
+      },
+      requestMcpApproval: params.onEvent
+        ? (approvalReq: McpApprovalRequest) =>
+            new Promise<boolean>((resolve) => {
+              const timer = setTimeout(() => {
+                pendingMcpApprovals.delete(approvalReq.approvalId);
+                resolve(false);
+              }, 120_000);
+              pendingMcpApprovals.set(approvalReq.approvalId, {
+                ownerUid: requesterUid,
+                resolve,
+                timer,
+              });
+              const onAbort = () => {
+                if (pendingMcpApprovals.has(approvalReq.approvalId)) {
+                  pendingMcpApprovals.delete(approvalReq.approvalId);
+                  clearTimeout(timer);
+                  resolve(false);
+                }
+              };
+              params.signal.addEventListener('abort', onAbort, { once: true });
+            })
+        : undefined,
+      previewConsoleEntries: params.previewConsoleEntries,
+      previewHealth: params.previewHealth,
+      runBundle: runSandboxBundleCheck,
+      signal: params.signal,
+      aiFetchImpl,
+      searchFetchImpl,
+      mcpFetchImpl,
+      skipDnsLookup,
+      lookupFn,
+      onEvent: params.onEvent,
+    });
+
+    const changedSet = new Set(agentResult.changedFiles.map((p) => p.toLowerCase()));
+    const returnedFiles =
+      params.mode === 'generate'
+        ? agentResult.files
+        : agentResult.changedFiles.length > 0
+          ? agentResult.files.filter((f) => changedSet.has(f.path.toLowerCase()))
+          : agentResult.files;
+
+    return {
+      projectName: agentResult.projectName,
+      description: agentResult.description,
+      summary: agentResult.summary,
+      files: returnedFiles,
+      allFiles: agentResult.files,
+      changedFiles: agentResult.changedFiles,
+      toolActivities: agentResult.toolActivities,
+      terminalEntries: agentResult.terminalEntries,
+      searchOutcome: agentResult.searchOutcome,
+      buildVerified: agentResult.buildVerified,
+      buildError: agentResult.buildError,
+    };
+  }
+
+  function setupSseStream(res: express.Response, abortController: AbortController) {
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        abortController.abort();
+      }
+    });
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+    return (event: Record<string, unknown>) => {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+    };
+  }
+
+  // Streaming agentic website generation (SSE) with real tools, sandbox tsc/esbuild, & MCP
   app.post(
     '/api/ai/generate/stream',
     requireVerifiedAuth,
@@ -2602,117 +3515,52 @@ Return JSON: { "content": "..." }`;
     createBodySizeLimitMiddleware(BODY_LIMITS.AI_PROMPT, 'Generation stream request'),
     async (req: AuthenticatedRequest, res) => {
       const { prompt, providerConfig, enableAppAi, searchConfig, searchMode } = req.body as {
-        prompt: string;
+        prompt: unknown;
         providerConfig?: AiProviderConfig;
         enableAppAi?: boolean;
         searchConfig?: WebSearchConfig;
         searchMode?: WebSearchMode;
       };
-      const effectiveEnableAppAi = shouldEnableAppAi(
-        prompt || '',
-        'on_request',
-        typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
-      );
+      let cleanPrompt = '';
       let validatedProviderCfg: AiProviderConfig | undefined;
       let validatedSearchCfg: WebSearchConfig | undefined;
       try {
+        cleanPrompt = validatePromptInput(prompt, 'Prompt');
         if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
         if (searchConfig) validatedSearchCfg = validateWebSearchConfig(searchConfig);
       } catch (valErr) {
         sendSecurityErrorResponse(res, valErr, 400);
         return;
       }
+      const effectiveEnableAppAi = shouldEnableAppAi(
+        cleanPrompt,
+        'on_request',
+        typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
+      );
       const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
 
       const abortController = new AbortController();
-      res.on('close', () => {
-        if (!res.writableEnded) {
-          abortController.abort();
-        }
-      });
-
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.flushHeaders?.();
-
-      const sendEvent = (event: Record<string, unknown>) => {
-        if (!res.writableEnded) {
-          res.write(`data: ${JSON.stringify(event)}\n\n`);
-        }
-      };
+      const sendEvent = setupSseStream(res, abortController);
 
       try {
-        if (!prompt || !prompt.trim()) {
-          sendEvent({ type: 'error', error: 'Prompt is required.' });
-          res.end();
-          return;
-        }
-
-        const providerTitle = config.name?.trim() || 'BYOK Model';
-        sendEvent({
-          type: 'phase',
-          phase: `Connecting to ${providerTitle} (${config.model})...`,
-        });
-
-        const userPrompt = buildGenerateUserPrompt(prompt, effectiveEnableAppAi, config);
-        let seenPaths: string[] = [];
-        let lastEmitAt = 0;
-
-        const { parsed, searchOutcome } = await runGroundedModelCall({
-          queryText: prompt,
-          searchMode,
-          searchConfig,
+        const finalized = await executeMistAgentTask({
+          req,
+          mode: 'generate',
+          instruction: cleanPrompt,
+          enableAppAi: effectiveEnableAppAi,
           config,
-          baseUserPrompt: userPrompt,
+          searchMode,
+          searchConfig: validatedSearchCfg,
           signal: abortController.signal,
-          stream: true,
-          onSearchEvent: (ev) => sendEvent(ev),
-          onDelta: (accumulated) => {
-            const currentPaths = detectStreamedPaths(accumulated);
-            const now = Date.now();
-            if (currentPaths.length > seenPaths.length) {
-              if (seenPaths.length > 0) {
-                const justFinished = seenPaths[seenPaths.length - 1];
-                sendEvent({ type: 'file_done', path: justFinished });
-              }
-              const active = currentPaths[currentPaths.length - 1];
-              seenPaths = currentPaths;
-              sendEvent({
-                type: 'file_start',
-                path: active,
-                completedFiles: seenPaths.slice(0, -1),
-                chars: accumulated.length,
-              });
-              lastEmitAt = now;
-            } else if (now - lastEmitAt > 250) {
-              lastEmitAt = now;
-              sendEvent({
-                type: 'progress',
-                activeFile: seenPaths[seenPaths.length - 1],
-                completedFiles: seenPaths.slice(0, -1),
-                chars: accumulated.length,
-              });
-            }
-          },
+          onEvent: sendEvent,
         });
 
-        sendEvent({
-          type: 'phase',
-          phase: 'Validating files & preparing preview...',
-          completedFiles: seenPaths,
-          chars: 0,
-        });
-
-        const finalized = await postProcessGeneratedProject({ parsed, prompt, config });
-        finalized.searchOutcome = searchOutcome;
         clearIncident(config.provider, config.model);
-
         if (req.authUser?.uid) {
           notificationService
             .sendNotificationToUser(req.authUser.uid, {
               title: 'Build Finished ✨',
-              body: `"${finalized.projectName || 'Website'}" generated successfully!`,
+              body: `"${finalized.projectName || 'Website'}" built and verified!`,
               data: { url: '/' },
               tag: 'generation-complete',
             })
@@ -2747,7 +3595,7 @@ Return JSON: { "content": "..." }`;
     },
   );
 
-  // Non-streaming website generation endpoint
+  // Non-streaming agentic website generation endpoint
   app.post(
     '/api/ai/generate',
     requireVerifiedAuth,
@@ -2755,26 +3603,28 @@ Return JSON: { "content": "..." }`;
     createBodySizeLimitMiddleware(BODY_LIMITS.AI_PROMPT, 'Generation request'),
     async (req: AuthenticatedRequest, res) => {
       const { prompt, providerConfig, enableAppAi, searchConfig, searchMode } = req.body as {
-        prompt: string;
+        prompt: unknown;
         providerConfig?: AiProviderConfig;
         enableAppAi?: boolean;
         searchConfig?: WebSearchConfig;
         searchMode?: WebSearchMode;
       };
-      const effectiveEnableAppAi = shouldEnableAppAi(
-        prompt || '',
-        'on_request',
-        typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
-      );
+      let cleanPrompt = '';
       let validatedProviderCfg: AiProviderConfig | undefined;
       let validatedSearchCfg: WebSearchConfig | undefined;
       try {
+        cleanPrompt = validatePromptInput(prompt, 'Prompt');
         if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
         if (searchConfig) validatedSearchCfg = validateWebSearchConfig(searchConfig);
       } catch (valErr) {
         sendSecurityErrorResponse(res, valErr, 400);
         return;
       }
+      const effectiveEnableAppAi = shouldEnableAppAi(
+        cleanPrompt,
+        'on_request',
+        typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
+      );
       const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
       const abortController = new AbortController();
       res.on('close', () => {
@@ -2782,37 +3632,27 @@ Return JSON: { "content": "..." }`;
       });
 
       try {
-        if (!prompt || !prompt.trim()) {
-          res.status(400).json({ error: 'Prompt is required.' });
-          return;
-        }
-
-        const userPrompt = buildGenerateUserPrompt(prompt, effectiveEnableAppAi, config);
-        const { parsed, searchOutcome } = await runGroundedModelCall({
-          queryText: prompt,
-          searchMode,
-          searchConfig,
+        const finalized = await executeMistAgentTask({
+          req,
+          mode: 'generate',
+          instruction: cleanPrompt,
+          enableAppAi: effectiveEnableAppAi,
           config,
-          baseUserPrompt: userPrompt,
+          searchMode,
+          searchConfig: validatedSearchCfg,
           signal: abortController.signal,
-          stream: false,
         });
-
-        const finalized = await postProcessGeneratedProject({ parsed, prompt, config });
-        finalized.searchOutcome = searchOutcome;
         clearIncident(config.provider, config.model);
-
         if (req.authUser?.uid) {
           notificationService
             .sendNotificationToUser(req.authUser.uid, {
               title: 'Build Finished ✨',
-              body: `"${finalized.projectName || 'Website'}" generated successfully!`,
+              body: `"${finalized.projectName || 'Website'}" built cleanly!`,
               data: { url: '/' },
               tag: 'generation-complete',
             })
             .catch(() => {});
         }
-
         res.json(finalized);
       } catch (err) {
         const status = getHttpStatusFromError(err);
@@ -2829,7 +3669,7 @@ Return JSON: { "content": "..." }`;
     },
   );
 
-  // Streaming website refinement (SSE)
+  // Streaming agentic refinement (SSE)
   app.post(
     '/api/ai/refine/stream',
     requireVerifiedAuth,
@@ -2838,6 +3678,7 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       const {
         instruction,
+        projectName,
         files,
         selectedElement,
         providerConfig,
@@ -2845,7 +3686,8 @@ Return JSON: { "content": "..." }`;
         searchConfig,
         searchMode,
       } = req.body as {
-        instruction: string;
+        instruction: unknown;
+        projectName?: string;
         files: ProjectFile[];
         selectedElement?: { tagName: string; textContent: string; className: string };
         providerConfig?: AiProviderConfig;
@@ -2853,108 +3695,48 @@ Return JSON: { "content": "..." }`;
         searchConfig?: WebSearchConfig;
         searchMode?: WebSearchMode;
       };
-      const effectiveEnableAppAi = shouldEnableAppAi(
-        instruction || '',
-        'on_request',
-        typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
-      );
+      let cleanInstruction = '';
+      let validatedSelectedElement: { tagName: string; textContent: string; className: string } | undefined;
+      let validatedInputFiles: ProjectFile[] = [];
       let validatedProviderCfg: AiProviderConfig | undefined;
       let validatedSearchCfg: WebSearchConfig | undefined;
       try {
+        cleanInstruction = validatePromptInput(instruction, 'Refinement instruction');
+        validatedSelectedElement = validateSelectedVisualElementInput(selectedElement);
+        validatedInputFiles = validateProjectFilesPayload(files || []);
         if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
         if (searchConfig) validatedSearchCfg = validateWebSearchConfig(searchConfig);
       } catch (valErr) {
         sendSecurityErrorResponse(res, valErr, 400);
         return;
       }
+      const effectiveEnableAppAi = shouldEnableAppAi(
+        cleanInstruction,
+        'on_request',
+        typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
+      );
       const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
 
       const abortController = new AbortController();
-      res.on('close', () => {
-        if (!res.writableEnded) {
-          abortController.abort();
-        }
-      });
-
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.flushHeaders?.();
-
-      const sendEvent = (event: Record<string, unknown>) => {
-        if (!res.writableEnded) {
-          res.write(`data: ${JSON.stringify(event)}\n\n`);
-        }
-      };
+      const sendEvent = setupSseStream(res, abortController);
 
       try {
-        if (!instruction || !instruction.trim()) {
-          sendEvent({ type: 'error', error: 'Refinement instruction is required.' });
-          res.end();
-          return;
-        }
-        const validatedInputFiles = validateProjectFilesPayload(files || []);
-
-        const providerTitle = config.name?.trim() || 'BYOK Model';
-        sendEvent({
-          type: 'phase',
-          phase: `Analyzing codebase with ${providerTitle} (${config.model})...`,
-        });
-
-        const userPrompt = buildRefineUserPrompt(
-          instruction,
-          validatedInputFiles,
-          selectedElement,
-          effectiveEnableAppAi,
+        const result = await executeMistAgentTask({
+          req,
+          mode: 'refine',
+          instruction: cleanInstruction,
+          projectName: typeof projectName === 'string' ? projectName.trim().slice(0, 120) : undefined,
+          initialFiles: validatedInputFiles,
+          selectedElement: validatedSelectedElement,
+          enableAppAi: effectiveEnableAppAi,
           config,
-        );
-        let seenPaths: string[] = [];
-        let lastEmitAt = 0;
-
-        const { parsed, searchOutcome } = await runGroundedModelCall({
-          queryText: instruction,
           searchMode,
-          searchConfig,
-          config,
-          baseUserPrompt: userPrompt,
+          searchConfig: validatedSearchCfg,
           signal: abortController.signal,
-          stream: true,
-          onSearchEvent: (ev) => sendEvent(ev),
-          onDelta: (accumulated) => {
-            const currentPaths = detectStreamedPaths(accumulated);
-            const now = Date.now();
-            if (currentPaths.length > seenPaths.length) {
-              if (seenPaths.length > 0) {
-                sendEvent({ type: 'file_done', path: seenPaths[seenPaths.length - 1] });
-              }
-              const active = currentPaths[currentPaths.length - 1];
-              seenPaths = currentPaths;
-              sendEvent({
-                type: 'file_start',
-                path: active,
-                completedFiles: seenPaths.slice(0, -1),
-                chars: accumulated.length,
-              });
-              lastEmitAt = now;
-            } else if (now - lastEmitAt > 250) {
-              lastEmitAt = now;
-              sendEvent({
-                type: 'progress',
-                activeFile: seenPaths[seenPaths.length - 1],
-                completedFiles: seenPaths.slice(0, -1),
-                chars: accumulated.length,
-              });
-            }
-          },
+          onEvent: sendEvent,
         });
-
-        if (Array.isArray(parsed.files)) {
-          parsed.files = validateProjectFilesPayload(parsed.files);
-        }
-        parsed.searchOutcome = searchOutcome;
-
         clearIncident(config.provider, config.model);
-        sendEvent({ type: 'complete', result: parsed });
+        sendEvent({ type: 'complete', result });
         res.end();
       } catch (err) {
         if (
@@ -2982,7 +3764,7 @@ Return JSON: { "content": "..." }`;
     },
   );
 
-  // Standard non-streaming refine endpoint
+  // Standard non-streaming agentic refine endpoint
   app.post(
     '/api/ai/refine',
     requireVerifiedAuth,
@@ -2991,6 +3773,7 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       const {
         instruction,
+        projectName,
         files,
         selectedElement,
         providerConfig,
@@ -2998,7 +3781,8 @@ Return JSON: { "content": "..." }`;
         searchConfig,
         searchMode,
       } = req.body as {
-        instruction: string;
+        instruction: unknown;
+        projectName?: string;
         files: ProjectFile[];
         selectedElement?: { tagName: string; textContent: string; className: string };
         providerConfig?: AiProviderConfig;
@@ -3006,20 +3790,26 @@ Return JSON: { "content": "..." }`;
         searchConfig?: WebSearchConfig;
         searchMode?: WebSearchMode;
       };
-      const effectiveEnableAppAi = shouldEnableAppAi(
-        instruction || '',
-        'on_request',
-        typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
-      );
+      let cleanInstruction = '';
+      let validatedSelectedElement: { tagName: string; textContent: string; className: string } | undefined;
+      let validatedInputFiles: ProjectFile[] = [];
       let validatedProviderCfg: AiProviderConfig | undefined;
       let validatedSearchCfg: WebSearchConfig | undefined;
       try {
+        cleanInstruction = validatePromptInput(instruction, 'Refinement instruction');
+        validatedSelectedElement = validateSelectedVisualElementInput(selectedElement);
+        validatedInputFiles = validateProjectFilesPayload(files || []);
         if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
         if (searchConfig) validatedSearchCfg = validateWebSearchConfig(searchConfig);
       } catch (valErr) {
         sendSecurityErrorResponse(res, valErr, 400);
         return;
       }
+      const effectiveEnableAppAi = shouldEnableAppAi(
+        cleanInstruction,
+        'on_request',
+        typeof enableAppAi === 'boolean' ? enableAppAi : undefined,
+      );
       const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
       const abortController = new AbortController();
       res.on('close', () => {
@@ -3027,37 +3817,21 @@ Return JSON: { "content": "..." }`;
       });
 
       try {
-        if (!instruction || !instruction.trim()) {
-          res.status(400).json({ error: 'Refinement instruction is required.' });
-          return;
-        }
-        const validatedInputFiles = validateProjectFilesPayload(files || []);
-
-        const userPrompt = buildRefineUserPrompt(
-          instruction,
-          validatedInputFiles,
-          selectedElement,
-          effectiveEnableAppAi,
+        const result = await executeMistAgentTask({
+          req,
+          mode: 'refine',
+          instruction: cleanInstruction,
+          projectName: typeof projectName === 'string' ? projectName.trim().slice(0, 120) : undefined,
+          initialFiles: validatedInputFiles,
+          selectedElement: validatedSelectedElement,
+          enableAppAi: effectiveEnableAppAi,
           config,
-        );
-
-        const { parsed, searchOutcome } = await runGroundedModelCall({
-          queryText: instruction,
           searchMode,
-          searchConfig,
-          config,
-          baseUserPrompt: userPrompt,
+          searchConfig: validatedSearchCfg,
           signal: abortController.signal,
-          stream: false,
         });
-
-        if (Array.isArray(parsed.files)) {
-          parsed.files = validateProjectFilesPayload(parsed.files);
-        }
-        parsed.searchOutcome = searchOutcome;
-
         clearIncident(config.provider, config.model);
-        res.json(parsed);
+        res.json(result);
       } catch (err) {
         const status = getHttpStatusFromError(err);
         const message = sanitizeErrorMessage(err) || 'Refinement failed';
@@ -3069,6 +3843,186 @@ Return JSON: { "content": "..." }`;
         });
         recordIncident(incident);
         res.status(status).json({ error: incident.message, incident });
+      }
+    },
+  );
+
+  // Live preview visual & console auto-verification/repair stream
+  app.post(
+    '/api/ai/verify-preview/stream',
+    requireVerifiedAuth,
+    aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.DEPLOYMENT, 'Preview verification request'),
+    async (req: AuthenticatedRequest, res) => {
+      const {
+        instruction,
+        projectName,
+        files,
+        consoleEntries,
+        previewHealth,
+        screenshotDataUrl,
+        providerConfig,
+        enableAppAi,
+      } = req.body as {
+        instruction?: unknown;
+        projectName?: unknown;
+        files?: ProjectFile[];
+        consoleEntries?: unknown;
+        previewHealth?: unknown;
+        screenshotDataUrl?: unknown;
+        providerConfig?: AiProviderConfig;
+        enableAppAi?: boolean;
+      };
+
+      let cleanInstruction = 'Inspect live preview logs, DOM health, and screenshot and fix any broken rendering or runtime errors.';
+      let validatedFiles: ProjectFile[] = [];
+      let validatedProviderCfg: AiProviderConfig | undefined;
+      let cleanConsole: PreviewConsoleEntry[] = [];
+      let cleanHealth: PreviewHealthSnapshot | undefined;
+
+      try {
+        if (typeof instruction === 'string' && instruction.trim()) {
+          cleanInstruction = validatePromptInput(instruction, 'Verification instruction', 4000);
+        }
+        validatedFiles = validateProjectFilesPayload(files || []);
+        if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
+
+        if (Array.isArray(consoleEntries)) {
+          cleanConsole = consoleEntries
+            .slice(-40)
+            .filter((item) => item && typeof item === 'object')
+            .map((item, idx) => {
+              const e = item as Record<string, unknown>;
+              const lvl =
+                e.level === 'runtime_error' || e.level === 'error' || e.level === 'warn'
+                  ? e.level
+                  : 'log';
+              return {
+                id: typeof e.id === 'string' ? e.id.slice(0, 64) : `log_${idx}`,
+                level: lvl,
+                message: typeof e.message === 'string' ? e.message.slice(0, 2000) : '',
+                source: typeof e.source === 'string' ? e.source.slice(0, 200) : undefined,
+                line: typeof e.line === 'number' ? e.line : undefined,
+                column: typeof e.column === 'number' ? e.column : undefined,
+                stack: typeof e.stack === 'string' ? e.stack.slice(0, 2000) : undefined,
+                timestamp: typeof e.timestamp === 'string' ? e.timestamp.slice(0, 64) : new Date().toISOString(),
+              };
+            });
+        }
+
+        const topLevelShot =
+          typeof screenshotDataUrl === 'string' ? screenshotDataUrl.trim() : '';
+        if (previewHealth !== undefined && previewHealth !== null) {
+          const h = assertSafePlainObject(previewHealth, 'previewHealth');
+          const rawShot =
+            typeof h.screenshotDataUrl === 'string' && h.screenshotDataUrl.trim()
+              ? h.screenshotDataUrl.trim()
+              : topLevelShot;
+          const safeShot =
+            rawShot.startsWith('data:image/png;base64,') && rawShot.length <= 2_200_000
+              ? rawShot
+              : undefined;
+          cleanHealth = {
+            capturedAt: typeof h.capturedAt === 'string' ? h.capturedAt.slice(0, 64) : new Date().toISOString(),
+            rootHtmlLength: Number(h.rootHtmlLength || 0),
+            textLength: Number(h.textLength || 0),
+            elementCount: Number(h.elementCount || 0),
+            canvasCount: Number(h.canvasCount || 0),
+            horizontalOverflowPx: Number(h.horizontalOverflowPx || 0),
+            viewportWidth: Number(h.viewportWidth || 1024),
+            viewportHeight: Number(h.viewportHeight || 768),
+            brokenImages: Number(h.brokenImages || 0),
+            runtimeErrorCount: Number(h.runtimeErrorCount || 0),
+            consoleErrorCount: Number(h.consoleErrorCount || 0),
+            screenshotDataUrl: safeShot,
+            screenshotFormat: safeShot ? 'png' : undefined,
+          };
+        } else if (topLevelShot.startsWith('data:image/png;base64,') && topLevelShot.length <= 2_200_000) {
+          cleanHealth = {
+            capturedAt: new Date().toISOString(),
+            rootHtmlLength: 0,
+            textLength: 0,
+            elementCount: 0,
+            canvasCount: 0,
+            horizontalOverflowPx: 0,
+            viewportWidth: 1024,
+            viewportHeight: 768,
+            brokenImages: 0,
+            runtimeErrorCount: cleanConsole.filter((c) => c.level === 'runtime_error').length,
+            consoleErrorCount: cleanConsole.filter((c) => c.level === 'error').length,
+            screenshotDataUrl: topLevelShot,
+            screenshotFormat: 'png',
+          };
+        }
+      } catch (valErr) {
+        sendSecurityErrorResponse(res, valErr, 400);
+        return;
+      }
+
+      const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
+      const abortController = new AbortController();
+      const sendEvent = setupSseStream(res, abortController);
+
+      try {
+        const result = await executeMistAgentTask({
+          req,
+          mode: 'verify_preview',
+          instruction: cleanInstruction,
+          projectName: typeof projectName === 'string' ? projectName.trim().slice(0, 120) : undefined,
+          initialFiles: validatedFiles,
+          enableAppAi: Boolean(enableAppAi),
+          config,
+          previewConsoleEntries: cleanConsole,
+          previewHealth: cleanHealth,
+          signal: abortController.signal,
+          onEvent: sendEvent,
+        });
+        clearIncident(config.provider, config.model);
+        sendEvent({ type: 'complete', result });
+        res.end();
+      } catch (err) {
+        if (abortController.signal.aborted) {
+          if (!res.writableEnded) {
+            sendEvent({ type: 'error', error: 'Preview verification cancelled.' });
+            res.end();
+          }
+          return;
+        }
+        const status = getHttpStatusFromError(err);
+        const message = sanitizeErrorMessage(err) || 'Preview verification failed';
+        const incident = classifyModelError({
+          status,
+          message,
+          provider: config.provider,
+          model: config.model,
+        });
+        recordIncident(incident);
+        sendEvent({ type: 'error', error: incident.message, incident });
+        if (!res.writableEnded) res.end();
+      }
+    },
+  );
+
+  // Mist Isolated Project Sandbox Terminal Endpoint (user & UI runnable, strictly isolated from host/user PC)
+  app.post(
+    '/api/sandbox/terminal',
+    requireVerifiedAuth,
+    aiRateLimiter,
+    createBodySizeLimitMiddleware(BODY_LIMITS.AI_PROMPT, 'Sandbox terminal request'),
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const body = assertSafePlainObject(req.body, 'Sandbox terminal request');
+        const command = validatePromptInput(body.command, 'Terminal command', 512);
+        const validatedFiles = validateProjectFilesPayload(body.files || []);
+        const entry = await executeSandboxTerminalCommand({
+          files: validatedFiles,
+          command,
+          source: 'user',
+          runBundle: runSandboxBundleCheck,
+        });
+        res.json({ ok: entry.exitCode === 0, entry });
+      } catch (err) {
+        sendSecurityErrorResponse(res, err, 400);
       }
     },
   );
@@ -3087,23 +4041,30 @@ Return JSON: { "content": "..." }`;
         providerConfig?: AiProviderConfig;
       };
       let validatedProviderCfg: AiProviderConfig | undefined;
+      let validatedMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
       try {
         if (providerConfig) validatedProviderCfg = validateAiProviderConfig(providerConfig);
+        validatedMessages = validateChatMessagesInput(messages, {
+          maxMessages: 40,
+          maxContentLength: 8000,
+        });
       } catch (valErr) {
         sendSecurityErrorResponse(res, valErr, 400);
         return;
       }
       const config = normalizeProviderConfigToStudio(validatedProviderCfg || providerConfig);
+      const safeProjectName =
+        typeof projectName === 'string' ? projectName.trim().slice(0, 120).replace(/[\r\n]/g, ' ') : '';
 
       try {
         const sys =
-          mode === 'refine' && projectName
-            ? `You are Mist, a sharp, concise AI website & game design partner speaking aloud with a user refining "${projectName}". Keep each response crisp (1-3 short conversational sentences), practical, and focused on concrete UI, color, physics, or feature decisions.`
+          mode === 'refine' && safeProjectName
+            ? `You are Mist, a sharp, concise AI website & game design partner speaking aloud with a user refining "${safeProjectName}". Keep each response crisp (1-3 short conversational sentences), practical, and focused on concrete UI, color, physics, or feature decisions.`
             : 'You are Mist, a sharp, concise AI website & game design partner speaking aloud with a user brainstorming a new site or game. Keep each response crisp (1-3 short conversational sentences), helpful, and actionable.';
 
         const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
           { role: 'system', content: sys },
-          ...(Array.isArray(messages) ? messages : []),
+          ...validatedMessages,
         ];
 
         const text = await callByokCompletionRaw({
@@ -3157,7 +4118,7 @@ Return JSON: { "content": "..." }`;
         try {
           authUser = await verifyAuth(req.headers.authorization);
           if (!authUser.emailVerified) {
-            res.status(403).json({ error: 'A verified Google account is required to invoke App AI.' });
+            res.status(403).json({ error: 'A verified Mist account is required to invoke App AI.' });
             return;
           }
           req.authUser = authUser;
@@ -3168,9 +4129,33 @@ Return JSON: { "content": "..." }`;
       }
 
       let validatedProviderCfg: AiProviderConfig | undefined;
+      let validatedMessages: Array<{ role: 'user' | 'assistant'; content: string }> | undefined;
+      let trimmedPrompt = '';
+      let cleanSystemInstruction = '';
       try {
         if (!sessionResolved && providerConfig) {
           validatedProviderCfg = validateAiProviderConfig(providerConfig);
+        }
+        if (prompt !== undefined && prompt !== null) {
+          if (typeof prompt !== 'string') {
+            throw new SecurityValidationError(400, 'Prompt must be a string.', 'INVALID_PAYLOAD');
+          }
+          if (prompt.length > 16000) {
+            throw new SecurityValidationError(400, 'Prompt exceeds maximum allowed length (16000 characters).', 'PAYLOAD_TOO_LARGE');
+          }
+          trimmedPrompt = prompt.trim();
+        }
+        if (messages !== undefined && messages !== null) {
+          validatedMessages = validateChatMessagesInput(messages, {
+            maxMessages: 40,
+            maxContentLength: 16000,
+          });
+        }
+        if (systemInstruction !== undefined && systemInstruction !== null) {
+          if (typeof systemInstruction !== 'string') {
+            throw new SecurityValidationError(400, 'systemInstruction must be a string.', 'INVALID_PAYLOAD');
+          }
+          cleanSystemInstruction = systemInstruction.trim().slice(0, 4000);
         }
       } catch (valErr) {
         sendSecurityErrorResponse(res, valErr, 400);
@@ -3187,8 +4172,7 @@ Return JSON: { "content": "..." }`;
       });
 
       try {
-        const trimmedPrompt = (prompt || '').trim();
-        const hasMessages = Array.isArray(messages) && messages.length > 0;
+        const hasMessages = Boolean(validatedMessages && validatedMessages.length > 0);
         if (!trimmedPrompt && !hasMessages) {
           res.status(400).json({ error: 'Provide either prompt or messages.' });
           return;
@@ -3198,10 +4182,10 @@ Return JSON: { "content": "..." }`;
           {
             role: 'system',
             content:
-              systemInstruction ||
+              cleanSystemInstruction ||
               'You are a concise, helpful backend AI powering an interactive web application built with Mist.',
           },
-          ...(hasMessages ? messages! : [{ role: 'user' as const, content: trimmedPrompt }]),
+          ...(hasMessages ? validatedMessages! : [{ role: 'user' as const, content: trimmedPrompt }]),
         ];
 
         const text = await callByokCompletionRaw({
@@ -3269,14 +4253,11 @@ Return JSON: { "content": "..." }`;
           files: ProjectFile[];
           enableAppAi?: boolean;
         };
-        const cleanSlug = (slug || '')
-          .toLowerCase()
+        const rawSlug = typeof slug === 'string' ? slug.trim().toLowerCase() : '';
+        const normalizedSlug = rawSlug
           .replace(/[^a-z0-9-]+/g, '-')
           .replace(/^-+|-+$/g, '');
-        if (cleanSlug.length < 2 || cleanSlug.length > 80) {
-          res.status(400).json({ error: 'Deployment slug must be 2 to 80 URL-safe characters.' });
-          return;
-        }
+        const cleanSlug = validateSiteSlug(normalizedSlug);
 
         if (!publishBaseUrl) {
           res.status(400).json({
@@ -3355,11 +4336,7 @@ Return JSON: { "content": "..." }`;
     async (req: AuthenticatedRequest, res) => {
       try {
         const authUser = req.authUser!;
-        const cleanSlug = (req.params.slug || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-');
-        if (!cleanSlug) {
-          res.status(400).json({ error: 'Invalid deployment slug.' });
-          return;
-        }
+        const cleanSlug = validateSiteSlug(req.params.slug || '');
         await deploymentStore.deleteOwned(cleanSlug, authUser.userId, authUser.idToken);
         res.json({ ok: true, slug: cleanSlug });
       } catch (err) {

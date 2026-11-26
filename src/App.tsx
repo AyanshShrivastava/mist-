@@ -7,14 +7,19 @@ import {
 } from '@clerk/react';
 import JSZip from 'jszip';
 import type {
+  AgentToolActivity,
   AiProviderConfig,
   AiStreamProgress,
   DeploymentRecord,
+  McpApprovalRequest,
   MistProject,
   MistUser,
+  PreviewConsoleEntry,
+  PreviewHealthSnapshot,
   ProjectFile,
   SelectedVisualElement,
   StudioSettings,
+  TerminalLogEntry,
   WebSearchConfig,
   WebSearchOutcome,
   WebSearchSource,
@@ -61,13 +66,18 @@ import HomeView from './components/HomeView';
 import WorkspaceView from './components/WorkspaceView';
 import SettingsView from './components/SettingsView';
 import VoiceChatModal from './components/VoiceChatModal';
+import McpApprovalModal from './components/McpApprovalModal';
 import {
   AccountModal,
   DeploymentsModal,
   DeployModal,
   ProvidersModal,
 } from './components/Modals';
-import MistCodeModal from './components/MistCodeModal';
+import {
+  MIST_TEMPLATES,
+  instantiateProjectFromTemplate,
+  type MistTemplate,
+} from './data/templates';
 import { mistClerkAppearance } from './utils/clerkTheme';
 import {
   clearPendingDirtyQueue,
@@ -176,19 +186,127 @@ interface SseStreamPayload {
     | 'search_error'
     | 'file_start'
     | 'file_done'
+    | 'tool_start'
+    | 'tool_result'
+    | 'terminal_output'
+    | 'approval_required'
     | 'progress'
     | 'complete'
     | 'error';
   phase?: string;
+  iteration?: number;
+  maxIterations?: number;
   path?: string;
   activeFile?: string;
   completedFiles?: string[];
   chars?: number;
   queries?: string[];
   sources?: WebSearchSource[];
+  activity?: AgentToolActivity;
+  entry?: TerminalLogEntry;
+  approval?: McpApprovalRequest;
   result?: Record<string, unknown>;
   error?: string;
   incident?: ModelHealthIncident;
+}
+
+function reduceAiStreamProgress(
+  prev: AiStreamProgress | null,
+  ev: SseStreamPayload,
+  startedAt: number,
+  fallbackPhase: string,
+): AiStreamProgress {
+  const base: AiStreamProgress = prev || {
+    phase: fallbackPhase,
+    completedFiles: [],
+    charsReceived: 0,
+    startedAt,
+    toolActivities: [],
+    terminalEntries: [],
+  };
+
+  if (ev.type === 'search_start') {
+    return {
+      ...base,
+      phase: ev.phase || 'Searching live web sources...',
+      searchState: 'searching',
+      searchQueries: ev.queries ?? base.searchQueries,
+      searchError: undefined,
+    };
+  }
+  if (ev.type === 'search_results') {
+    return {
+      ...base,
+      searchState: 'done',
+      searchQueries: ev.queries ?? base.searchQueries,
+      searchSources: ev.sources ?? base.searchSources,
+      searchError: undefined,
+    };
+  }
+  if (ev.type === 'search_error') {
+    return {
+      ...base,
+      searchState: 'failed',
+      searchQueries: ev.queries ?? base.searchQueries,
+      searchError: ev.error || 'Web search failed.',
+    };
+  }
+  if (ev.type === 'phase') {
+    return {
+      ...base,
+      phase: ev.phase || base.phase,
+      iteration: ev.iteration ?? base.iteration,
+      maxIterations: ev.maxIterations ?? base.maxIterations,
+      completedFiles: ev.completedFiles ?? base.completedFiles,
+      charsReceived: ev.chars ? Math.max(base.charsReceived, ev.chars) : base.charsReceived,
+    };
+  }
+  if (ev.type === 'file_start') {
+    return {
+      ...base,
+      phase: `Writing ${ev.path || 'file'}...`,
+      activeFile: ev.path,
+      completedFiles: ev.completedFiles ?? base.completedFiles,
+      charsReceived: ev.chars ?? base.charsReceived,
+    };
+  }
+  if (ev.type === 'file_done' && ev.path) {
+    const nextCompleted = base.completedFiles.includes(ev.path)
+      ? base.completedFiles
+      : [...base.completedFiles, ev.path];
+    return {
+      ...base,
+      completedFiles: nextCompleted,
+    };
+  }
+  if ((ev.type === 'tool_start' || ev.type === 'tool_result' || ev.type === 'approval_required') && ev.activity) {
+    const existing = base.toolActivities || [];
+    const idx = existing.findIndex((item) => item.id === ev.activity!.id);
+    const updated =
+      idx >= 0
+        ? existing.map((item, i) => (i === idx ? ev.activity! : item))
+        : [...existing, ev.activity!];
+    return {
+      ...base,
+      phase: ev.activity.summary || base.phase,
+      toolActivities: updated,
+    };
+  }
+  if (ev.type === 'terminal_output' && ev.entry) {
+    return {
+      ...base,
+      terminalEntries: [...(base.terminalEntries || []), ev.entry],
+    };
+  }
+  if (ev.type === 'progress') {
+    return {
+      ...base,
+      activeFile: ev.activeFile ?? base.activeFile,
+      completedFiles: ev.completedFiles ?? base.completedFiles,
+      charsReceived: ev.chars ?? base.charsReceived,
+    };
+  }
+  return base;
 }
 
 async function consumeAiSseStream(
@@ -295,6 +413,10 @@ export default function App() {
   const [isRefining, setIsRefining] = useState(false);
   const [refineError, setRefineError] = useState<string | null>(null);
   const [aiStreamProgress, setAiStreamProgress] = useState<AiStreamProgress | null>(null);
+  const [terminalLogsByProject, setTerminalLogsByProject] = useState<Record<string, TerminalLogEntry[]>>({});
+  const [isRunningTerminalCmd, setIsRunningTerminalCmd] = useState(false);
+  const [isVerifyingPreview, setIsVerifyingPreview] = useState(false);
+  const [pendingMcpApproval, setPendingMcpApproval] = useState<McpApprovalRequest | null>(null);
 
   // Deploy / Publish Export state
   const [isDeploying, setIsDeploying] = useState(false);
@@ -307,7 +429,6 @@ export default function App() {
   const [deploymentsListOpen, setDeploymentsListOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [voiceChatOpen, setVoiceChatOpen] = useState(false);
-  const [mistCodeOpen, setMistCodeOpen] = useState(false);
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null;
   const deployProject =
@@ -615,6 +736,8 @@ export default function App() {
           summary?: string;
           searchOutcome?: WebSearchOutcome;
           files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
+          toolActivities?: AgentToolActivity[];
+          terminalEntries?: TerminalLogEntry[];
         } | null = null;
 
         // Try direct browser-to-Gemini connection first to eliminate server load
@@ -680,81 +803,20 @@ export default function App() {
           }
 
           data = (await consumeAiSseStream(resp, (ev) => {
-            setAiStreamProgress((prev) => {
-              const base = prev || {
-                phase: 'Generating...',
-                completedFiles: [],
-                charsReceived: 0,
-                startedAt,
-              };
-              if (ev.type === 'search_start') {
-                return {
-                  ...base,
-                  phase: ev.phase || 'Searching live web sources...',
-                  searchState: 'searching',
-                  searchQueries: ev.queries ?? base.searchQueries,
-                  searchError: undefined,
-                };
-              }
-              if (ev.type === 'search_results') {
-                return {
-                  ...base,
-                  searchState: 'done',
-                  searchQueries: ev.queries ?? base.searchQueries,
-                  searchSources: ev.sources ?? base.searchSources,
-                  searchError: undefined,
-                };
-              }
-              if (ev.type === 'search_error') {
-                return {
-                  ...base,
-                  searchState: 'failed',
-                  searchQueries: ev.queries ?? base.searchQueries,
-                  searchError: ev.error || 'Web search failed.',
-                };
-              }
-              if (ev.type === 'phase') {
-                return {
-                  ...base,
-                  phase: ev.phase || base.phase,
-                  completedFiles: ev.completedFiles ?? base.completedFiles,
-                  charsReceived: ev.chars ? Math.max(base.charsReceived, ev.chars) : base.charsReceived,
-                };
-              }
-              if (ev.type === 'file_start') {
-                return {
-                  ...base,
-                  phase: `Writing ${ev.path || 'file'}...`,
-                  activeFile: ev.path,
-                  completedFiles: ev.completedFiles ?? base.completedFiles,
-                  charsReceived: ev.chars ?? base.charsReceived,
-                };
-              }
-              if (ev.type === 'file_done' && ev.path) {
-                const nextCompleted = base.completedFiles.includes(ev.path)
-                  ? base.completedFiles
-                  : [...base.completedFiles, ev.path];
-                return {
-                  ...base,
-                  completedFiles: nextCompleted,
-                };
-              }
-              if (ev.type === 'progress') {
-                return {
-                  ...base,
-                  activeFile: ev.activeFile ?? base.activeFile,
-                  completedFiles: ev.completedFiles ?? base.completedFiles,
-                  charsReceived: ev.chars ?? base.charsReceived,
-                };
-              }
-              return base;
-            });
+            if (ev.type === 'approval_required' && ev.approval) {
+              setPendingMcpApproval(ev.approval);
+            }
+            setAiStreamProgress((prev) =>
+              reduceAiStreamProgress(prev, ev, startedAt, 'Generating...'),
+            );
           })) as {
             projectName?: string;
             description?: string;
             summary?: string;
             searchOutcome?: WebSearchOutcome;
             files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
+            toolActivities?: AgentToolActivity[];
+            terminalEntries?: TerminalLogEntry[];
           };
         }
 
@@ -764,8 +826,9 @@ export default function App() {
 
         setModelIncident(null);
         const now = new Date().toISOString();
+        const projectId = createSafeId('proj');
         const newProject: MistProject = {
-          id: createSafeId('proj'),
+          id: projectId,
           name: (data.projectName || 'Generated Website').slice(0, 120),
           description: (data.description || prompt).slice(0, 500),
           prompt,
@@ -798,9 +861,19 @@ export default function App() {
               timestamp: now,
               changedFiles: data.files.map((f) => f.path),
               searchOutcome: data.searchOutcome,
+              toolActivities: data.toolActivities,
+              terminalEntries: data.terminalEntries,
             },
           ],
         };
+
+        if (Array.isArray(data.terminalEntries) && data.terminalEntries.length > 0) {
+          const entries = data.terminalEntries;
+          setTerminalLogsByProject((prev) => ({
+            ...prev,
+            [projectId]: [...(prev[projectId] || []), ...entries].slice(-120),
+          }));
+        }
 
         setProjects((prev) => [newProject, ...prev]);
         navigateToProject(newProject.id);
@@ -1068,6 +1141,16 @@ export default function App() {
     void executeGenerateWebsite(prompt, user);
   };
 
+  const handleCreateFromTemplate = (template: MistTemplate) => {
+    const project = instantiateProjectFromTemplate(template);
+    if (user?.uid) {
+      project.ownerId = user.uid;
+    }
+    setProjects((prev) => [project, ...prev]);
+    navigateToProject(project.id);
+    queueProjectForBatchedSync(project, user?.uid);
+  };
+
   const handleDuplicateProject = (target: MistProject) => {
     const copy = duplicateProjectData(target);
     if (user?.uid) {
@@ -1095,8 +1178,8 @@ export default function App() {
   ) => {
     if (!activeProject) return;
     if (!user) {
-      setRefineError('Sign in with Google before using AI refinement.');
-      setAuthPromptReason('Sign in with Google to use Mist AI refinement.');
+      setRefineError('Sign in to Mist before using AI refinement.');
+      setAuthPromptReason('Sign in to Mist to use AI refinement.');
       setAccountOpen(true);
       return;
     }
@@ -1168,94 +1251,56 @@ export default function App() {
         throw err;
       }
 
+      const targetProjectId = activeProject.id;
       const data = (await consumeAiSseStream(resp, (ev) => {
-        setAiStreamProgress((prev) => {
-          const base = prev || {
-            phase: 'Refining...',
-            completedFiles: [],
-            charsReceived: 0,
-            startedAt,
-          };
-          if (ev.type === 'search_start') {
-            return {
-              ...base,
-              phase: ev.phase || 'Searching live web sources...',
-              searchState: 'searching',
-              searchQueries: ev.queries ?? base.searchQueries,
-              searchError: undefined,
-            };
-          }
-          if (ev.type === 'search_results') {
-            return {
-              ...base,
-              searchState: 'done',
-              searchQueries: ev.queries ?? base.searchQueries,
-              searchSources: ev.sources ?? base.searchSources,
-              searchError: undefined,
-            };
-          }
-          if (ev.type === 'search_error') {
-            return {
-              ...base,
-              searchState: 'failed',
-              searchQueries: ev.queries ?? base.searchQueries,
-              searchError: ev.error || 'Web search failed.',
-            };
-          }
-          if (ev.type === 'phase') {
-            return {
-              ...base,
-              phase: ev.phase || base.phase,
-              completedFiles: ev.completedFiles ?? base.completedFiles,
-              charsReceived: ev.chars ? Math.max(base.charsReceived, ev.chars) : base.charsReceived,
-            };
-          }
-          if (ev.type === 'file_start') {
-            return {
-              ...base,
-              phase: `Editing ${ev.path || 'file'}...`,
-              activeFile: ev.path,
-              completedFiles: ev.completedFiles ?? base.completedFiles,
-              charsReceived: ev.chars ?? base.charsReceived,
-            };
-          }
-          if (ev.type === 'file_done' && ev.path) {
-            const nextCompleted = base.completedFiles.includes(ev.path)
-              ? base.completedFiles
-              : [...base.completedFiles, ev.path];
-            return {
-              ...base,
-              completedFiles: nextCompleted,
-            };
-          }
-          if (ev.type === 'progress') {
-            return {
-              ...base,
-              activeFile: ev.activeFile ?? base.activeFile,
-              completedFiles: ev.completedFiles ?? base.completedFiles,
-              charsReceived: ev.chars ?? base.charsReceived,
-            };
-          }
-          return base;
-        });
+        if (ev.type === 'approval_required' && ev.approval) {
+          setPendingMcpApproval(ev.approval);
+        }
+        if (ev.type === 'terminal_output' && ev.entry) {
+          const termEntry = ev.entry;
+          setTerminalLogsByProject((prev) => ({
+            ...prev,
+            [targetProjectId]: [...(prev[targetProjectId] || []), termEntry].slice(-120),
+          }));
+        }
+        setAiStreamProgress((prev) =>
+          reduceAiStreamProgress(prev, ev, startedAt, 'Refining...'),
+        );
       })) as {
         summary?: string;
         searchOutcome?: WebSearchOutcome;
         files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
+        allFiles?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
+        changedFiles?: string[];
+        toolActivities?: AgentToolActivity[];
+        terminalEntries?: TerminalLogEntry[];
       };
 
-      if (!Array.isArray(data.files)) {
+      if (!Array.isArray(data.files) && !Array.isArray(data.allFiles)) {
         throw new Error('Refinement did not return updated files.');
       }
 
       setModelIncident(null);
       const now = new Date().toISOString();
-      const changedPaths = data.files.map((f) => f.path.replace(/^\/+/, ''));
+      const changedPaths =
+        data.changedFiles ||
+        (data.files || []).map((f) => normalizeProjectFilePath(f.path));
 
       updateActiveProject((prev) => ({
         ...prev,
         appAiEnabled: Boolean(prev.appAiEnabled || enableAppAiForRefine),
-        files: mergeProjectFiles(prev.files, data.files!),
+        files:
+          Array.isArray(data.allFiles) && data.allFiles.length > 0
+            ? data.allFiles.map((f) => {
+                const cleanPath = normalizeProjectFilePath(f.path);
+                return {
+                  id: createSafeId('file'),
+                  path: cleanPath,
+                  language: f.language || inferLanguageFromPath(cleanPath),
+                  content: f.content,
+                };
+              })
+            : mergeProjectFiles(prev.files, data.files || []),
         chatHistory: [
           ...prev.chatHistory,
           { id: createSafeId('msg'), role: 'user', content: instruction, timestamp: now },
@@ -1266,6 +1311,8 @@ export default function App() {
             timestamp: now,
             changedFiles: changedPaths,
             searchOutcome: data.searchOutcome,
+            toolActivities: data.toolActivities,
+            terminalEntries: data.terminalEntries,
           },
         ],
       }));
@@ -1288,6 +1335,190 @@ export default function App() {
       if (refineAbortRef.current === abortController) {
         refineAbortRef.current = null;
       }
+      setIsRefining(false);
+      setAiStreamProgress(null);
+    }
+  };
+
+  const handleRunSandboxCommand = async (command: string) => {
+    if (!activeProject || !user || !command.trim()) return;
+    const targetProjectId = activeProject.id;
+    setIsRunningTerminalCmd(true);
+    try {
+      const res = await mistApi.runSandboxCommand(activeProject.files, command.trim());
+      if (res.entry) {
+        setTerminalLogsByProject((prev) => ({
+          ...prev,
+          [targetProjectId]: [...(prev[targetProjectId] || []), res.entry].slice(-120),
+        }));
+      }
+    } catch (err) {
+      const errEntry: TerminalLogEntry = {
+        id: createSafeId('term'),
+        command: command.trim(),
+        stdout: '',
+        stderr: err instanceof Error ? err.message : 'Sandbox command failed.',
+        exitCode: 1,
+        durationMs: 0,
+        timestamp: new Date().toISOString(),
+        source: 'user',
+      };
+      setTerminalLogsByProject((prev) => ({
+        ...prev,
+        [targetProjectId]: [...(prev[targetProjectId] || []), errEntry].slice(-120),
+      }));
+    } finally {
+      setIsRunningTerminalCmd(false);
+    }
+  };
+
+  const handleDecideMcpApproval = async (approvalId: string, approved: boolean) => {
+    setPendingMcpApproval(null);
+    try {
+      await mistApi.resolveMcpApproval(approvalId, approved);
+    } catch {
+      // ignore if approval already timed out
+    }
+  };
+
+  const handleVerifyAndFixPreview = async (
+    instruction: string,
+    consoleEntries: PreviewConsoleEntry[],
+    snapshot: PreviewHealthSnapshot | null,
+  ) => {
+    if (!activeProject || !user || !providerConfig.apiKey?.trim() || isRefining || isVerifyingPreview) {
+      return;
+    }
+
+    const targetProjectId = activeProject.id;
+    const enableAppAiForFix = shouldEnableAppAi(
+      instruction,
+      studioSettingsRef.current.appAiMode,
+      activeProject.appAiEnabled ? true : undefined,
+    );
+
+    refineAbortRef.current?.abort();
+    const abortController = new AbortController();
+    refineAbortRef.current = abortController;
+
+    setIsRefining(true);
+    setIsVerifyingPreview(true);
+    setRefineError(null);
+    const startedAt = Date.now();
+    setAiStreamProgress({
+      phase: 'Inspecting preview logs & visual snapshot...',
+      completedFiles: [],
+      charsReceived: 0,
+      startedAt,
+      toolActivities: [],
+      terminalEntries: [],
+    });
+
+    try {
+      const idToken = await user.getIdToken();
+      const resp = await fetch('/api/ai/verify-preview/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        signal: abortController.signal,
+        body: JSON.stringify({
+          instruction,
+          files: activeProject.files,
+          enableAppAi: enableAppAiForFix,
+          consoleEntries,
+          previewHealth: snapshot,
+          screenshotDataUrl: snapshot?.screenshotDataUrl,
+          providerConfig,
+        }),
+      });
+      if (!resp.ok) {
+        const errPayload = (await resp.json().catch(() => ({}))) as {
+          error?: string;
+          incident?: ModelHealthIncident;
+        };
+        const err = new Error(
+          errPayload.incident?.message ||
+            errPayload.error ||
+            `Preview verification failed (${resp.status}).`,
+        ) as Error & { incident?: ModelHealthIncident };
+        err.incident = errPayload.incident;
+        throw err;
+      }
+
+      const data = (await consumeAiSseStream(resp, (ev) => {
+        if (ev.type === 'approval_required' && ev.approval) {
+          setPendingMcpApproval(ev.approval);
+        }
+        if (ev.type === 'terminal_output' && ev.entry) {
+          const termEntry = ev.entry;
+          setTerminalLogsByProject((prev) => ({
+            ...prev,
+            [targetProjectId]: [...(prev[targetProjectId] || []), termEntry].slice(-120),
+          }));
+        }
+        setAiStreamProgress((prev) =>
+          reduceAiStreamProgress(prev, ev, startedAt, 'Verifying live preview...'),
+        );
+      })) as {
+        summary?: string;
+        files?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
+        allFiles?: Array<{ path: string; language?: ProjectFile['language']; content: string }>;
+        changedFiles?: string[];
+        toolActivities?: AgentToolActivity[];
+        terminalEntries?: TerminalLogEntry[];
+      };
+
+      const changedPaths =
+        data.changedFiles ||
+        (data.files || []).map((f) => normalizeProjectFilePath(f.path));
+
+      if (changedPaths.length > 0 || (data.summary && data.summary.trim())) {
+        const now = new Date().toISOString();
+        updateActiveProject((prev) => ({
+          ...prev,
+          appAiEnabled: Boolean(prev.appAiEnabled || enableAppAiForFix),
+          files:
+            Array.isArray(data.allFiles) && data.allFiles.length > 0
+              ? data.allFiles.map((f) => {
+                  const cleanPath = normalizeProjectFilePath(f.path);
+                  return {
+                    id: createSafeId('file'),
+                    path: cleanPath,
+                    language: f.language || inferLanguageFromPath(cleanPath),
+                    content: f.content,
+                  };
+                })
+              : data.files && data.files.length > 0
+                ? mergeProjectFiles(prev.files, data.files)
+                : prev.files,
+          chatHistory: [
+            ...prev.chatHistory,
+            {
+              id: createSafeId('msg'),
+              role: 'assistant',
+              content: data.summary || 'Verified live preview health.',
+              timestamp: now,
+              changedFiles: changedPaths,
+              toolActivities: data.toolActivities,
+              terminalEntries: data.terminalEntries,
+            },
+          ],
+        }));
+      }
+      setModelIncident(null);
+    } catch (err) {
+      if (!(abortController.signal.aborted || (err instanceof Error && err.name === 'AbortError'))) {
+        const withIncident = err as Error & { incident?: ModelHealthIncident };
+        if (withIncident.incident) setModelIncident(withIncident.incident);
+        setRefineError(err instanceof Error ? err.message : 'Preview verification failed.');
+      }
+    } finally {
+      if (refineAbortRef.current === abortController) {
+        refineAbortRef.current = null;
+      }
+      setIsVerifyingPreview(false);
       setIsRefining(false);
       setAiStreamProgress(null);
     }
@@ -1407,13 +1638,11 @@ export default function App() {
     setDeployError(null);
     setDownloadedFileName(null);
     setDeployOpen(true);
-    const defaultSlug = target.publishedSlug || suggestShortSlug(target.name);
-    void handleDownloadPublishZip(defaultSlug, target);
   };
 
   const handleDeleteDeployment = async (slug: string) => {
     if (!user) {
-      setAuthPromptReason('Sign in with Google to unpublish your website.');
+      setAuthPromptReason('Sign in to Mist to unpublish your website.');
       setAccountOpen(true);
       return;
     }
@@ -1597,6 +1826,16 @@ export default function App() {
           isRefining={isRefining}
           streamProgress={aiStreamProgress}
           refineError={refineError}
+          terminalEntries={terminalLogsByProject[activeProject.id] || []}
+          isRunningTerminal={isRunningTerminalCmd}
+          isVerifyingPreview={isVerifyingPreview}
+          onRunTerminalCommand={(command) => void handleRunSandboxCommand(command)}
+          onClearTerminal={() =>
+            setTerminalLogsByProject((prev) => ({ ...prev, [activeProject.id]: [] }))
+          }
+          onVerifyAndFixPreview={(instruction, entries, snap) =>
+            void handleVerifyAndFixPreview(instruction, entries, snap)
+          }
           onBackHome={navigateToHome}
           onUpdateProjectName={(name) =>
             updateActiveProject((prev) => ({ ...prev, name: name.slice(0, 120) }))
@@ -1647,12 +1886,12 @@ export default function App() {
             setAuthPromptReason(null);
             setAccountOpen(true);
           }}
-          onOpenMistCode={() => setMistCodeOpen(true)}
         />
       ) : (
         <HomeView
           user={user}
           projects={projects}
+          templates={MIST_TEMPLATES}
           deployments={deployments}
           providerConfig={providerConfig}
           modelIncident={modelIncident}
@@ -1675,6 +1914,7 @@ export default function App() {
           onCancelGeneration={handleCancelGeneration}
           onOpenVoiceChat={() => setVoiceChatOpen(true)}
           onOpenProject={(project) => navigateToProject(project.id)}
+          onOpenTemplate={handleCreateFromTemplate}
           onPublishProject={(project) => handleOpenPublish(project)}
           onDuplicateProject={handleDuplicateProject}
           onDeleteProject={handleDeleteProject}
@@ -1688,7 +1928,6 @@ export default function App() {
             setAuthPromptReason(null);
             setAccountOpen(true);
           }}
-          onOpenMistCode={() => setMistCodeOpen(true)}
         />
       )}
 
@@ -1762,9 +2001,9 @@ export default function App() {
         }}
       />
 
-      <MistCodeModal
-        isOpen={mistCodeOpen}
-        onClose={() => setMistCodeOpen(false)}
+      <McpApprovalModal
+        request={pendingMcpApproval}
+        onDecide={(approvalId, approved) => void handleDecideMcpApproval(approvalId, approved)}
       />
     </>
   );

@@ -26,6 +26,7 @@ interface WorkspaceChatDrawerProps {
   onChangeRefineInput: (value: string) => void;
   onClearSelectedElement: () => void;
   onChangeWebSearchMode: (mode: WebSearchMode) => void;
+  onOpenFile?: (path: string) => void;
   onOpenVoiceChat: () => void;
   onOpenProviders: () => void;
   onOpenSettings: () => void;
@@ -49,6 +50,7 @@ export default function WorkspaceChatDrawer({
   onChangeRefineInput,
   onClearSelectedElement,
   onChangeWebSearchMode,
+  onOpenFile,
   onOpenVoiceChat,
   onOpenProviders,
   onOpenSettings,
@@ -62,6 +64,7 @@ export default function WorkspaceChatDrawer({
         isRefining={isRefining}
         streamProgress={streamProgress}
         refineElapsed={refineElapsed}
+        onOpenFile={onOpenFile}
         onCancelRefine={onCancelRefine}
       />
 
@@ -87,17 +90,17 @@ export default function WorkspaceChatDrawer({
       )}
 
       {/* Quick Refinement Chips */}
-      <div className="border-t border-zinc-100 px-3 pt-3 pb-1 dark:border-zinc-800">
-        <p className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mb-2">
+      <div className="border-t border-zinc-200/70 px-3 pt-2.5 pb-1 dark:border-white/[0.06]">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-1.5">
           Quick refinements
         </p>
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex gap-1.5 overflow-x-auto pb-1 mist-scrollbar">
           {suggestions.map((item) => (
             <button
               key={item}
               type="button"
               onClick={() => onChangeRefineInput(item)}
-              className="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              className="rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               {item}
             </button>

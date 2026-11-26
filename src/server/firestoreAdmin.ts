@@ -16,6 +16,7 @@ import type { DeploymentSummary, StoredDeployment } from '../utils/deploymentSto
 import type { WebPushSubscription } from '../utils/notificationService';
 import { SecurityValidationError } from '../utils/serverSecurity';
 import { createSafeId } from '../utils/projectOps';
+import { chunkOperations } from '../firebase/batchOps';
 
 let cachedApp: App | null = null;
 let cachedFirestore: Firestore | null = null;
@@ -469,7 +470,7 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
     if (project.templateId) projectPayload.templateId = project.templateId.slice(0, 64);
     if (project.publishedSlug) projectPayload.publishedSlug = project.publishedSlug.slice(0, 80);
 
-    const batch = this.db.batch();
+    const ops: Array<(batch: FirebaseFirestore.WriteBatch) => void> = [];
 
     if (!snap.exists) {
       let createdTimestamp: any = now;
@@ -480,10 +481,10 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
         }
       }
       projectPayload.createdAt = createdTimestamp;
-      batch.set(projectRef, projectPayload);
+      ops.push((b) => b.set(projectRef, projectPayload));
     } else {
       // Update mask: update only modified project metadata, never overwrite createdAt or ownerId!
-      batch.update(projectRef, projectPayload);
+      ops.push((b) => b.update(projectRef, projectPayload));
     }
 
     // Existing files & messages clean diff
@@ -497,13 +498,13 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
     const currentFileIds = new Set(project.files.map((f) => f.id));
     for (const fDoc of existingFiles.docs) {
       if (!currentFileIds.has(fDoc.id)) {
-        batch.delete(fDoc.ref);
+        ops.push((b) => b.delete(fDoc.ref));
       }
     }
 
     for (const file of project.files) {
       const fileRef = projectRef.collection('files').doc(file.id);
-      batch.set(fileRef, {
+      const fileDocData = {
         id: file.id,
         projectId: project.id,
         ownerId: userId,
@@ -511,13 +512,14 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
         language: file.language,
         content: file.content.slice(0, 200000),
         updatedAt: now,
-      });
+      };
+      ops.push((b) => b.set(fileRef, fileDocData));
     }
 
     const currentMsgIds = new Set((project.chatHistory || []).map((m) => m.id));
     for (const mDoc of existingMsgs.docs) {
       if (!currentMsgIds.has(mDoc.id)) {
-        batch.delete(mDoc.ref);
+        ops.push((b) => b.delete(mDoc.ref));
       }
     }
 
@@ -540,10 +542,16 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
       if (outcome) {
         msgData.searchOutcome = outcome;
       }
-      batch.set(msgRef, msgData);
+      ops.push((b) => b.set(msgRef, msgData));
     });
 
-    await batch.commit();
+    for (const chunk of chunkOperations(ops)) {
+      const batch = this.db.batch();
+      for (const applyOp of chunk) {
+        applyOp(batch);
+      }
+      await batch.commit();
+    }
   }
 
   async deleteProject(userId: string, projectId: string): Promise<void> {
@@ -559,12 +567,18 @@ export class FirestoreAdminStore implements AdminDatabaseOperations {
       projectRef.collection('messages').where('ownerId', '==', userId).get(),
     ]);
 
-    const batch = this.db.batch();
-    filesSnap.docs.forEach((d) => batch.delete(d.ref));
-    msgsSnap.docs.forEach((d) => batch.delete(d.ref));
-    batch.delete(projectRef);
-
-    await batch.commit();
+    const deleteRefs: FirebaseFirestore.DocumentReference[] = [
+      ...filesSnap.docs.map((d) => d.ref),
+      ...msgsSnap.docs.map((d) => d.ref),
+      projectRef,
+    ];
+    for (const chunk of chunkOperations(deleteRefs)) {
+      const batch = this.db.batch();
+      for (const ref of chunk) {
+        batch.delete(ref);
+      }
+      await batch.commit();
+    }
   }
 
   async syncProjects(

@@ -278,7 +278,7 @@ export async function proxyToHeroku(
     method,
     headers: forwardHeaders,
     body: hasBody ? request.body : undefined,
-    redirect: 'follow',
+    redirect: 'manual',
   };
 
   // Node/Workers fetch compatibility for streaming requests
@@ -364,8 +364,34 @@ export async function handlePublishedSite(
     return new Response('Configuration Error: R2 PUBLISHED_BUCKET binding is missing.', { status: 500 });
   }
 
-  // 4. Resolve R2 key
-  const cleanPath = url.pathname.replace(/^\/+/, '');
+  // 4. Resolve and validate R2 key against path traversal (including encoded/double-encoded dot segments)
+  let decodedPath = url.pathname;
+  try {
+    decodedPath = decodeURIComponent(url.pathname);
+  } catch {
+    return new Response('Bad Request: Malformed URL path.', {
+      status: 400,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    });
+  }
+  const cleanPath = decodedPath.replace(/^\/+/, '');
+  const rawLower = url.pathname.toLowerCase();
+  const decodedLower = cleanPath.toLowerCase();
+  if (
+    cleanPath.includes('..') ||
+    cleanPath.includes('\\') ||
+    cleanPath.includes('\0') ||
+    cleanPath.includes('//') ||
+    rawLower.includes('%2e') ||
+    decodedLower.includes('%2e') ||
+    rawLower.includes('%5c') ||
+    decodedLower.includes('%5c')
+  ) {
+    return new Response('Bad Request: Invalid artifact path.', {
+      status: 400,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    });
+  }
   const isDirectFile = cleanPath.length > 0 && cleanPath !== 'index.html';
 
   let r2Key = isDirectFile ? `sites/${subdomain}/${cleanPath}` : `sites/${subdomain}/index.html`;

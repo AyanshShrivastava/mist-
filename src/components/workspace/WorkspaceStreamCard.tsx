@@ -1,5 +1,13 @@
 import React from 'react';
-import { AlertTriangle, CheckCircle2, Globe, Loader2 } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Globe,
+  Loader2,
+  ShieldAlert,
+  Terminal,
+  Wrench,
+} from 'lucide-react';
 import { motion } from 'motion/react';
 import type { AiStreamProgress } from '../../types/mist';
 import { MistMark } from '../MistLogo';
@@ -50,6 +58,9 @@ export default function WorkspaceStreamCard({
     ? `Editing ${streamProgress.activeFile}...`
     : streamProgress.phase;
 
+  const recentTools = (streamProgress.toolActivities || []).slice(-4);
+  const latestTerminal = (streamProgress.terminalEntries || []).slice(-1)[0];
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
@@ -80,6 +91,49 @@ export default function WorkspaceStreamCard({
       </div>
 
       {renderSearchBadge(streamProgress)}
+
+      {recentTools.length > 0 && (
+        <div className="mt-2 space-y-1 font-mono text-[10px]">
+          {recentTools.map((tool) => (
+            <div
+              key={tool.id}
+              className="flex items-center justify-between gap-2 rounded-md bg-white/70 px-2 py-1 text-zinc-700 dark:bg-zinc-950/60 dark:text-zinc-300"
+            >
+              <span className="inline-flex items-center gap-1.5 truncate">
+                {tool.status === 'running' ? (
+                  <Loader2 className="h-2.5 w-2.5 animate-spin text-(--mist-c2) shrink-0" />
+                ) : tool.status === 'awaiting_approval' ? (
+                  <ShieldAlert className="h-2.5 w-2.5 text-amber-500 shrink-0" />
+                ) : tool.status === 'error' ? (
+                  <AlertTriangle className="h-2.5 w-2.5 text-red-500 shrink-0" />
+                ) : (
+                  <Wrench className="h-2.5 w-2.5 text-emerald-500 shrink-0" />
+                )}
+                <span className="truncate font-semibold">{tool.toolName}</span>
+              </span>
+              {tool.summary && (
+                <span className="truncate text-zinc-500 dark:text-zinc-400 max-w-[140px]">
+                  {tool.summary}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {latestTerminal && (
+        <div className="mt-2 rounded-md border border-zinc-200/80 bg-zinc-950 px-2 py-1 font-mono text-[10px] text-zinc-300 dark:border-zinc-800">
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1 text-emerald-400">
+              <Terminal className="h-2.5 w-2.5" />
+              <span>$ {latestTerminal.command}</span>
+            </span>
+            <span className={latestTerminal.exitCode === 0 ? 'text-emerald-400' : 'text-red-400'}>
+              exit {latestTerminal.exitCode}
+            </span>
+          </div>
+        </div>
+      )}
 
       {streamProgress.completedFiles.length > 0 && (
         <div className="mt-2 space-y-1 font-mono text-[11px]">

@@ -154,7 +154,7 @@ export default function ModelSelectorDropdown({
             {activeEntry ? (
               <>
                 <LifecycleBadge status={activeEntry.status} />
-                <span className="text-[10px] font-medium text-blue-600 dark:text-blue-400 whitespace-nowrap shrink-0">
+                <span className="text-[10px] font-medium text-(--mist-c2) whitespace-nowrap shrink-0">
                   {activeEntry.tier}
                 </span>
               </>
@@ -343,7 +343,7 @@ export default function ModelSelectorDropdown({
                         }}
                         className={`flex w-full items-start justify-between gap-3 px-3 py-2.5 text-left transition-colors cursor-pointer ${
                           selected
-                            ? 'bg-blue-50/90 dark:bg-blue-500/10'
+                            ? 'bg-(--mist-c2)/10'
                             : 'hover:bg-zinc-50 dark:hover:bg-zinc-900'
                         } ${item.status === 'retired' || item.status === 'deprecated' ? 'opacity-70' : ''}`}
                       >
@@ -352,7 +352,7 @@ export default function ModelSelectorDropdown({
                             <span
                               className={`text-xs font-medium ${
                                 selected
-                                  ? 'text-blue-700 dark:text-blue-300'
+                                  ? 'text-(--mist-c2)'
                                   : 'text-zinc-900 dark:text-zinc-100'
                               }`}
                             >
@@ -385,7 +385,7 @@ export default function ModelSelectorDropdown({
 
                         {selected && (
                           <Check
-                            className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400"
+                            className="mt-0.5 h-3.5 w-3.5 shrink-0 text-(--mist-c2)"
                             aria-hidden="true"
                           />
                         )}

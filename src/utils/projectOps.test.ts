@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyDeterministicRefinement,
   applyVisualPatchToFiles,
   buildExportManifest,
   duplicateProjectData,
@@ -87,13 +86,6 @@ test('applyVisualPatchToFiles updates JSX text and writes override CSS rule', ()
   assert.ok(overrideCss.content.includes('color: #1e3a8a !important;'));
 });
 
-test('applyDeterministicRefinement shrinks navbar height on "make the navbar smaller"', () => {
-  const result = applyDeterministicRefinement(sampleProject.files, 'make the navbar smaller');
-  const nav = result.files.find((f) => f.path === 'src/components/Navbar.tsx');
-  assert.ok(nav?.content.includes('py-2.5'));
-  assert.ok(result.changedFiles.includes('src/components/Navbar.tsx'));
-});
-
 test('mergeProjectFiles updates existing paths and adds new files cleanly', () => {
   const merged = mergeProjectFiles(sampleProject.files, [
     { path: './src/index.css', content: '@import "tailwindcss";\nbody { margin: 0; }' },
@@ -148,5 +140,23 @@ test('buildExportManifest includes three and @types/three when Three.js is impor
   const manifest = buildExportManifest(threeProject);
   assert.ok(manifest['package.json'].includes('"three"'));
   assert.ok(manifest['package.json'].includes('"@types/three"'));
+});
+
+test('applyVisualPatchToFiles sanitizes CSS selector and declaration injection payloads', () => {
+  const updated = applyVisualPatchToFiles(sampleProject.files, {
+    mistId: 'evil"] { background: url(https://evil.test); } [x="a',
+    styles: {
+      color: 'red; } body { display: none; } /*',
+      backgroundColor: 'expression(alert(1))',
+      fontSize: '18px',
+    },
+  });
+
+  const overrideCss = updated.find((f) => f.path === 'src/styles/mist-overrides.css');
+  assert.ok(overrideCss);
+  assert.equal(overrideCss.content.includes('url(https://evil.test)'), false);
+  assert.equal(overrideCss.content.includes('body { display: none'), false);
+  assert.equal(overrideCss.content.includes('expression('), false);
+  assert.ok(overrideCss.content.includes('font-size: 18px !important;'));
 });
 

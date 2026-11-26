@@ -94,9 +94,39 @@ export async function resolveByokRequestParams(
   return { config, providerLabel, endpoint, headers };
 }
 
+export type ByokMessageContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } };
+
+export interface ByokToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface ByokChatMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | ByokMessageContentPart[] | null;
+  tool_calls?: ByokToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+export interface ByokToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
 export interface ByokCompletionOptions {
   config?: AiProviderConfig;
-  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  messages: ByokChatMessage[];
   jsonMode?: boolean;
   temperature?: number;
   maxTokens?: number;
@@ -104,6 +134,18 @@ export interface ByokCompletionOptions {
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   skipDnsLookup?: boolean;
+}
+
+export interface ByokAgentTurnOptions extends ByokCompletionOptions {
+  tools?: ByokToolDefinition[];
+  toolChoice?: 'auto' | 'none' | 'required';
+}
+
+export interface ByokAgentTurnResult {
+  text: string;
+  toolCalls: ByokToolCall[];
+  finishReason?: string;
+  toolsUnsupported?: boolean;
 }
 
 function extractPartText(part: unknown): string {
@@ -226,6 +268,211 @@ export async function callByokCompletionRaw(params: ByokCompletionOptions): Prom
     throw new ProviderHttpError(502, `${providerLabel} returned an empty response.`);
   }
   return content;
+}
+
+/**
+ * Executes a single OpenAI-compatible agent turn with native tool calling support,
+ * falling back cleanly if the active BYOK gateway rejects `tools` or `response_format`.
+ */
+export async function callByokAgentTurn(params: ByokAgentTurnOptions): Promise<ByokAgentTurnResult> {
+  const {
+    messages,
+    tools,
+    toolChoice = 'auto',
+    jsonMode = false,
+    temperature = 0.25,
+    maxTokens = 12288,
+    timeoutMs = 90_000,
+    signal,
+    fetchImpl,
+    skipDnsLookup,
+  } = params;
+
+  if (signal?.aborted) {
+    throw new ProviderHttpError(499, 'Client disconnected before upstream request started.');
+  }
+
+  const { config, providerLabel, endpoint, headers } = await resolveByokRequestParams(
+    params.config,
+    { skipDnsLookup },
+  );
+
+  const sendTurn = async (opts: {
+    limitTokens: number;
+    useJsonFormat: boolean;
+    includeTools: boolean;
+  }) => {
+    const body: Record<string, unknown> = {
+      model: config.model,
+      messages,
+      temperature,
+      max_tokens: opts.limitTokens,
+    };
+    if (opts.includeTools && tools && tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = toolChoice;
+    } else if (opts.useJsonFormat) {
+      body.response_format = { type: 'json_object' };
+    }
+    return safeFetchExternal(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      timeoutMs,
+      parentSignal: signal,
+      fetchImpl,
+      skipDnsLookup,
+    });
+  };
+
+  let usedTools = Boolean(tools && tools.length > 0);
+  let toolsUnsupported = false;
+  let resp = await sendTurn({ limitTokens: maxTokens, useJsonFormat: jsonMode, includeTools: usedTools });
+
+  if (!resp.ok && (resp.status === 429 || resp.status === 503) && !signal?.aborted) {
+    const retryHeader = Number(resp.headers.get('retry-after') || '0');
+    const delayMs = retryHeader > 0 && retryHeader <= 4 ? retryHeader * 1000 : 1200;
+    await new Promise((r) => setTimeout(r, delayMs));
+    if (!signal?.aborted) {
+      resp = await sendTurn({ limitTokens: maxTokens, useJsonFormat: jsonMode, includeTools: usedTools });
+    }
+  }
+
+  if (!resp.ok && resp.status === 400 && usedTools) {
+    const errText = redactSecrets(await resp.text());
+    if (/tool|function|tool_choice|unsupported|schema/i.test(errText)) {
+      usedTools = false;
+      toolsUnsupported = true;
+      resp = await sendTurn({ limitTokens: maxTokens, useJsonFormat: jsonMode, includeTools: false });
+    } else {
+      throw new ProviderHttpError(400, `${providerLabel} error (400): ${errText.slice(0, 350)}`);
+    }
+  }
+
+  if (!resp.ok) {
+    resp = await handleFormatOrAffordabilityRetry(
+      resp,
+      (tokens, useJson) => sendTurn({ limitTokens: tokens, useJsonFormat: useJson, includeTools: usedTools }),
+      { maxTokens, jsonMode, providerLabel },
+    );
+  }
+
+  if (!resp.ok) {
+    const errText = redactSecrets(await resp.text());
+    throw new ProviderHttpError(
+      resp.status,
+      `${providerLabel} error (${resp.status}): ${errText.slice(0, 350)}`,
+    );
+  }
+
+  const contentType = (resp.headers.get('content-type') || '').toLowerCase();
+  if (contentType.includes('text/event-stream')) {
+    const rawSse = await resp.text();
+    let sseText = '';
+    let finishReason: string | undefined;
+    const toolMap = new Map<number, { id: string; name: string; args: string }>();
+
+    for (const line of rawSse.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payloadStr = trimmed.slice(5).trim();
+      if (!payloadStr || payloadStr === '[DONE]') continue;
+      try {
+        const chunk = JSON.parse(payloadStr) as {
+          choices?: Array<{
+            finish_reason?: string;
+            delta?: {
+              content?: unknown;
+              tool_calls?: Array<{
+                index?: number;
+                id?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+          }>;
+        };
+        const delta = chunk.choices?.[0]?.delta;
+        if (chunk.choices?.[0]?.finish_reason) {
+          finishReason = chunk.choices[0].finish_reason;
+        }
+        if (delta?.content !== undefined) {
+          sseText += extractChoiceText(delta.content);
+        }
+        if (Array.isArray(delta?.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = typeof tc.index === 'number' ? tc.index : 0;
+            const cur = toolMap.get(idx) || { id: tc.id || `call_${Date.now()}_${idx}`, name: '', args: '' };
+            if (tc.id) cur.id = tc.id;
+            if (tc.function?.name) cur.name += tc.function.name;
+            if (tc.function?.arguments) cur.args += tc.function.arguments;
+            toolMap.set(idx, cur);
+          }
+        }
+      } catch {
+        // Ignore partial SSE control line
+      }
+    }
+
+    const sseToolCalls: ByokToolCall[] = Array.from(toolMap.values())
+      .filter((t) => t.name.trim())
+      .map((t) => ({
+        id: t.id,
+        type: 'function',
+        function: { name: t.name.trim(), arguments: t.args || '{}' },
+      }));
+
+    if (!sseText && sseToolCalls.length === 0) {
+      throw new ProviderHttpError(502, `${providerLabel} returned an empty SSE stream.`);
+    }
+    return {
+      text: sseText,
+      toolCalls: sseToolCalls,
+      finishReason,
+      toolsUnsupported,
+    };
+  }
+
+  const data = (await resp.json()) as {
+    choices?: Array<{
+      finish_reason?: string;
+      message?: {
+        content?: unknown;
+        tool_calls?: Array<{
+          id?: unknown;
+          type?: unknown;
+          function?: { name?: unknown; arguments?: unknown };
+        }>;
+      };
+    }>;
+  };
+
+  const choice = data.choices?.[0];
+  const rawCalls = Array.isArray(choice?.message?.tool_calls) ? choice.message.tool_calls : [];
+  const toolCalls: ByokToolCall[] = rawCalls
+    .filter((tc) => tc && typeof tc.function?.name === 'string' && tc.function.name.trim())
+    .map((tc, idx) => ({
+      id: typeof tc.id === 'string' && tc.id.trim() ? tc.id : `call_${Date.now()}_${idx}`,
+      type: 'function',
+      function: {
+        name: String(tc.function!.name).trim(),
+        arguments:
+          typeof tc.function?.arguments === 'string'
+            ? tc.function.arguments
+            : JSON.stringify(tc.function?.arguments ?? {}),
+      },
+    }));
+
+  const text = extractChoiceText(choice?.message?.content);
+  if (!text && toolCalls.length === 0) {
+    throw new ProviderHttpError(502, `${providerLabel} returned an empty response.`);
+  }
+
+  return {
+    text,
+    toolCalls,
+    finishReason: choice?.finish_reason,
+    toolsUnsupported,
+  };
 }
 
 export interface StreamByokOptions extends ByokCompletionOptions {

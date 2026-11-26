@@ -11,6 +11,7 @@ import {
   Eye,
   EyeOff,
   FileCode2,
+  GitBranch,
   Globe,
   KeyRound,
   Link2,
@@ -51,6 +52,17 @@ import {
 } from '../data/models';
 import ModelSelectorDropdown from './ModelSelectorDropdown';
 import MistLogo from './MistLogo';
+
+function useModalEscape(isOpen: boolean, onClose: () => void) {
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, onClose]);
+}
 
 interface ProvidersModalProps {
   isOpen: boolean;
@@ -101,6 +113,8 @@ export function ProvidersModal({
 
   const catalogAbortRef = useRef<AbortController | null>(null);
   const catalogSeqRef = useRef(0);
+
+  useModalEscape(isOpen, onClose);
 
   useEffect(() => {
     if (isOpen) {
@@ -227,7 +241,7 @@ export function ProvidersModal({
     if (!user) {
       setTestResult({
         ok: false,
-        message: 'Sign in with Google first to run live provider verification.',
+        message: 'Sign in to Mist first to run live provider verification.',
       });
       return;
     }
@@ -310,6 +324,7 @@ export function ProvidersModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
+          onClick={onClose}
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
@@ -317,7 +332,8 @@ export function ProvidersModal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 14 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full sm:max-w-lg max-h-[92dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950 mist-scrollbar"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full sm:max-w-lg max-h-[92dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-white/[0.08] dark:bg-[#111115] mist-scrollbar"
           >
             <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
@@ -479,7 +495,7 @@ export function ProvidersModal({
                     ? sessionOnlyKey
                       ? `Session-only active: key stays strictly in RAM and will not sync to ${user.email}.`
                       : `Encrypted with AES-256-GCM & synced to your signed-in account (${user.email}) — zero keys are stored in browser localStorage.`
-                    : 'Sign in with Google to encrypt & sync this key to your account email (zero localStorage key storage).'}
+                    : 'Sign in to Mist to encrypt & sync this key to your account (zero localStorage key storage).'}
                 </div>
               </div>
 
@@ -677,13 +693,32 @@ export function DeployModal({
   const [renderLoading, setRenderLoading] = useState(false);
   const [renderStatus, setRenderStatus] = useState<{
     connected: boolean;
+    authMethod?: 'api_key';
+    oauthMcpConnected?: boolean;
     keyHint?: string;
-    ownerId?: string;
-    ownerName?: string;
-    ownerEmail?: string;
-    workspaceType?: string;
+    owner?: { id: string; name: string; email?: string; type: 'user' | 'team' };
     connectedAt?: string;
   } | null>(null);
+  const [renderWorkspaces, setRenderWorkspaces] = useState<
+    Array<{ id: string; name: string; email?: string; type: 'user' | 'team' }>
+  >([]);
+  const [selectedOwnerId, setSelectedOwnerId] = useState('');
+  const [existingServices, setExistingServices] = useState<
+    Array<{
+      id: string;
+      name: string;
+      ownerId: string;
+      repo: string;
+      branch: string;
+      url: string;
+      dashboardUrl: string;
+      status: string;
+      createdAt: string;
+      updatedAt: string;
+    }>
+  >([]);
+  const [servicesLoading, setServicesLoading] = useState(false);
+  const [redeployingServiceId, setRedeployingServiceId] = useState<string | null>(null);
   const [renderApiKey, setRenderApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -706,6 +741,8 @@ export function DeployModal({
 
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  useModalEscape(isOpen, onClose);
+
   const clearPollTimer = useCallback(() => {
     if (pollTimerRef.current) {
       clearInterval(pollTimerRef.current);
@@ -719,10 +756,34 @@ export function DeployModal({
     };
   }, [clearPollTimer]);
 
+  const loadRenderDetails = useCallback(async () => {
+    setServicesLoading(true);
+    try {
+      const [wsRes, svcRes] = await Promise.all([
+        mistApi.getRenderWorkspaces().catch(() => ({ primaryOwner: null, workspaces: [] })),
+        mistApi.listRenderServices().catch(() => ({ services: [] })),
+      ]);
+      const workspacesList = wsRes.workspaces || [];
+      setRenderWorkspaces(workspacesList);
+      if (workspacesList.length > 0) {
+        setSelectedOwnerId((prev) =>
+          prev && workspacesList.some((w) => w.id === prev)
+            ? prev
+            : wsRes.primaryOwner?.id || workspacesList[0].id,
+        );
+      }
+      setExistingServices(svcRes.services || []);
+    } finally {
+      setServicesLoading(false);
+    }
+  }, []);
+
   // Load Render connection status whenever modal opens
   const fetchRenderStatus = useCallback(async () => {
     if (!user) {
       setRenderStatus(null);
+      setRenderWorkspaces([]);
+      setExistingServices([]);
       return;
     }
     setRenderLoading(true);
@@ -730,12 +791,18 @@ export function DeployModal({
     try {
       const res = await mistApi.getRenderStatus();
       setRenderStatus(res);
+      if (res.connected) {
+        await loadRenderDetails();
+      } else {
+        setRenderWorkspaces([]);
+        setExistingServices([]);
+      }
     } catch {
       setRenderStatus({ connected: false });
     } finally {
       setRenderLoading(false);
     }
-  }, [user]);
+  }, [user, loadRenderDetails]);
 
   useEffect(() => {
     if (isOpen) {
@@ -769,13 +836,16 @@ export function DeployModal({
       setRenderApiKey('');
       setRenderStatus({
         connected: true,
+        authMethod: 'api_key',
         keyHint: res.keyHint,
-        ownerId: res.owner.id,
-        ownerName: res.owner.name,
-        ownerEmail: res.owner.email,
-        workspaceType: res.owner.type,
-        connectedAt: new Date().toISOString(),
+        owner: res.owner,
+        connectedAt: res.connectedAt,
       });
+      setRenderWorkspaces(res.workspaces || []);
+      if (res.owner?.id) {
+        setSelectedOwnerId(res.owner.id);
+      }
+      await loadRenderDetails();
     } catch (err) {
       setConnectError(err instanceof Error ? err.message : 'Failed to connect Render account.');
     } finally {
@@ -789,6 +859,9 @@ export function DeployModal({
     try {
       await mistApi.disconnectRender();
       setRenderStatus({ connected: false });
+      setRenderWorkspaces([]);
+      setExistingServices([]);
+      setSelectedOwnerId('');
       setCurrentDeploy(null);
       clearPollTimer();
     } catch (err) {
@@ -858,6 +931,7 @@ export function DeployModal({
         repoUrl: repoUrl.trim(),
         branch: branch.trim() || 'main',
         serviceName: cleanName,
+        ownerId: selectedOwnerId || renderStatus?.owner?.id || undefined,
         buildCommand: buildCommand.trim() || undefined,
         publishPath: publishPath.trim() || undefined,
       });
@@ -875,12 +949,41 @@ export function DeployModal({
         updatedAt: new Date().toISOString(),
       });
 
+      void loadRenderDetails();
       // Start polling status
       pollServiceStatus(res.service.id);
     } catch (err) {
       setRenderDeployError(err instanceof Error ? err.message : 'Deployment to Render failed.');
     } finally {
       setIsDeployingRender(false);
+    }
+  };
+
+  const handleRedeployExistingService = async (svc: {
+    id: string;
+    name: string;
+    url: string;
+    repo: string;
+    branch: string;
+  }) => {
+    setRedeployingServiceId(svc.id);
+    setRenderDeployError(null);
+    try {
+      const res = await mistApi.triggerRenderDeploy(svc.id, false);
+      setCurrentDeploy({
+        serviceId: svc.id,
+        serviceName: svc.name,
+        serviceUrl: svc.url || `https://${svc.name}.onrender.com`,
+        status: res.deploy?.status || 'build_in_progress',
+        repo: svc.repo,
+        branch: svc.branch,
+        updatedAt: new Date().toISOString(),
+      });
+      pollServiceStatus(svc.id);
+    } catch (err) {
+      setRenderDeployError(err instanceof Error ? err.message : 'Failed to trigger Render deploy.');
+    } finally {
+      setRedeployingServiceId(null);
     }
   };
 
@@ -902,6 +1005,7 @@ export function DeployModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
+          onClick={onClose}
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
@@ -909,7 +1013,8 @@ export function DeployModal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 14 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full sm:max-w-xl max-h-[92dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950 mist-scrollbar"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full sm:max-w-xl max-h-[92dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-white/[0.08] dark:bg-[#111115] mist-scrollbar"
           >
             <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
@@ -1063,17 +1168,25 @@ export function DeployModal({
                     /* Render Account Connected Banner & Deploy Form */
                     <div className="space-y-4">
                       {/* Connection details bar */}
-                      <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50/80 p-3 dark:border-emerald-900/60 dark:bg-emerald-950/30">
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-200 bg-emerald-50/80 p-3 dark:border-emerald-900/60 dark:bg-emerald-950/30">
                         <div className="flex items-center gap-2">
                           <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
                           <div>
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex flex-wrap items-center gap-1.5">
                               <span className="font-semibold text-emerald-900 dark:text-emerald-200">
-                                {renderStatus.ownerName || 'Render Account'}
+                                {renderStatus.owner?.name || 'Render Account'}
                               </span>
-                              {renderStatus.workspaceType && (
+                              {renderStatus.owner?.type && (
                                 <span className="rounded bg-emerald-200/60 px-1.5 py-0.2 text-[9px] font-medium uppercase tracking-wide text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300">
-                                  {renderStatus.workspaceType}
+                                  {renderStatus.owner.type}
+                                </span>
+                              )}
+                              <span className="rounded bg-black/5 px-1.5 py-0.2 text-[9px] font-medium text-emerald-800 dark:bg-white/10 dark:text-emerald-200">
+                                API Key
+                              </span>
+                              {renderStatus.oauthMcpConnected && (
+                                <span className="rounded bg-indigo-500/15 px-1.5 py-0.2 text-[9px] font-medium text-indigo-800 dark:text-indigo-200">
+                                  MCP OAuth Ready
                                 </span>
                               )}
                             </div>
@@ -1098,12 +1211,102 @@ export function DeployModal({
                         </button>
                       </div>
 
+                      {/* Existing Render Services quick redeploy */}
+                      {existingServices.length > 0 && (
+                        <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-900/50 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-semibold text-zinc-900 dark:text-white">
+                              Existing Render Services ({existingServices.length})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => void loadRenderDetails()}
+                              disabled={servicesLoading}
+                              className="inline-flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200 cursor-pointer"
+                            >
+                              <RefreshCw className={`h-3 w-3 ${servicesLoading ? 'animate-spin' : ''}`} />
+                              <span>Refresh</span>
+                            </button>
+                          </div>
+                          <div className="space-y-1.5 max-h-36 overflow-y-auto mist-scrollbar">
+                            {existingServices.slice(0, 6).map((svc) => (
+                              <div
+                                key={svc.id}
+                                className="flex items-center justify-between gap-2 rounded-lg border border-zinc-200/80 bg-white px-2.5 py-1.5 dark:border-zinc-800 dark:bg-zinc-950"
+                              >
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="truncate font-medium text-zinc-900 dark:text-zinc-100">
+                                      {svc.name}
+                                    </span>
+                                    <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] uppercase text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                                      {svc.status.replace(/_/g, ' ')}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+                                    {svc.branch && (
+                                      <span className="inline-flex items-center gap-0.5 font-mono">
+                                        <GitBranch className="h-2.5 w-2.5" />
+                                        {svc.branch}
+                                      </span>
+                                    )}
+                                    {svc.url && (
+                                      <a
+                                        href={svc.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="truncate text-blue-600 hover:underline dark:text-blue-400"
+                                      >
+                                        {svc.url.replace(/^https?:\/\//, '')}
+                                      </a>
+                                    )}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={redeployingServiceId === svc.id}
+                                  onClick={() => void handleRedeployExistingService(svc)}
+                                  className="inline-flex shrink-0 items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-medium text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900/60 dark:bg-indigo-950/50 dark:text-indigo-300 cursor-pointer disabled:opacity-50"
+                                >
+                                  {redeployingServiceId === svc.id ? (
+                                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                                  ) : (
+                                    <Rocket className="h-2.5 w-2.5" />
+                                  )}
+                                  <span>Redeploy</span>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       {/* Deployment configuration form */}
                       <form onSubmit={handleDeployToRender} className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/70 p-4 dark:border-zinc-800 dark:bg-zinc-900/50">
                         <h3 className="font-semibold text-zinc-900 dark:text-white flex items-center gap-1.5">
                           <Rocket className="h-3.5 w-3.5 text-blue-500" />
                           <span>Create Render Static Site</span>
                         </h3>
+
+                        {renderWorkspaces.length > 0 && (
+                          <div>
+                            <label htmlFor="render-workspace-select" className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                              Render Workspace
+                            </label>
+                            <select
+                              id="render-workspace-select"
+                              value={selectedOwnerId}
+                              onChange={(e) => setSelectedOwnerId(e.target.value)}
+                              className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-950 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950 dark:text-white"
+                            >
+                              {renderWorkspaces.map((ws) => (
+                                <option key={ws.id} value={ws.id}>
+                                  {ws.name} ({ws.type})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
 
                         <div>
                           <label htmlFor="render-repo-url" className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
@@ -1467,6 +1670,7 @@ export function DeploymentsModal({
   onClose,
   onDeleteDeployment,
 }: DeploymentsModalProps) {
+  useModalEscape(isOpen, onClose);
   return (
     <AnimatePresence>
       {isOpen && (
@@ -1478,6 +1682,7 @@ export function DeploymentsModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
+          onClick={onClose}
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
@@ -1485,7 +1690,8 @@ export function DeploymentsModal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 14 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full sm:max-w-lg max-h-[85dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full sm:max-w-lg max-h-[85dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-white/[0.08] dark:bg-[#111115]"
           >
             <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
@@ -1640,6 +1846,7 @@ export function AccountModal({
   onSignOut,
   onManageProfile,
 }: AccountModalProps) {
+  useModalEscape(isOpen, onClose);
   return (
     <AnimatePresence>
       {isOpen && (
@@ -1651,6 +1858,7 @@ export function AccountModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.16 }}
+          onClick={onClose}
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 p-0 sm:p-4 backdrop-blur-md"
         >
           <motion.div
@@ -1658,7 +1866,8 @@ export function AccountModal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 14 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-4 sm:pb-0 shadow-2xl dark:border-white/[0.08] dark:bg-[#111115]"
           >
             <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">

@@ -1,5 +1,12 @@
-import { useEffect, useRef } from 'react';
-import type { MistUser as User, AiProviderConfig, SelectedVisualElement, VisualElementPatch } from '../../types/mist';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type {
+  AiProviderConfig,
+  MistUser as User,
+  PreviewConsoleEntry,
+  PreviewHealthSnapshot,
+  SelectedVisualElement,
+  VisualElementPatch,
+} from '../../types/mist';
 import { relayAppAiRequest } from './appAiRelay';
 import { useEphemeralPreviewSession } from './useEphemeralPreviewSession';
 
@@ -31,6 +38,8 @@ function isIframeMessage(event: MessageEvent, targetWindow: Window | null): bool
 
 interface MessageContext {
   onSelectElement: (el: SelectedVisualElement) => void;
+  onPreviewLog: (entry: PreviewConsoleEntry) => void;
+  onPreviewSnapshot: (requestId: string | null, snapshot: PreviewHealthSnapshot) => void;
   user: User | null;
   hasAppAi: boolean;
   providerConfig: AiProviderConfig;
@@ -42,6 +51,29 @@ function handleIncomingMessage(data: unknown, win: Window, ctx: MessageContext):
 
   if (msg.type === 'MIST_SELECT_ELEMENT' && isValidSelectedElement(msg.payload)) {
     ctx.onSelectElement(msg.payload);
+    return;
+  }
+
+  if (msg.type === 'MIST_PREVIEW_LOG' && msg.payload && typeof msg.payload === 'object') {
+    const p = msg.payload as Partial<PreviewConsoleEntry>;
+    const lvl =
+      p.level === 'runtime_error' || p.level === 'error' || p.level === 'warn' ? p.level : 'log';
+    ctx.onPreviewLog({
+      id: `plog_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      level: lvl,
+      message: String(p.message || ''),
+      source: typeof p.source === 'string' ? p.source : undefined,
+      line: typeof p.line === 'number' ? p.line : undefined,
+      column: typeof p.column === 'number' ? p.column : undefined,
+      stack: typeof p.stack === 'string' ? p.stack : undefined,
+      timestamp: typeof p.timestamp === 'string' ? p.timestamp : new Date().toISOString(),
+    });
+    return;
+  }
+
+  if (msg.type === 'MIST_PREVIEW_SNAPSHOT' && msg.payload && typeof msg.payload === 'object') {
+    const reqId = typeof msg.requestId === 'string' ? msg.requestId : null;
+    ctx.onPreviewSnapshot(reqId, msg.payload as PreviewHealthSnapshot);
     return;
   }
 
@@ -73,12 +105,33 @@ export function useAppAiBridge({
   sessionTokenRef.current = sessionToken;
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
+  const [consoleEntries, setConsoleEntries] = useState<PreviewConsoleEntry[]>([]);
+  const [latestSnapshot, setLatestSnapshot] = useState<PreviewHealthSnapshot | null>(null);
+  const pendingCapturesRef = useRef<Map<string, (snap: PreviewHealthSnapshot | null) => void>>(new Map());
+
+  const clearConsoleEntries = useCallback(() => {
+    setConsoleEntries([]);
+  }, []);
+
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const win = iframeRef.current?.contentWindow || null;
       if (!isIframeMessage(event, win) || !win) return;
       handleIncomingMessage(event.data, win, {
         onSelectElement,
+        onPreviewLog: (entry) => {
+          setConsoleEntries((prev) => [...prev.slice(-79), entry]);
+        },
+        onPreviewSnapshot: (reqId, snap) => {
+          setLatestSnapshot(snap);
+          if (reqId) {
+            const resolver = pendingCapturesRef.current.get(reqId);
+            if (resolver) {
+              pendingCapturesRef.current.delete(reqId);
+              resolver(snap);
+            }
+          }
+        },
         user,
         hasAppAi,
         providerConfig,
@@ -105,9 +158,32 @@ export function useAppAiBridge({
     }
   };
 
+  const capturePreviewSnapshot = useCallback((): Promise<PreviewHealthSnapshot | null> => {
+    const win = iframeRef.current?.contentWindow;
+    if (!win) return Promise.resolve(null);
+    const reqId = `cap_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    return new Promise<PreviewHealthSnapshot | null>((resolve) => {
+      const timer = window.setTimeout(() => {
+        if (pendingCapturesRef.current.has(reqId)) {
+          pendingCapturesRef.current.delete(reqId);
+          resolve(null);
+        }
+      }, 2500);
+      pendingCapturesRef.current.set(reqId, (snap) => {
+        window.clearTimeout(timer);
+        resolve(snap);
+      });
+      win.postMessage({ type: 'MIST_CAPTURE_PREVIEW', requestId: reqId }, '*');
+    });
+  }, []);
+
   return {
     iframeRef,
     sessionToken,
+    consoleEntries,
+    clearConsoleEntries,
+    latestSnapshot,
+    capturePreviewSnapshot,
     syncBridgeToIframe,
     handleLivePreviewPatch,
   };

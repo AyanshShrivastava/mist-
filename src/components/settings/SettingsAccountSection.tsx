@@ -68,14 +68,14 @@ export default function SettingsAccountSection({
         ) : (
           <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/90 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/70">
             <p className="text-zinc-600 dark:text-zinc-400 leading-relaxed">
-              Sign in with Google to save your websites, settings, and published deployments across devices.
+              Sign in to Mist to sync your websites, encrypted keys, and published deployments across devices.
             </p>
             <button
               type="button"
               onClick={onSignIn}
-              className="mt-3 w-full min-h-[40px] rounded-xl mist-primary-gradient px-4 py-2 font-medium text-white shadow-sm transition-all cursor-pointer"
+              className="mt-3 w-full min-h-[40px] rounded-xl mist-primary-gradient px-4 py-2 font-semibold text-white shadow-sm transition-all cursor-pointer"
             >
-              Continue with Google
+              Sign in to Mist
             </button>
           </div>
         )}

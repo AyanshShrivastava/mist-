@@ -11,6 +11,8 @@ import type {
 import type {
   AiProviderConfig,
   ChatMessage,
+  McpServerConfig,
+  McpServerCredential,
   MistProject,
   ProjectFile,
   WebSearchConfig,
@@ -346,29 +348,49 @@ export function validateProjectFilesPayload(
   return validated;
 }
 
-export function validateProjectPayload(raw: unknown): MistProject {
+export function assertSafePlainObject(
+  raw: unknown,
+  label = 'Payload',
+  code = 'INVALID_PAYLOAD',
+): Record<string, unknown> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new SecurityValidationError(400, 'Invalid project payload: expected an object.');
+    throw new SecurityValidationError(400, `Invalid ${label}: expected an object.`, code);
   }
-
-  // Block prototype pollution
+  const proto = Object.getPrototypeOf(raw);
   if (
+    (proto !== Object.prototype && proto !== null) ||
     Object.prototype.hasOwnProperty.call(raw, '__proto__') ||
     Object.prototype.hasOwnProperty.call(raw, 'constructor') ||
     Object.prototype.hasOwnProperty.call(raw, 'prototype')
   ) {
-    throw new SecurityValidationError(400, 'Invalid project payload: prototype properties are forbidden.');
+    throw new SecurityValidationError(
+      400,
+      `Invalid ${label}: prototype properties are forbidden.`,
+      'PROTOTYPE_POLLUTION',
+    );
   }
+  return raw as Record<string, unknown>;
+}
 
-  const p = raw as Record<string, unknown>;
-
-  const id = typeof p.id === 'string' ? p.id.trim() : '';
+export function validateIdParam(raw: unknown, label = 'Resource ID', maxLen = 128): string {
+  const id = typeof raw === 'string' ? raw.trim() : '';
   if (!id) {
-    throw new SecurityValidationError(400, 'Project ID is required.');
+    throw new SecurityValidationError(400, `${label} is required.`, 'INVALID_ID');
   }
-  if (id.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(id)) {
-    throw new SecurityValidationError(400, 'Project ID contains invalid characters or exceeds 64 characters.');
+  if (id.length > maxLen || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+    throw new SecurityValidationError(
+      400,
+      `${label} contains invalid characters or exceeds ${maxLen} characters.`,
+      'INVALID_ID',
+    );
   }
+  return id;
+}
+
+export function validateProjectPayload(raw: unknown): MistProject {
+  const p = assertSafePlainObject(raw, 'project payload');
+
+  const id = validateIdParam(p.id, 'Project ID', 64);
 
   const name = typeof p.name === 'string' ? p.name.trim().slice(0, 120) : 'Untitled Website';
   const description = typeof p.description === 'string' ? p.description.trim().slice(0, 500) : '';
@@ -770,24 +792,13 @@ export interface VaultPlainPayload {
   aiConfig?: AiProviderConfig;
   searchConfig?: WebSearchConfig;
   renderConfig?: RenderCredentialConfig;
+  mcpServers?: McpServerConfig[];
+  mcpCredentials?: Record<string, McpServerCredential>;
   needsReencryption?: boolean;
 }
 
 export function validateVaultPayload(payload: unknown): VaultPlainPayload {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new SecurityValidationError(400, 'Invalid credential vault payload: must be an object.');
-  }
-
-  const obj = payload as Record<string, unknown>;
-
-  // Block prototype pollution attempts
-  if (
-    Object.prototype.hasOwnProperty.call(obj, '__proto__') ||
-    Object.prototype.hasOwnProperty.call(obj, 'constructor') ||
-    Object.prototype.hasOwnProperty.call(obj, 'prototype')
-  ) {
-    throw new SecurityValidationError(400, 'Invalid credential vault payload: forbidden properties detected.');
-  }
+  const obj = assertSafePlainObject(payload, 'credential vault payload');
 
   let rawJson = '';
   try {
@@ -803,10 +814,7 @@ export function validateVaultPayload(payload: unknown): VaultPlainPayload {
   const result: VaultPlainPayload = {};
 
   if (obj.aiConfig !== undefined) {
-    if (!obj.aiConfig || typeof obj.aiConfig !== 'object' || Array.isArray(obj.aiConfig)) {
-      throw new SecurityValidationError(400, 'Invalid aiConfig in credential vault payload.');
-    }
-    const ai = obj.aiConfig as Record<string, unknown>;
+    const ai = assertSafePlainObject(obj.aiConfig, 'aiConfig in credential vault payload');
     const provider = String(ai.provider || '').trim().toLowerCase();
     const VALID_AI_PROVIDERS = new Set(['custom', 'openrouter', 'groq', 'gemini', 'openai', 'nvidia']);
     if (provider && !VALID_AI_PROVIDERS.has(provider)) {
@@ -826,14 +834,7 @@ export function validateVaultPayload(payload: unknown): VaultPlainPayload {
       if (bUrl.length > 2048) {
         throw new SecurityValidationError(400, 'AI baseUrl exceeds maximum length (2048 characters).');
       }
-      try {
-        const u = new URL(bUrl);
-        if (u.protocol !== 'https:' && u.protocol !== 'http:') {
-          throw new SecurityValidationError(400, 'AI baseUrl must use http or https protocol.');
-        }
-      } catch {
-        throw new SecurityValidationError(400, 'AI baseUrl is not a valid URL.');
-      }
+      validateExternalUrlSyntax(bUrl);
       baseUrl = bUrl;
     }
 
@@ -843,36 +844,32 @@ export function validateVaultPayload(payload: unknown): VaultPlainPayload {
       if (endpoint.length > 2048) {
         throw new SecurityValidationError(400, 'AI custom endpoint exceeds maximum length (2048 characters).');
       }
-      try {
-        const u = new URL(endpoint);
-        if (u.protocol !== 'https:' && u.protocol !== 'http:') {
-          throw new SecurityValidationError(400, 'AI custom endpoint must use http or https protocol.');
-        }
-      } catch {
-        throw new SecurityValidationError(400, 'AI custom endpoint is not a valid URL.');
-      }
+      validateExternalUrlSyntax(endpoint);
       customEndpoint = endpoint;
     }
 
     result.aiConfig = {
-      ...(ai as any),
       provider: (provider || 'custom') as any,
       apiKey,
       model,
       name,
       baseUrl,
-      customEndpoint,
+      ...(customEndpoint ? { customEndpoint } : {}),
       sessionOnlyKey: Boolean(ai.sessionOnlyKey),
-    };
+    } as AiProviderConfig;
   }
 
   if (obj.searchConfig !== undefined) {
-    if (!obj.searchConfig || typeof obj.searchConfig !== 'object' || Array.isArray(obj.searchConfig)) {
-      throw new SecurityValidationError(400, 'Invalid searchConfig in credential vault payload.');
-    }
-    const search = obj.searchConfig as Record<string, unknown>;
+    const search = assertSafePlainObject(obj.searchConfig, 'searchConfig in credential vault payload');
     const provider = String(search.provider || '').trim().toLowerCase();
-    const VALID_SEARCH_PROVIDERS = new Set(['duckduckgo', 'brave', 'brave_llm_context', 'custom']);
+    const VALID_SEARCH_PROVIDERS = new Set([
+      'duckduckgo',
+      'brave',
+      'brave_web',
+      'brave_llm_context',
+      'custom',
+      'custom_json',
+    ]);
     if (provider && !VALID_SEARCH_PROVIDERS.has(provider)) {
       throw new SecurityValidationError(400, `Invalid search provider '${provider}' in credential vault.`);
     }
@@ -882,22 +879,36 @@ export function validateVaultPayload(payload: unknown): VaultPlainPayload {
       throw new SecurityValidationError(400, 'Search API key exceeds maximum length (512 characters).');
     }
 
+    const name = typeof search.name === 'string' && search.name.trim() ? search.name.trim().slice(0, 128) : undefined;
+    let baseUrl: string | undefined = undefined;
+    if (typeof search.baseUrl === 'string' && search.baseUrl.trim()) {
+      const sUrl = search.baseUrl.trim();
+      if (sUrl.length > 2048) {
+        throw new SecurityValidationError(400, 'Search baseUrl exceeds maximum length (2048 characters).');
+      }
+      validateExternalUrlSyntax(sUrl);
+      baseUrl = sUrl;
+    }
+
+    const maxResults =
+      typeof search.maxResults === 'number' && Number.isFinite(search.maxResults)
+        ? Math.min(20, Math.max(1, Math.floor(search.maxResults)))
+        : undefined;
     const mode = (search.mode === 'on' || search.mode === 'off' ? search.mode : 'auto') as any;
 
     result.searchConfig = {
-      ...(search as any),
       provider: (provider || 'duckduckgo') as any,
+      ...(name ? { name } : {}),
+      ...(baseUrl ? { baseUrl } : {}),
       apiKey,
+      ...(maxResults !== undefined ? { maxResults } : {}),
       mode,
       sessionOnlyKey: Boolean(search.sessionOnlyKey),
-    };
+    } as WebSearchConfig;
   }
 
   if (obj.renderConfig !== undefined) {
-    if (!obj.renderConfig || typeof obj.renderConfig !== 'object' || Array.isArray(obj.renderConfig)) {
-      throw new SecurityValidationError(400, 'Invalid renderConfig in credential vault payload.');
-    }
-    const render = obj.renderConfig as Record<string, unknown>;
+    const render = assertSafePlainObject(obj.renderConfig, 'renderConfig in credential vault payload');
     const apiKey = typeof render.apiKey === 'string' ? render.apiKey.trim() : '';
     if (apiKey.length > 256) {
       throw new SecurityValidationError(400, 'Render API key exceeds maximum length (256 characters).');
@@ -906,7 +917,7 @@ export function validateVaultPayload(payload: unknown): VaultPlainPayload {
     const ownerName = typeof render.ownerName === 'string' ? render.ownerName.trim().slice(0, 128) : '';
     const ownerEmail = typeof render.ownerEmail === 'string' ? render.ownerEmail.trim().slice(0, 256) : undefined;
     const workspaceType = render.workspaceType === 'team' ? 'team' : 'user';
-    const connectedAt = typeof render.connectedAt === 'string' ? render.connectedAt : new Date().toISOString();
+    const connectedAt = typeof render.connectedAt === 'string' ? render.connectedAt.slice(0, 64) : new Date().toISOString();
 
     result.renderConfig = {
       apiKey,
@@ -916,6 +927,99 @@ export function validateVaultPayload(payload: unknown): VaultPlainPayload {
       workspaceType,
       connectedAt,
     };
+  }
+
+  if (obj.mcpServers !== undefined) {
+    if (!Array.isArray(obj.mcpServers)) {
+      throw new SecurityValidationError(400, 'Invalid mcpServers in credential vault payload: expected array.');
+    }
+    if (obj.mcpServers.length > 20) {
+      throw new SecurityValidationError(400, 'MCP servers count exceeds maximum limit (20).');
+    }
+    const cleanServers: McpServerConfig[] = [];
+    for (let i = 0; i < obj.mcpServers.length; i++) {
+      const s = assertSafePlainObject(obj.mcpServers[i], `mcpServers[${i}]`);
+      const id = validateIdParam(s.id, 'MCP server ID', 64);
+      const name = typeof s.name === 'string' && s.name.trim() ? s.name.trim().slice(0, 80) : id;
+      const rawUrl = typeof s.url === 'string' ? s.url.trim() : '';
+      if (!rawUrl || rawUrl.length > 2048) {
+        throw new SecurityValidationError(400, `Invalid URL for MCP server "${name}".`);
+      }
+      validateExternalUrlSyntax(rawUrl);
+      const authType =
+        s.authType === 'oauth2' || s.authType === 'bearer' || s.authType === 'none'
+          ? s.authType
+          : 'none';
+      const transport = s.transport === 'sse' ? 'sse' : 'streamable_http';
+      const presetId =
+        s.presetId === 'render' || s.presetId === 'github' || s.presetId === 'custom'
+          ? s.presetId
+          : 'custom';
+      const clientId =
+        typeof s.clientId === 'string' && s.clientId.trim() ? s.clientId.trim().slice(0, 256) : undefined;
+      const scopes = Array.isArray(s.scopes)
+        ? s.scopes.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim().slice(0, 80)).slice(0, 20)
+        : undefined;
+      cleanServers.push({
+        id,
+        name,
+        url: rawUrl,
+        authType,
+        transport,
+        enabled: s.enabled !== false,
+        presetId,
+        ...(clientId ? { clientId } : {}),
+        ...(scopes && scopes.length > 0 ? { scopes } : {}),
+        createdAt: typeof s.createdAt === 'string' ? s.createdAt.slice(0, 64) : undefined,
+        updatedAt: typeof s.updatedAt === 'string' ? s.updatedAt.slice(0, 64) : undefined,
+      });
+    }
+    result.mcpServers = cleanServers;
+  }
+
+  if (obj.mcpCredentials !== undefined) {
+    const rawCreds = assertSafePlainObject(obj.mcpCredentials, 'mcpCredentials in credential vault payload');
+    const cleanCreds: Record<string, McpServerCredential> = {};
+    for (const [key, val] of Object.entries(rawCreds)) {
+      const serverId = validateIdParam(key, 'MCP credential server ID', 64);
+      const c = assertSafePlainObject(val, `mcpCredentials[${serverId}]`);
+      const entry: McpServerCredential = {
+        serverId,
+        sessionOnly: Boolean(c.sessionOnly),
+      };
+      if (typeof c.accessToken === 'string' && c.accessToken.trim()) {
+        entry.accessToken = c.accessToken.trim().slice(0, 4096);
+      }
+      if (typeof c.refreshToken === 'string' && c.refreshToken.trim()) {
+        entry.refreshToken = c.refreshToken.trim().slice(0, 4096);
+      }
+      if (typeof c.tokenType === 'string' && c.tokenType.trim()) {
+        entry.tokenType = c.tokenType.trim().slice(0, 32);
+      }
+      if (typeof c.expiresAt === 'string' && c.expiresAt.trim()) {
+        entry.expiresAt = c.expiresAt.trim().slice(0, 64);
+      }
+      if (typeof c.tokenEndpoint === 'string' && c.tokenEndpoint.trim()) {
+        validateExternalUrlSyntax(c.tokenEndpoint.trim());
+        entry.tokenEndpoint = c.tokenEndpoint.trim().slice(0, 2048);
+      }
+      if (typeof c.authorizationEndpoint === 'string' && c.authorizationEndpoint.trim()) {
+        validateExternalUrlSyntax(c.authorizationEndpoint.trim());
+        entry.authorizationEndpoint = c.authorizationEndpoint.trim().slice(0, 2048);
+      }
+      if (typeof c.registrationEndpoint === 'string' && c.registrationEndpoint.trim()) {
+        validateExternalUrlSyntax(c.registrationEndpoint.trim());
+        entry.registrationEndpoint = c.registrationEndpoint.trim().slice(0, 2048);
+      }
+      if (typeof c.clientId === 'string' && c.clientId.trim()) {
+        entry.clientId = c.clientId.trim().slice(0, 256);
+      }
+      if (typeof c.clientSecret === 'string' && c.clientSecret.trim()) {
+        entry.clientSecret = c.clientSecret.trim().slice(0, 512);
+      }
+      cleanCreds[serverId] = entry;
+    }
+    result.mcpCredentials = cleanCreds;
   }
 
   return result;
@@ -968,6 +1072,8 @@ export function sealUserVaultPayload(params: {
   aiConfig?: AiProviderConfig;
   searchConfig?: WebSearchConfig;
   renderConfig?: RenderCredentialConfig;
+  mcpServers?: McpServerConfig[];
+  mcpCredentials?: Record<string, McpServerCredential>;
   secretOverride?: string;
   isProduction?: boolean;
   runtimeProject?: string;
@@ -981,6 +1087,8 @@ export function sealUserVaultPayload(params: {
     aiConfig: params.aiConfig,
     searchConfig: params.searchConfig,
     renderConfig: params.renderConfig,
+    mcpServers: params.mcpServers,
+    mcpCredentials: params.mcpCredentials,
   });
 
   const key = deriveUserVaultKey({
@@ -1013,12 +1121,23 @@ export function sealUserVaultPayload(params: {
       }
     : undefined;
 
+  const cleanMcpCreds = validated.mcpCredentials
+    ? Object.fromEntries(
+        Object.entries(validated.mcpCredentials).map(([id, cred]) => [
+          id,
+          cred.sessionOnly ? { serverId: cred.serverId, sessionOnly: true } : cred,
+        ]),
+      )
+    : undefined;
+
   const plaintext = JSON.stringify({
     v: 1,
     email: params.email.trim().toLowerCase(),
     aiConfig: cleanAi,
     searchConfig: cleanSearch,
     renderConfig: cleanRender,
+    mcpServers: validated.mcpServers,
+    mcpCredentials: cleanMcpCreds,
   });
 
   const iv = crypto.randomBytes(12);
@@ -1168,6 +1287,8 @@ export function unsealUserVaultPayload(params: UnsealVaultParams): VaultPlainPay
         aiConfig?: AiProviderConfig;
         searchConfig?: WebSearchConfig;
         renderConfig?: RenderCredentialConfig;
+        mcpServers?: McpServerConfig[];
+        mcpCredentials?: Record<string, McpServerCredential>;
       };
 
       if (data.email && data.email !== normalizedEmail) {
@@ -1178,12 +1299,16 @@ export function unsealUserVaultPayload(params: UnsealVaultParams): VaultPlainPay
         aiConfig: data.aiConfig,
         searchConfig: data.searchConfig,
         renderConfig: data.renderConfig,
+        mcpServers: data.mcpServers,
+        mcpCredentials: data.mcpCredentials,
       });
 
       return {
         aiConfig: validated.aiConfig,
         searchConfig: validated.searchConfig,
         renderConfig: validated.renderConfig,
+        mcpServers: validated.mcpServers,
+        mcpCredentials: validated.mcpCredentials,
         needsReencryption: i > 0, // Mark true if decrypted using an older rotation key or legacy fallback
       };
     } catch (err) {
@@ -1211,6 +1336,7 @@ export function migrateUserVaultCiphertext(params: {
   newCiphertext: string;
   aiKeyHint: string;
   searchKeyHint: string;
+  renderKeyHint: string;
   migrated: boolean;
 } {
   const unsealed = unsealUserVaultPayload({
@@ -1230,6 +1356,9 @@ export function migrateUserVaultCiphertext(params: {
       email: params.email,
       aiConfig: unsealed.aiConfig,
       searchConfig: unsealed.searchConfig,
+      renderConfig: unsealed.renderConfig,
+      mcpServers: unsealed.mcpServers,
+      mcpCredentials: unsealed.mcpCredentials,
       secretOverride: params.newSecret,
       isProduction: params.isProduction,
       runtimeProject: params.runtimeProject,
@@ -1238,6 +1367,7 @@ export function migrateUserVaultCiphertext(params: {
       newCiphertext: resealed.encryptedPayload,
       aiKeyHint: resealed.aiKeyHint,
       searchKeyHint: resealed.searchKeyHint,
+      renderKeyHint: resealed.renderKeyHint,
       migrated: true,
     };
   }
@@ -1246,6 +1376,7 @@ export function migrateUserVaultCiphertext(params: {
     newCiphertext: params.ciphertext,
     aiKeyHint: unsealed.aiConfig?.apiKey ? maskApiKey(unsealed.aiConfig.apiKey) : '',
     searchKeyHint: unsealed.searchConfig?.apiKey ? maskApiKey(unsealed.searchConfig.apiKey) : '',
+    renderKeyHint: unsealed.renderConfig?.apiKey ? maskApiKey(unsealed.renderConfig.apiKey) : '',
     migrated: false,
   };
 }
@@ -1539,21 +1670,7 @@ export function handleBodyParserErrors(
 // --- 5C. Deep Request Validation for AI & Search Configurations ---
 
 export function validateAiProviderConfig(raw: unknown): AiProviderConfig {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new SecurityValidationError(400, 'Invalid providerConfig: expected an object.', 'INVALID_PAYLOAD');
-  }
-
-  const proto = Object.getPrototypeOf(raw);
-  if (
-    (proto !== Object.prototype && proto !== null) ||
-    Object.prototype.hasOwnProperty.call(raw, '__proto__') ||
-    Object.prototype.hasOwnProperty.call(raw, 'constructor') ||
-    Object.prototype.hasOwnProperty.call(raw, 'prototype')
-  ) {
-    throw new SecurityValidationError(400, 'Invalid providerConfig: prototype properties are forbidden.', 'PROTOTYPE_POLLUTION');
-  }
-
-  const c = raw as Record<string, unknown>;
+  const c = assertSafePlainObject(raw, 'providerConfig');
   const provider = typeof c.provider === 'string' ? c.provider.trim().toLowerCase() : '';
   const ALLOWED_PROVIDERS = new Set(['custom', 'openrouter', 'groq', 'gemini', 'openai', 'nvidia']);
   if (provider && !ALLOWED_PROVIDERS.has(provider)) {
@@ -1594,21 +1711,7 @@ export function validateAiProviderConfig(raw: unknown): AiProviderConfig {
 }
 
 export function validateWebSearchConfig(raw: unknown): WebSearchConfig {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new SecurityValidationError(400, 'Invalid searchConfig: expected an object.', 'INVALID_PAYLOAD');
-  }
-
-  const proto = Object.getPrototypeOf(raw);
-  if (
-    (proto !== Object.prototype && proto !== null) ||
-    Object.prototype.hasOwnProperty.call(raw, '__proto__') ||
-    Object.prototype.hasOwnProperty.call(raw, 'constructor') ||
-    Object.prototype.hasOwnProperty.call(raw, 'prototype')
-  ) {
-    throw new SecurityValidationError(400, 'Invalid searchConfig: prototype properties are forbidden.', 'PROTOTYPE_POLLUTION');
-  }
-
-  const c = raw as Record<string, unknown>;
+  const c = assertSafePlainObject(raw, 'searchConfig');
   const provider = typeof c.provider === 'string' ? c.provider.trim().toLowerCase() : 'duckduckgo';
   const ALLOWED_SEARCH = new Set(['duckduckgo', 'brave_llm_context', 'brave_web', 'custom_json', 'brave', 'custom']);
   if (!ALLOWED_SEARCH.has(provider)) {
@@ -1631,14 +1734,137 @@ export function validateWebSearchConfig(raw: unknown): WebSearchConfig {
   if (baseUrl) {
     validateExternalUrlSyntax(baseUrl);
   }
+  const maxResults =
+    typeof c.maxResults === 'number' && Number.isFinite(c.maxResults)
+      ? Math.min(20, Math.max(1, Math.floor(c.maxResults)))
+      : undefined;
 
   return {
     provider: provider as any,
     name,
     apiKey,
     baseUrl,
+    maxResults,
     sessionOnlyKey: Boolean(c.sessionOnlyKey),
   };
+}
+
+export function validatePromptInput(
+  raw: unknown,
+  label = 'Prompt',
+  maxLength = 32000,
+): string {
+  if (typeof raw !== 'string') {
+    throw new SecurityValidationError(400, `${label} must be a string.`, 'INVALID_PAYLOAD');
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new SecurityValidationError(400, `${label} is required.`, 'INVALID_PAYLOAD');
+  }
+  if (trimmed.length > maxLength) {
+    throw new SecurityValidationError(
+      400,
+      `${label} exceeds maximum allowed length of ${maxLength} characters.`,
+      'PAYLOAD_TOO_LARGE',
+    );
+  }
+  return trimmed;
+}
+
+export function validateChatMessagesInput(
+  raw: unknown,
+  options?: { maxMessages?: number; maxContentLength?: number },
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  if (!Array.isArray(raw)) {
+    throw new SecurityValidationError(400, 'Messages must be an array.', 'INVALID_PAYLOAD');
+  }
+  const maxMessages = options?.maxMessages ?? 50;
+  const maxContentLength = options?.maxContentLength ?? 16000;
+  if (raw.length > maxMessages) {
+    throw new SecurityValidationError(
+      400,
+      `Conversation exceeds maximum allowed length of ${maxMessages} messages.`,
+      'PAYLOAD_TOO_LARGE',
+    );
+  }
+
+  const validated: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  for (let i = 0; i < raw.length; i++) {
+    const item = assertSafePlainObject(raw[i], `messages[${i}]`);
+    const role = typeof item.role === 'string' ? item.role.trim().toLowerCase() : '';
+    if (role !== 'user' && role !== 'assistant') {
+      throw new SecurityValidationError(
+        400,
+        `Invalid role "${role || 'empty'}" at messages[${i}]; only "user" and "assistant" are permitted.`,
+        'INVALID_PAYLOAD',
+      );
+    }
+    if (typeof item.content !== 'string' || !item.content.trim()) {
+      throw new SecurityValidationError(400, `Message content at messages[${i}] must be a non-empty string.`, 'INVALID_PAYLOAD');
+    }
+    if (item.content.length > maxContentLength) {
+      throw new SecurityValidationError(
+        400,
+        `Message content at messages[${i}] exceeds maximum length of ${maxContentLength} characters.`,
+        'PAYLOAD_TOO_LARGE',
+      );
+    }
+    validated.push({
+      role,
+      content: item.content.slice(0, maxContentLength),
+    });
+  }
+  return validated;
+}
+
+export function validateSelectedVisualElementInput(
+  raw: unknown,
+): { tagName: string; textContent: string; className: string } | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const obj = assertSafePlainObject(raw, 'selectedElement');
+  const tagName = typeof obj.tagName === 'string' ? obj.tagName.trim().slice(0, 64) : '';
+  const textContent = typeof obj.textContent === 'string' ? obj.textContent.slice(0, 2000) : '';
+  const className = typeof obj.className === 'string' ? obj.className.slice(0, 1000) : '';
+  if (!tagName) {
+    throw new SecurityValidationError(400, 'selectedElement.tagName is required.', 'INVALID_PAYLOAD');
+  }
+  return { tagName, textContent, className };
+}
+
+export function validateUserPreferencesPayload(
+  rawPreferences: unknown,
+  rawMeta?: unknown,
+): { preferences: Record<string, unknown>; meta?: Record<string, unknown> } {
+  const preferences =
+    rawPreferences === undefined
+      ? {}
+      : assertSafePlainObject(rawPreferences, 'preferences');
+
+  let prefJson = '';
+  try {
+    prefJson = JSON.stringify(preferences);
+  } catch {
+    throw new SecurityValidationError(400, 'Preferences payload cannot be serialized.');
+  }
+  if (prefJson.length > 32768) {
+    throw new SecurityValidationError(400, 'Preferences payload exceeds maximum allowed size (32KB).', 'PAYLOAD_TOO_LARGE');
+  }
+
+  let meta: Record<string, unknown> | undefined;
+  if (rawMeta !== undefined) {
+    meta = assertSafePlainObject(rawMeta, 'preferences meta');
+    let metaJson = '';
+    try {
+      metaJson = JSON.stringify(meta);
+    } catch {
+      throw new SecurityValidationError(400, 'Preferences metadata cannot be serialized.');
+    }
+    if (metaJson.length > 16384) {
+      throw new SecurityValidationError(400, 'Preferences metadata exceeds maximum allowed size (16KB).', 'PAYLOAD_TOO_LARGE');
+    }
+  }
+
+  return { preferences, meta };
 }
 
 export function sendSecurityErrorResponse(
@@ -1760,15 +1986,18 @@ export function enforceSameOriginOnMutations(
   }
 
   const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
-  if (!originHeader) {
+  const refererHeader = typeof req.headers.referer === 'string' ? req.headers.referer.trim() : '';
+
+  if (!originHeader && !refererHeader) {
     return next();
   }
 
+  const candidateUrl = originHeader || refererHeader;
   let originHost = '';
   try {
-    originHost = new URL(originHeader).host.toLowerCase();
+    originHost = new URL(candidateUrl).host.toLowerCase();
   } catch {
-    res.status(403).json({ error: 'Invalid request Origin header.' });
+    res.status(403).json({ error: originHeader ? 'Invalid request Origin header.' : 'Invalid request Referer header.' });
     return;
   }
 
@@ -1800,7 +2029,7 @@ export const BUILDER_CSP = [
   "style-src 'self' 'unsafe-inline' https:",
   "font-src 'self' data: https:",
   "img-src 'self' data: blob: https://img.clerk.com https:",
-  "connect-src 'self' https: wss: ws: http://127.0.0.1:* http://localhost:*",
+  "connect-src 'self' https: wss: ws:",
   "frame-src 'self' blob: data: https://challenges.cloudflare.com",
   "object-src 'none'",
   "base-uri 'self'",

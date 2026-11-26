@@ -39,6 +39,129 @@ export interface WebSearchOutcome {
   providerName?: string;
 }
 
+export interface AgentToolActivity {
+  id: string;
+  toolName: string;
+  serverName?: string;
+  status: 'running' | 'done' | 'error' | 'awaiting_approval';
+  summary?: string;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export interface TerminalLogEntry {
+  id: string;
+  command: string;
+  cwd?: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+  timestamp: string;
+  source: 'agent' | 'user' | 'auto_verify';
+}
+
+export interface PreviewConsoleEntry {
+  id: string;
+  level: 'log' | 'warn' | 'error' | 'runtime_error';
+  message: string;
+  source?: string;
+  line?: number;
+  column?: number;
+  stack?: string;
+  timestamp: string;
+}
+
+export interface PreviewHealthSnapshot {
+  capturedAt: string;
+  rootHtmlLength: number;
+  textLength: number;
+  elementCount: number;
+  canvasCount: number;
+  horizontalOverflowPx: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  brokenImages: number;
+  runtimeErrorCount: number;
+  consoleErrorCount: number;
+  screenshotDataUrl?: string;
+  screenshotFormat?: 'png' | 'svg';
+}
+
+export type McpAuthType = 'none' | 'bearer' | 'oauth2';
+export type McpTransportType = 'streamable_http' | 'sse';
+export type McpConnectionStatus = 'connected' | 'disconnected' | 'auth_expired' | 'error';
+
+export interface McpToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+export interface McpToolDefinition {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  annotations?: McpToolAnnotations;
+}
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  url: string;
+  authType: McpAuthType;
+  transport?: McpTransportType;
+  clientId?: string;
+  scopes?: string[];
+  enabled: boolean;
+  presetId?: 'render' | 'github' | 'custom';
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface McpServerCredential {
+  serverId: string;
+  accessToken?: string;
+  refreshToken?: string;
+  tokenType?: string;
+  expiresAt?: string;
+  tokenEndpoint?: string;
+  authorizationEndpoint?: string;
+  registrationEndpoint?: string;
+  clientId?: string;
+  clientSecret?: string;
+  sessionOnly?: boolean;
+}
+
+export interface McpServerPublicStatus {
+  id: string;
+  name: string;
+  url: string;
+  authType: McpAuthType;
+  transport?: McpTransportType;
+  enabled: boolean;
+  presetId?: 'render' | 'github' | 'custom';
+  status: McpConnectionStatus;
+  hasCredential: boolean;
+  credentialHint?: string;
+  tokenExpiresAt?: string;
+  lastCheckedAt?: string;
+  lastError?: string;
+  tools: McpToolDefinition[];
+}
+
+export interface McpApprovalRequest {
+  approvalId: string;
+  serverId: string;
+  serverName: string;
+  toolName: string;
+  description?: string;
+  arguments: Record<string, unknown>;
+  reason: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -46,6 +169,9 @@ export interface ChatMessage {
   timestamp: string;
   changedFiles?: string[];
   searchOutcome?: WebSearchOutcome;
+  toolActivities?: AgentToolActivity[];
+  terminalEntries?: TerminalLogEntry[];
+  previewHealth?: PreviewHealthSnapshot;
 }
 
 export interface MistProject {
@@ -106,6 +232,11 @@ export interface AiStreamProgress {
   searchQueries?: string[];
   searchSources?: WebSearchSource[];
   searchError?: string;
+  iteration?: number;
+  maxIterations?: number;
+  toolActivities?: AgentToolActivity[];
+  terminalEntries?: TerminalLogEntry[];
+  pendingApproval?: McpApprovalRequest | null;
 }
 
 export interface ProjectSyncRecord {

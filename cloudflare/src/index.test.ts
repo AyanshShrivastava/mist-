@@ -401,3 +401,56 @@ test('Worker proxy forwards mutations to Express backend with edge origin verifi
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('Worker blocks R2 path traversal attempts and passes redirects without following from edge', async () => {
+  let bucketQueried = false;
+  const envWithBucket: Env = {
+    APEX_DOMAIN: 'mist.me',
+    PUBLISHED_BUCKET: {
+      get: async () => {
+        bucketQueried = true;
+        return null;
+      },
+    },
+  };
+
+  for (const evilPath of ['/%252e%252e/secret', '/foo..bar', '/foo%5cbar', '/assets/sub//secret']) {
+    const req = new Request(`https://my-site.mist.me${evilPath}`);
+    const res = await worker.fetch(req, envWithBucket);
+    assert.equal(res.status, 400, `Expected 400 for path ${evilPath}`);
+    assert.equal(bucketQueried, false, `Bucket must not be queried for traversal path ${evilPath}`);
+  }
+
+  // Also test raw unnormalized pathname directly against handlePublishedSite
+  const rawTraversalRes = await handlePublishedSite(
+    'my-site',
+    new Request('https://my-site.mist.me/'),
+    { pathname: '/../../../etc/passwd' } as URL,
+    envWithBucket,
+  );
+  assert.equal(rawTraversalRes.status, 400);
+  assert.equal(bucketQueried, false);
+
+  const redirectServer = http.createServer((_req, res) => {
+    res.writeHead(302, { Location: 'https://internal.example/admin' });
+    res.end();
+  });
+  await new Promise<void>((resolve) => redirectServer.listen(0, '127.0.0.1', () => resolve()));
+  const addr = redirectServer.address() as { port: number };
+  try {
+    const proxyEnv: Env = {
+      APEX_DOMAIN: 'mist.me',
+      HEROKU_API_ORIGIN: `http://127.0.0.1:${addr.port}`,
+      MIST_EDGE_ORIGIN_SECRET: 'edge-redirect-test-secret',
+    };
+    const res = await proxyToHeroku(
+      new Request('https://mist.me/api/health'),
+      new URL('https://mist.me/api/health'),
+      proxyEnv,
+    );
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.get('location'), 'https://internal.example/admin');
+  } finally {
+    await new Promise<void>((resolve) => redirectServer.close(() => resolve()));
+  }
+});

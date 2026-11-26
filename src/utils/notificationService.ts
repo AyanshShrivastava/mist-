@@ -2,7 +2,7 @@ import * as webpush from 'web-push';
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
-import { SecurityValidationError } from './serverSecurity';
+import { SecurityValidationError, sanitizeErrorMessage } from './serverSecurity';
 
 export interface WebPushKeys {
   p256dh: string;
@@ -388,7 +388,7 @@ export class PushNotificationService {
     } catch (err: unknown) {
       const errorObj = err as { statusCode?: number; message?: string };
       const statusCode = errorObj.statusCode || 500;
-      const message = errorObj.message || String(err);
+      const message = sanitizeErrorMessage(err) || 'Notification delivery failed';
 
       // If subscription expired or was invalidated (404 Not Found or 410 Gone), automatically drop it
       if (statusCode === 404 || statusCode === 410) {

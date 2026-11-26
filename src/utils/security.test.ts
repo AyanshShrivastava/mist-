@@ -1027,3 +1027,85 @@ test('buildExportManifest includes standalone dist/index.html, Render Static blu
   assert.equal(Object.values(manifest).some((v) => v.includes('/api/app-ai')), false);
 });
 
+test('Vault payload validation blocks SSRF URLs and preserves renderConfig across key rotation', () => {
+  assert.throws(
+    () =>
+      validateVaultPayload({
+        aiConfig: {
+          provider: 'custom',
+          model: 'm1',
+          apiKey: 'k1',
+          baseUrl: 'http://169.254.169.254/latest/meta-data',
+        },
+      }),
+    (err: unknown) => err instanceof SecurityValidationError && err.status === 400,
+  );
+
+  assert.throws(
+    () =>
+      validateVaultPayload({
+        searchConfig: {
+          provider: 'custom_json',
+          apiKey: 'k2',
+          baseUrl: 'http://127.0.0.1:9000/search',
+        },
+      }),
+    (err: unknown) => err instanceof SecurityValidationError && err.status === 400,
+  );
+
+  const validSearch = validateVaultPayload({
+    searchConfig: {
+      provider: 'brave_web',
+      apiKey: 'BSA_live_key_1234',
+      maxResults: 5,
+    },
+  });
+  assert.equal(validSearch.searchConfig?.provider, 'brave_web');
+  assert.equal(validSearch.searchConfig?.maxResults, 5);
+
+  const oldSecret = crypto.randomBytes(32).toString('hex');
+  const newSecret = crypto.randomBytes(32).toString('hex');
+  const sealed = sealUserVaultPayload({
+    uid: 'vault-render-rot-1',
+    email: 'render@example.com',
+    secretOverride: oldSecret,
+    isProduction: true,
+    runtimeProject: 'mist-prod',
+    aiConfig: {
+      provider: 'custom',
+      model: 'openrouter/free',
+      apiKey: 'sk-or-ai-key-9999',
+    },
+    renderConfig: {
+      apiKey: 'rnd_secret_render_token_1234',
+      ownerId: 'own-123',
+      ownerName: 'Mist Owner',
+      workspaceType: 'user',
+    },
+  });
+
+  const rotated = migrateUserVaultCiphertext({
+    uid: 'vault-render-rot-1',
+    email: 'render@example.com',
+    ciphertext: sealed.encryptedPayload,
+    newSecret,
+    previousSecrets: [oldSecret],
+    isProduction: true,
+    runtimeProject: 'mist-prod',
+  });
+  assert.equal(rotated.migrated, true);
+  assert.ok(rotated.renderKeyHint.includes('1234'));
+
+  const unsealedAfter = unsealUserVaultPayload({
+    uid: 'vault-render-rot-1',
+    email: 'render@example.com',
+    encryptedPayload: rotated.newCiphertext,
+    secretOverride: newSecret,
+    isProduction: true,
+    runtimeProject: 'mist-prod',
+  });
+  assert.equal(unsealedAfter.renderConfig?.apiKey, 'rnd_secret_render_token_1234');
+  assert.equal(unsealedAfter.renderConfig?.ownerId, 'own-123');
+  assert.equal(unsealedAfter.aiConfig?.apiKey, 'sk-or-ai-key-9999');
+});
+

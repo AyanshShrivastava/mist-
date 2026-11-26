@@ -3,8 +3,9 @@ import {
   AlignCenter,
   AlignLeft,
   AlignRight,
-  Cpu,
+  Check,
   MousePointerClick,
+  Sparkles,
   Trash2,
 } from 'lucide-react';
 import type { SelectedVisualElement, VisualElementPatch, VisualElementStyles } from '../types/mist';
@@ -16,7 +17,7 @@ interface VisualInspectorProps {
   onAskAiAboutElement: (element: SelectedVisualElement) => void;
 }
 
-const SWATCHES = ['#09090B', '#FFFFFF', '#2563EB', '#B45309', '#15803D', '#E4E4E7'];
+const SWATCHES = ['#09090B', '#FFFFFF', '#4F46E5', '#0D9488', '#D97706', '#E4E4E7'];
 
 function toSafeHex(value: string | undefined, fallback: string): string {
   if (!value) return fallback;
@@ -30,6 +31,7 @@ export default function VisualInspector({
   onAskAiAboutElement,
 }: VisualInspectorProps) {
   const [textDraft, setTextDraft] = useState('');
+  const [savedFlash, setSavedFlash] = useState(false);
   const [stylesDraft, setStylesDraft] = useState<VisualElementStyles>({
     color: '#09090b',
     backgroundColor: '',
@@ -52,13 +54,20 @@ export default function VisualInspector({
   if (!selectedElement) {
     return (
       <div className="flex h-full flex-col items-center justify-center p-6 text-center">
-        <MousePointerClick className="h-8 w-8 text-zinc-400" aria-hidden="true" />
-        <h3 className="mt-3 font-display text-sm font-semibold text-zinc-900 dark:text-white">
-          Visual Inspector Ready
+        <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-zinc-200 bg-zinc-50 text-(--mist-c2) dark:border-zinc-800 dark:bg-zinc-900">
+          <MousePointerClick className="h-5 w-5" aria-hidden="true" />
+        </div>
+        <h3 className="mt-3.5 font-display text-sm font-semibold text-zinc-950 dark:text-white">
+          Visual Inspector
         </h3>
         <p className="mt-1.5 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-          Click any heading, paragraph, button, or container inside the live preview to edit its text, colors, typography, and spacing.
+          Click any heading, button, or container inside the preview to edit it live.
         </p>
+        <div className="mt-5 w-full space-y-1.5 rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3 text-left text-[11px] text-zinc-600 dark:border-white/[0.06] dark:bg-zinc-900/50 dark:text-zinc-400">
+          <p><span className="font-semibold text-zinc-900 dark:text-zinc-200">1. Select</span> any element on canvas</p>
+          <p><span className="font-semibold text-zinc-900 dark:text-zinc-200">2. Adjust</span> copy, color, type &amp; spacing</p>
+          <p><span className="font-semibold text-zinc-900 dark:text-zinc-200">3. Save</span> directly to source code</p>
+        </div>
       </div>
     );
   }
@@ -83,16 +92,18 @@ export default function VisualInspector({
       newText: selectedElement.canEditText ? textDraft : undefined,
       styles: stylesDraft,
     });
+    setSavedFlash(true);
+    window.setTimeout(() => setSavedFlash(false), 1400);
   };
 
   return (
     <div className="flex h-full flex-col overflow-y-auto mist-scrollbar">
-      <div className="border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+      <div className="border-b border-zinc-200/80 px-4 py-3 dark:border-white/[0.07]">
         <div className="flex items-center justify-between gap-2">
-          <span className="font-mono text-xs font-semibold text-blue-600 dark:text-blue-400">
+          <span className="inline-flex items-center rounded-lg bg-(--mist-c2)/12 px-2 py-0.5 font-mono text-xs font-semibold text-(--mist-c2)">
             &lt;{selectedElement.tagName}&gt;
           </span>
-          <span className="font-mono text-[11px] text-zinc-400">
+          <span className="font-mono text-[10px] text-zinc-400">
             #{selectedElement.mistId}
           </span>
         </div>
@@ -103,9 +114,9 @@ export default function VisualInspector({
           <div>
             <label
               htmlFor="mist-visual-text"
-              className="block font-medium text-zinc-700 dark:text-zinc-300"
+              className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
             >
-              Text Content
+              Content
             </label>
             <textarea
               id="mist-visual-text"
@@ -119,17 +130,19 @@ export default function VisualInspector({
                 });
               }}
               onBlur={commitAll}
-              className="mt-1.5 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs text-zinc-900 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+              className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50/70 px-3 py-2 text-xs text-zinc-950 focus:bg-white focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
             />
           </div>
         )}
 
         {/* Colors */}
-        <div className="space-y-3 border-t border-zinc-100 pt-4 dark:border-zinc-800">
-          <p className="font-medium text-zinc-700 dark:text-zinc-300">Colors</p>
+        <div className="space-y-3 border-t border-zinc-200/70 pt-4 dark:border-white/[0.06]">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            Appearance
+          </p>
 
           <div className="flex items-center justify-between gap-2">
-            <label htmlFor="mist-color-text" className="text-zinc-500 dark:text-zinc-400">
+            <label htmlFor="mist-color-text" className="text-zinc-600 dark:text-zinc-300">
               Text Color
             </label>
             <div className="flex items-center gap-2">
@@ -138,7 +151,7 @@ export default function VisualInspector({
                 type="color"
                 value={toSafeHex(stylesDraft.color, '#09090b')}
                 onChange={(e) => updateStyleField('color', e.target.value, true)}
-                className="h-6 w-8 cursor-pointer rounded border border-zinc-200 bg-transparent p-0 dark:border-zinc-700"
+                className="h-6 w-8 cursor-pointer rounded-md border border-zinc-200 bg-transparent p-0 dark:border-zinc-700"
               />
               <span className="w-16 truncate font-mono text-[11px] text-zinc-600 dark:text-zinc-300">
                 {toSafeHex(stylesDraft.color, '#09090b')}
@@ -147,7 +160,7 @@ export default function VisualInspector({
           </div>
 
           <div className="flex items-center justify-between gap-2">
-            <label htmlFor="mist-color-bg" className="text-zinc-500 dark:text-zinc-400">
+            <label htmlFor="mist-color-bg" className="text-zinc-600 dark:text-zinc-300">
               Background
             </label>
             <div className="flex items-center gap-2">
@@ -156,7 +169,7 @@ export default function VisualInspector({
                 type="color"
                 value={toSafeHex(stylesDraft.backgroundColor, '#ffffff')}
                 onChange={(e) => updateStyleField('backgroundColor', e.target.value, true)}
-                className="h-6 w-8 cursor-pointer rounded border border-zinc-200 bg-transparent p-0 dark:border-zinc-700"
+                className="h-6 w-8 cursor-pointer rounded-md border border-zinc-200 bg-transparent p-0 dark:border-zinc-700"
               />
               <span className="w-16 truncate font-mono text-[11px] text-zinc-600 dark:text-zinc-300">
                 {stylesDraft.backgroundColor ? toSafeHex(stylesDraft.backgroundColor, '#ffffff') : 'none'}
@@ -173,14 +186,14 @@ export default function VisualInspector({
                   aria-label={`Set background color ${hex}`}
                   onClick={() => updateStyleField('backgroundColor', hex, true)}
                   style={{ backgroundColor: hex }}
-                  className="h-5 w-5 rounded border border-zinc-300 dark:border-zinc-700 cursor-pointer"
+                  className="h-5 w-5 rounded-md border border-zinc-300 dark:border-zinc-700 cursor-pointer hover:scale-110 transition-transform"
                 />
               ))}
             </div>
             <button
               type="button"
               onClick={() => updateStyleField('backgroundColor', 'transparent', true)}
-              className="text-[11px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200 cursor-pointer"
+              className="text-[11px] font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200 cursor-pointer"
             >
               Clear
             </button>
@@ -188,8 +201,10 @@ export default function VisualInspector({
         </div>
 
         {/* Typography */}
-        <div className="space-y-3 border-t border-zinc-100 pt-4 dark:border-zinc-800">
-          <p className="font-medium text-zinc-700 dark:text-zinc-300">Typography</p>
+        <div className="space-y-3 border-t border-zinc-200/70 pt-4 dark:border-white/[0.06]">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            Typography
+          </p>
 
           <div className="grid grid-cols-2 gap-2">
             <div>
@@ -202,7 +217,7 @@ export default function VisualInspector({
                 value={stylesDraft.fontSize}
                 onChange={(e) => updateStyleField('fontSize', e.target.value, false)}
                 onBlur={commitAll}
-                className="mt-1 w-full rounded border border-zinc-200 bg-white px-2 py-1 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                className="mt-1 w-full rounded-lg border border-zinc-200 bg-zinc-50/70 px-2.5 py-1.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-900"
               />
             </div>
             <div>
@@ -213,19 +228,19 @@ export default function VisualInspector({
                 id="mist-font-weight"
                 value={stylesDraft.fontWeight}
                 onChange={(e) => updateStyleField('fontWeight', e.target.value, true)}
-                className="mt-1 w-full rounded border border-zinc-200 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                className="mt-1 w-full rounded-lg border border-zinc-200 bg-zinc-50/70 px-2 py-1.5 text-xs dark:border-zinc-800 dark:bg-zinc-900"
               >
-                <option value="400">Regular (400)</option>
-                <option value="500">Medium (500)</option>
-                <option value="600">Semibold (600)</option>
-                <option value="700">Bold (700)</option>
+                <option value="400">Regular</option>
+                <option value="500">Medium</option>
+                <option value="600">Semibold</option>
+                <option value="700">Bold</option>
               </select>
             </div>
           </div>
 
           <div className="flex items-center justify-between">
-            <span className="text-zinc-500 dark:text-zinc-400">Alignment</span>
-            <div className="flex items-center gap-1 rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
+            <span className="text-zinc-600 dark:text-zinc-300">Alignment</span>
+            <div className="flex items-center gap-0.5 rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-900">
               {(
                 [
                   { val: 'left', icon: AlignLeft, label: 'Align left' },
@@ -238,9 +253,9 @@ export default function VisualInspector({
                   type="button"
                   aria-label={label}
                   onClick={() => updateStyleField('textAlign', val, true)}
-                  className={`rounded p-1.5 cursor-pointer ${
+                  className={`rounded-md p-1.5 cursor-pointer ${
                     stylesDraft.textAlign === val
-                      ? 'bg-white text-zinc-950 shadow-sm dark:bg-zinc-700 dark:text-white'
+                      ? 'bg-white text-zinc-950 shadow-xs dark:bg-zinc-700 dark:text-white'
                       : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400'
                   }`}
                 >
@@ -251,9 +266,11 @@ export default function VisualInspector({
           </div>
         </div>
 
-        {/* Spacing & Layout */}
-        <div className="space-y-3 border-t border-zinc-100 pt-4 dark:border-zinc-800">
-          <p className="font-medium text-zinc-700 dark:text-zinc-300">Spacing &amp; Radius</p>
+        {/* Spacing & Radius */}
+        <div className="space-y-3 border-t border-zinc-200/70 pt-4 dark:border-white/[0.06]">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            Spacing &amp; Radius
+          </p>
           <div className="grid grid-cols-3 gap-2">
             <div>
               <label htmlFor="mist-pad-y" className="block text-[11px] text-zinc-500">
@@ -265,15 +282,14 @@ export default function VisualInspector({
                 value={stylesDraft.paddingTop}
                 onChange={(e) => {
                   const val = e.target.value;
-                  const next = { ...stylesDraft, paddingTop: val, paddingBottom: val };
-                  setStylesDraft(next);
+                  setStylesDraft({ ...stylesDraft, paddingTop: val, paddingBottom: val });
                   onLivePreviewPatch({
                     mistId: selectedElement.mistId,
                     styles: { paddingTop: val, paddingBottom: val },
                   });
                 }}
                 onBlur={commitAll}
-                className="mt-1 w-full rounded border border-zinc-200 bg-white px-2 py-1 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                className="mt-1 w-full rounded-lg border border-zinc-200 bg-zinc-50/70 px-2 py-1.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-900"
               />
             </div>
             <div>
@@ -286,15 +302,14 @@ export default function VisualInspector({
                 value={stylesDraft.paddingLeft}
                 onChange={(e) => {
                   const val = e.target.value;
-                  const next = { ...stylesDraft, paddingLeft: val, paddingRight: val };
-                  setStylesDraft(next);
+                  setStylesDraft({ ...stylesDraft, paddingLeft: val, paddingRight: val });
                   onLivePreviewPatch({
                     mistId: selectedElement.mistId,
                     styles: { paddingLeft: val, paddingRight: val },
                   });
                 }}
                 onBlur={commitAll}
-                className="mt-1 w-full rounded border border-zinc-200 bg-white px-2 py-1 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                className="mt-1 w-full rounded-lg border border-zinc-200 bg-zinc-50/70 px-2 py-1.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-900"
               />
             </div>
             <div>
@@ -307,27 +322,34 @@ export default function VisualInspector({
                 value={stylesDraft.borderRadius}
                 onChange={(e) => updateStyleField('borderRadius', e.target.value, false)}
                 onBlur={commitAll}
-                className="mt-1 w-full rounded border border-zinc-200 bg-white px-2 py-1 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
+                className="mt-1 w-full rounded-lg border border-zinc-200 bg-zinc-50/70 px-2 py-1.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-900"
               />
             </div>
           </div>
         </div>
 
         {/* Actions */}
-        <div className="space-y-2 border-t border-zinc-100 pt-4 dark:border-zinc-800">
+        <div className="space-y-2 border-t border-zinc-200/70 pt-4 dark:border-white/[0.06]">
           <button
             type="button"
             onClick={commitAll}
-            className="w-full rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 transition-colors cursor-pointer"
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl mist-primary-gradient px-3 py-2 text-xs font-semibold text-white cursor-pointer"
           >
-            Save Visual Changes
+            {savedFlash ? (
+              <>
+                <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Saved to Code</span>
+              </>
+            ) : (
+              <span>Save Visual Changes</span>
+            )}
           </button>
           <button
             type="button"
             onClick={() => onAskAiAboutElement(selectedElement)}
-            className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-800 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-800 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
           >
-            <Cpu className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+            <Sparkles className="h-3.5 w-3.5 text-(--mist-c2)" aria-hidden="true" />
             <span>Refine with AI</span>
           </button>
           <button
@@ -336,7 +358,7 @@ export default function VisualInspector({
               onLivePreviewPatch({ mistId: selectedElement.mistId, deleted: true });
               onCommitPatch({ mistId: selectedElement.mistId, deleted: true });
             }}
-            className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-900/60 dark:text-red-400 dark:hover:bg-red-950/50 transition-colors cursor-pointer"
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-red-200/90 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-900/50 dark:text-red-400 dark:hover:bg-red-950/40 transition-colors cursor-pointer"
           >
             <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Hide Element</span>

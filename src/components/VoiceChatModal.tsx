@@ -155,7 +155,7 @@ export default function VoiceChatModal({
       setIncident(null);
 
       if (!user) {
-        setVoiceNote('Sign in with Google to receive live AI suggestions, or apply your voice note directly below.');
+        setVoiceNote('Sign in to Mist to receive live AI suggestions, or apply your voice note directly below.');
         return;
       }
 
@@ -287,6 +287,15 @@ export default function VoiceChatModal({
     void sendTurnToByok(cleaned);
   };
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, onClose]);
+
   const userMessages = turns.filter((t) => t.role === 'user').map((t) => t.text.trim()).filter(Boolean);
   const canApply = userMessages.length > 0;
 
@@ -301,6 +310,7 @@ export default function VoiceChatModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
+          onClick={onClose}
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4 backdrop-blur-sm"
         >
           <motion.div
@@ -308,7 +318,8 @@ export default function VoiceChatModal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 14 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="flex w-full sm:max-w-xl max-h-[92dvh] flex-col overflow-hidden rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-3 sm:pb-0 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+            onClick={(e) => e.stopPropagation()}
+            className="flex w-full sm:max-w-xl max-h-[92dvh] flex-col overflow-hidden rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white pb-3 sm:pb-0 shadow-2xl dark:border-white/[0.08] dark:bg-[#111115]"
           >
             <div className="sm:hidden mx-auto mt-2.5 h-1 w-10 rounded-full bg-zinc-300 dark:bg-zinc-700" />
             {/* Header */}

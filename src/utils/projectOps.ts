@@ -209,13 +209,28 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function sanitizeCssMistId(mistId: string): string {
+  return String(mistId || 'el')
+    .replace(/[^a-zA-Z0-9_-]/g, '-')
+    .slice(0, 80) || 'el';
+}
+
+function sanitizeCssValue(val: string): string {
+  return String(val)
+    .replace(/[{};<>\r\n]|\/\*|\*\//g, '')
+    .replace(/(expression|javascript|vbscript)\s*\(/gi, '')
+    .trim()
+    .slice(0, 128);
+}
+
 function upsertOverrideCssBlock(
   cssContent: string,
   mistId: string,
   declarations: string[],
 ): string {
-  const startMarker = `/* mist-override:${mistId}:start */`;
-  const endMarker = `/* mist-override:${mistId}:end */`;
+  const safeId = sanitizeCssMistId(mistId);
+  const startMarker = `/* mist-override:${safeId}:start */`;
+  const endMarker = `/* mist-override:${safeId}:end */`;
   const blockRegex = new RegExp(
     `${escapeRegExp(startMarker)}[\\s\\S]*?${escapeRegExp(endMarker)}\\n?`,
     'g',
@@ -226,7 +241,7 @@ function upsertOverrideCssBlock(
   }
   const block = [
     startMarker,
-    `[data-mist-id="${mistId}"] {`,
+    `[data-mist-id="${safeId}"] {`,
     ...declarations.map((line) => `  ${line}`),
     `}`,
     endMarker,
@@ -279,16 +294,27 @@ export function applyVisualPatchToFiles(
     declarations.push('display: none !important;');
   } else if (patch.styles) {
     const s = patch.styles;
-    if (s.color) declarations.push(`color: ${s.color} !important;`);
-    if (s.backgroundColor) declarations.push(`background-color: ${s.backgroundColor} !important;`);
-    if (s.fontSize) declarations.push(`font-size: ${s.fontSize} !important;`);
-    if (s.fontWeight) declarations.push(`font-weight: ${s.fontWeight} !important;`);
-    if (s.paddingTop) declarations.push(`padding-top: ${s.paddingTop} !important;`);
-    if (s.paddingBottom) declarations.push(`padding-bottom: ${s.paddingBottom} !important;`);
-    if (s.paddingLeft) declarations.push(`padding-left: ${s.paddingLeft} !important;`);
-    if (s.paddingRight) declarations.push(`padding-right: ${s.paddingRight} !important;`);
-    if (s.borderRadius) declarations.push(`border-radius: ${s.borderRadius} !important;`);
-    if (s.textAlign) declarations.push(`text-align: ${s.textAlign} !important;`);
+    const styleProps: Array<[keyof typeof s, string]> = [
+      ['color', 'color'],
+      ['backgroundColor', 'background-color'],
+      ['fontSize', 'font-size'],
+      ['fontWeight', 'font-weight'],
+      ['paddingTop', 'padding-top'],
+      ['paddingBottom', 'padding-bottom'],
+      ['paddingLeft', 'padding-left'],
+      ['paddingRight', 'padding-right'],
+      ['borderRadius', 'border-radius'],
+      ['textAlign', 'text-align'],
+    ];
+    for (const [field, cssProp] of styleProps) {
+      const rawVal = s[field];
+      if (rawVal) {
+        const cleanVal = sanitizeCssValue(rawVal);
+        if (cleanVal) {
+          declarations.push(`${cssProp}: ${cleanVal} !important;`);
+        }
+      }
+    }
   }
 
   if (patch.deleted || (patch.styles && Object.keys(patch.styles).length > 0)) {
@@ -314,82 +340,6 @@ export function applyVisualPatchToFiles(
   }
 
   return nextFiles;
-}
-
-export function applyDeterministicRefinement(
-  files: ProjectFile[],
-  instruction: string,
-): { files: ProjectFile[]; summary: string; changedFiles: string[] } {
-  const lower = instruction.toLowerCase();
-  const changed = new Set<string>();
-  let summary = '';
-
-  let nextFiles = files.map((file) => ({ ...file }));
-
-  if (lower.includes('navbar') && (lower.includes('smaller') || lower.includes('compact') || lower.includes('shorter'))) {
-    nextFiles = nextFiles.map((file) => {
-      if (file.path.includes('Navbar') || file.content.includes('<header')) {
-        const updated = file.content
-          .replace(/\bpy-6\b/g, 'py-2.5')
-          .replace(/\bpy-5\b/g, 'py-2.5')
-          .replace(/\bpy-4\b/g, 'py-2.5')
-          .replace(/\bh-20\b/g, 'h-14')
-          .replace(/\bh-16\b/g, 'h-12');
-        if (updated !== file.content) {
-          changed.add(file.path);
-          return { ...file, content: updated };
-        }
-      }
-      return file;
-    });
-
-    const overridePath = 'src/styles/mist-overrides.css';
-    const existingOverride = nextFiles.find((f) => f.path === overridePath);
-    const updatedCss = upsertOverrideCssBlock(
-      existingOverride?.content ?? '',
-      'mist-navbar-compact',
-      ['padding-top: 0.625rem !important;', 'padding-bottom: 0.625rem !important;'],
-    ).replace('[data-mist-id="mist-navbar-compact"]', 'header, nav');
-
-    if (existingOverride) {
-      nextFiles = nextFiles.map((f) =>
-        f.path === overridePath ? { ...f, content: updatedCss } : f,
-      );
-    } else {
-      nextFiles.push({
-        id: createSafeId('file'),
-        path: overridePath,
-        language: 'css',
-        content: updatedCss,
-      });
-    }
-    changed.add(overridePath);
-    summary = 'Reduced navbar vertical padding and tightened header height.';
-  } else if (lower.includes('dark') && (lower.includes('theme') || lower.includes('mode') || lower.includes('background'))) {
-    nextFiles = nextFiles.map((file) => {
-      if (file.path === 'src/App.tsx' || file.path.includes('Navbar')) {
-        const updated = file.content
-          .replace(/bg-stone-50/g, 'bg-zinc-950')
-          .replace(/bg-white/g, 'bg-zinc-900')
-          .replace(/text-stone-900/g, 'text-zinc-100')
-          .replace(/text-zinc-900/g, 'text-zinc-100');
-        if (updated !== file.content) {
-          changed.add(file.path);
-          return { ...file, content: updated };
-        }
-      }
-      return file;
-    });
-    summary = 'Shifted primary surface and typography palette to high-contrast dark slate.';
-  } else {
-    summary = `Applied targeted refinement for "${instruction.trim()}".`;
-  }
-
-  return {
-    files: nextFiles,
-    summary,
-    changedFiles: Array.from(changed),
-  };
 }
 
 export function buildExportManifest(

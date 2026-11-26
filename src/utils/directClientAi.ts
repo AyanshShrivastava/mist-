@@ -5,6 +5,7 @@
  */
 
 import type { AiProviderConfig, ProjectFile, WebSearchOutcome } from '../types/mist';
+import { redactSecrets } from './aiErrors';
 import { normalizeProjectFilePath, inferLanguageFromPath } from './projectOps';
 
 export const CLIENT_SYSTEM_GENERATOR_PROMPT = `You are Mist, a senior product designer, interactive game developer, and React + TypeScript + Tailwind CSS + Three.js engineer.
@@ -32,28 +33,66 @@ Return valid JSON in this exact structure:
   ]
 }`;
 
+function isAllowedCorsGatewayHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return (
+    host === 'generativelanguage.googleapis.com' ||
+    host === 'openrouter.ai' ||
+    host.endsWith('.openrouter.ai') ||
+    host === 'api.groq.com' ||
+    host.endsWith('.groq.com')
+  );
+}
+
+function parseSafeDirectUrl(rawUrl: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('Invalid AI endpoint URL.');
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+    throw new Error('Direct client AI endpoints must use strict HTTPS without embedded credentials.');
+  }
+  return parsed;
+}
+
 export function canUseDirectClient(config?: AiProviderConfig): boolean {
   if (!config || !config.apiKey?.trim()) return false;
   const key = config.apiKey.trim();
-  const base = (config.baseUrl || '').toLowerCase();
-  // Gemini BYOK (AIza key or Google endpoint)
-  if (key.startsWith('AIza') || base.includes('generativelanguage.googleapis.com') || config.provider === 'gemini') {
-    return true;
+  const base = (config.baseUrl || '').trim();
+  if (key.startsWith('AIza') || config.provider === 'gemini') {
+    if (!base) return true;
+    try {
+      const u = parseSafeDirectUrl(base);
+      return u.hostname.toLowerCase() === 'generativelanguage.googleapis.com';
+    } catch {
+      return false;
+    }
   }
-  // OpenRouter or Groq with client CORS support
-  if (base.includes('openrouter.ai') || base.includes('groq.com')) {
-    return true;
+  if (!base) return false;
+  try {
+    const u = parseSafeDirectUrl(base);
+    return isAllowedCorsGatewayHostname(u.hostname);
+  } catch {
+    return false;
   }
-  return false;
 }
 
 export function resolveDirectEndpoint(config: AiProviderConfig): { url: string; headers: Record<string, string> } {
   const apiKey = (config.apiKey || '').trim();
   const base = (config.baseUrl || '').trim().replace(/\/+$/, '');
 
-  if (apiKey.startsWith('AIza') || base.includes('generativelanguage.googleapis.com') || config.provider === 'gemini') {
+  const parsedBase = base ? parseSafeDirectUrl(base) : null;
+  const isGoogle =
+    apiKey.startsWith('AIza') ||
+    parsedBase?.hostname.toLowerCase() === 'generativelanguage.googleapis.com' ||
+    config.provider === 'gemini';
+
+  if (isGoogle) {
     const cleanBase = base || 'https://generativelanguage.googleapis.com/v1beta/openai';
     const endpoint = cleanBase.endsWith('/chat/completions') ? cleanBase : `${cleanBase}/chat/completions`;
+    parseSafeDirectUrl(endpoint);
     return {
       url: endpoint,
       headers: {
@@ -63,13 +102,18 @@ export function resolveDirectEndpoint(config: AiProviderConfig): { url: string; 
     };
   }
 
+  if (!base) {
+    throw new Error('Provider base URL is required for direct client connection.');
+  }
+
   const endpoint = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
+  const parsedEndpoint = parseSafeDirectUrl(endpoint);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${apiKey}`,
   };
 
-  if (endpoint.includes('openrouter.ai')) {
+  if (parsedEndpoint.hostname.toLowerCase() === 'openrouter.ai' || parsedEndpoint.hostname.toLowerCase().endsWith('.openrouter.ai')) {
     headers['HTTP-Referer'] = window.location.origin;
     headers['X-Title'] = 'Mist Website Builder';
   }
@@ -162,8 +206,13 @@ export async function executeDirectGenerate(options: {
 
 Make sure src/App.tsx is the default export and first file. Return only valid JSON.`;
 
+  const model = (config.model || '').trim();
+  if (!model) {
+    throw new Error('Select a verified model before running direct generation.');
+  }
+
   const payload = {
-    model: config.model || 'gemini-2.5-flash',
+    model,
     messages: [
       { role: 'system', content: CLIENT_SYSTEM_GENERATOR_PROMPT },
       { role: 'user', content: userMessage },
@@ -181,10 +230,10 @@ Make sure src/App.tsx is the default export and first file. Return only valid JS
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    const message =
+    const rawMessage =
       (errorData && errorData.error && errorData.error.message) ||
       `Direct API error (${response.status}): ${response.statusText}`;
-    throw new Error(message);
+    throw new Error(redactSecrets(String(rawMessage)));
   }
 
   const reader = response.body?.getReader();

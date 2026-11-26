@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ClerkProvider } from '@clerk/react';
 import App from './App.tsx';
+import MistLogo from './components/MistLogo.tsx';
 import { mistClerkAppearance } from './utils/clerkTheme.ts';
 import './index.css';
 
@@ -25,16 +26,20 @@ function ClerkConfigurationError() {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#090b10] px-6 text-white selection:bg-pink-500 selection:text-white">
-      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-white/5 p-6 backdrop-blur-xl shadow-2xl">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="h-8 w-8 rounded-lg bg-pink-500/20 border border-pink-500/30 flex items-center justify-center text-pink-400 font-bold text-sm">
-            M
-          </div>
-          <h1 className="text-lg font-semibold tracking-tight text-white">Mist — Authentication Setup</h1>
+    <main className="mist-ambient-canvas mist-hero-aurora flex min-h-screen items-center justify-center px-6 py-12">
+      <div className="mist-surface-card w-full max-w-md rounded-2xl p-6 sm:p-7">
+        <div className="flex items-center justify-between gap-3 mb-5">
+          <MistLogo size="md" />
+          <span className="rounded-full border border-zinc-200 bg-zinc-100 px-2.5 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+            Setup
+          </span>
         </div>
-        <p className="text-xs text-white/70 leading-relaxed">
-          Clerk is the sole identity provider for Mist. Provide your Clerk Publishable Key or launch with local development defaults.
+
+        <h1 className="font-display text-lg font-semibold tracking-tight text-zinc-950 dark:text-white">
+          Connect authentication to launch Mist
+        </h1>
+        <p className="mt-1.5 text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+          Provide your Clerk Publishable Key (<code className="font-mono">VITE_CLERK_PUBLISHABLE_KEY</code>) or launch immediately with local development defaults.
         </p>
 
         <form
@@ -42,13 +47,17 @@ function ClerkConfigurationError() {
             e.preventDefault();
             handleSave(keyInput);
           }}
-          className="mt-5 space-y-3"
+          className="mt-5 space-y-3.5"
         >
           <div>
-            <label className="block text-xs font-medium text-white/80 mb-1.5">
+            <label
+              htmlFor="mist-clerk-pub-key"
+              className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5"
+            >
               Clerk Publishable Key
             </label>
             <input
+              id="mist-clerk-pub-key"
               type="text"
               value={keyInput}
               onChange={(e) => {
@@ -56,24 +65,28 @@ function ClerkConfigurationError() {
                 setError(null);
               }}
               placeholder="pk_test_... or pk_live_..."
-              className="w-full rounded-xl border border-white/10 bg-white/5 px-3.5 py-2.5 text-xs text-white placeholder-white/30 focus:border-pink-500/50 focus:outline-none focus:ring-1 focus:ring-pink-500/50 transition-all font-mono"
+              className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 py-2.5 text-xs text-zinc-950 placeholder:text-zinc-400 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-white dark:placeholder:text-zinc-500 font-mono"
             />
           </div>
 
-          {error && <p className="text-xs text-red-400 font-medium">{error}</p>}
+          {error && (
+            <p role="alert" className="text-xs text-red-600 dark:text-red-400 font-medium">
+              {error}
+            </p>
+          )}
 
-          <div className="flex flex-col gap-2 pt-2">
+          <div className="flex flex-col gap-2 pt-1">
             <button
               type="submit"
               disabled={!keyInput.trim()}
-              className="w-full rounded-xl bg-pink-500 px-4 py-2.5 text-xs font-semibold text-white hover:bg-pink-400 disabled:opacity-50 transition-all cursor-pointer shadow-lg shadow-pink-500/20"
+              className="w-full min-h-[42px] rounded-xl mist-primary-gradient px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-45 cursor-pointer"
             >
-              Save Key & Launch Mist
+              Save Key &amp; Launch Mist
             </button>
             <button
               type="button"
               onClick={() => handleSave('pk_test_Y2xlcmsuaW5zcGlyZWQucHVtYS03NC5sY2wuZGV2JA')}
-              className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2 text-xs font-medium text-white/80 hover:bg-white/[0.08] hover:text-white transition-all cursor-pointer"
+              className="w-full min-h-[40px] rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 cursor-pointer"
             >
               Launch with Development Key
             </button>
